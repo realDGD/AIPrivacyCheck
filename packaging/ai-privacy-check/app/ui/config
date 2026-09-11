@@ -1,7 +1,7 @@
 {
   ".url": {
     "ai-privacy-check.main": {
-      "title": "隐私净化器",
+      "title": "AI 脱敏器",
       "icon": "images/icon_{0}.png",
       "type": "iframe",
       "protocol": "",

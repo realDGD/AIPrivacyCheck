@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "卸载保留选项",
+    "items": [
+      {
+        "type": "radio",
+        "field": "wizard_data_action",
+        "label": "数据清理策略",
+        "initValue": "keep",
+        "options": [
+          {
+            "label": "保留全部模型、运行环境与应用设置（推荐，便于以后重装无需重新下载）",
+            "value": "keep"
+          },
+          {
+            "label": "仅保留已下载模型与隔离运行环境，清理配置、日志与临时缓存",
+            "value": "keep_runtime"
+          },
+          {
+            "label": "彻底删除应用管理的全部模型副本、运行环境与配置缓存（不影响共享模型目录源文件）",
+            "value": "delete"
+          }
+        ]
+      }
+    ]
+  }
+]

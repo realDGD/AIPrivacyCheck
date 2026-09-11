@@ -1,27 +1,31 @@
-# 隐私净化器（AI Privacy Check）
+# AI 脱敏器（AI Privacy Check）
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.4.0`（fnOS Native 原生应用）
+当前版本：`0.4.1`（fnOS Native 原生应用）
 
 ## 已实现功能
 
 - **四级插拔式检测与策略引擎**：
   1. **确定性多语言与中文规则（Tier 1，`BuiltInRuleDetector`）**：身份证号、手机号、国际电话（E.164）、固定电话、银行卡、护照、统一社会信用代码、车牌、姓名、地址、邮箱、账号/单号、出生日期、社交账号、IPv4、完整 IPv6、MAC、BIC/SWIFT、IBAN、US SSN、数据库连接串（`DATABASE_URI`）、私钥与各类 API Token/凭证。内置严格静态敏感度等级（PL4/PL3/PL2），不可被模型随意降级。
   2. **中文信息抽取引擎（Tier 2，`ChineseIEDetector`）**：针对中文姓名、复杂行政区划拓扑与建筑地址进行基于语言学特征和安全跨度对齐的抽取（`safe_sequential_span_alignment`，彻底杜绝同名多次出现时的偏移碰撞）；内置零依赖启发式抽取，支持可选适配 ModelScope `siamese-uie`。
-  3. **通用 PII 实体抽取（Tier 3，`GLiNERDetector`）**：支持 ModelScope 官方模型 `gliner-pii-edge`（轻量 edge 版，~500MB）与 `gliner-pii-base`（高精度版，~1.2GB），利用模型原生字符偏移实现零偏移漂移的跨语言 PII 抽取。
-  4. **深度语义隐私推理（Tier 4，`MemPrivacyDetector`）**：支持 ModelScope 官方模型 `memprivacy-1.7b-rl`（约 3.5GB）与 `memprivacy-4b-rl`（约 8.0GB），结合上下文对深层隐性隐私（健康状况、人际隐私、资产交易）进行逻辑判定。
+  3. **通用 PII 实体抽取（Tier 3，`GLiNERDetector`）**：支持 ModelScope 官方模型 `gliner-pii-edge`（轻量 edge 版，~310MB）与 `gliner-pii-base`（高精度版，~850MB），利用模型原生字符偏移实现零偏移漂移的跨语言 PII 抽取。
+  4. **深度语义隐私推理（Tier 4，`MemPrivacyDetector`）**：支持 ModelScope 官方模型 `memprivacy-1.7b-rl`（约 3.4GB）与 `memprivacy-4b-rl`（约 7.8GB），结合上下文对深层隐性隐私（健康状况、人际隐私、资产交易）进行逻辑判定，使用官方真实系统 Prompt 与容错结构化抽取。
 - **PL1 - PL4 隐私分级策略与仲裁**：
   - **PL4（核心密码凭据）**：数据库连接串、私钥、API 令牌、系统密码。
   - **PL3（高敏合规凭证）**：身份证、护照、银行卡、医疗病历、财务资产、精确轨迹。
   - **PL2（可识别个人信息）**：姓名、手机、邮箱、地址、社交账号、IP、车牌。
   - **PL1（低敏偏好标签）**：个人公开偏好与低关联职业标签。
   - **层级仲裁机制**：校验位强规则 > 严格规则 > 专用实体抽取模型 > 生成式推理模型，高置信法定凭据永不被模型覆盖。
-- **设备加速与智能回退**：支持 `NVIDIA CUDA` / `CPU` / `Auto` 多推理设备管理。采用惰性探测机制（仅在模型推理时探测，纯规则扫描零 PyTorch 开销）；CUDA 不可用时自动、平滑降级至 CPU，并向界面报告明确诊断原因。
-- **模型全生命周期管理（ModelScope 魔搭社区官方源）**：
-  - **在线下载**：一键从 ModelScope (魔搭社区) 下载模型权重与推理依赖，支持断点续传与沙箱暂存。
-  - **本地授权目录导入**：支持从 fnOS 用户授权目录（如预下载的共享文件夹）手动导入模型，经过完整性校验与暂存区原子替换（`os.replace`），断电或异常不破坏已有模型。
-  - **动态卸载与热重载**：管理员可一键卸载释放存储与显存空间，即时刷新引擎状态。
+- **硬件探测与隔离运行时架构**：
+  - **HardwareProbe**：直接执行 `nvidia-smi` 获取权威主机硬件与驱动信息，彻底解耦主服务 Python 与 PyTorch/Paddle 框架依赖。
+  - **隔离 Runtime Profiles**：为 `torch-cpu`、`torch-cuda`、`paddle-cpu`、`paddle-cuda` 分配独立 Python 虚拟环境，互不污染。
+  - **智能策略与安全降级**：根据模型所需框架及其 CUDA 就绪状态动态分派，未安装或异常时平滑回退至 CPU 或内置规则，服务永远不宕机。
+- **模型共享目录与生命周期管理（ModelScope 官方源）**：
+  - **fnOS 共享模型源**：支持通过 fnOS `data-share` 共享目录（`AI 脱敏器/models`）放置离线模型，应用自动扫描并一键导入。
+  - **私有应用模型副本**：应用管理副本激活于 `${TRIM_PKGVAR}/data/models/`，与用户源文件隔离，保证运行稳定性。
+  - **授权边界保护**：严格校验 `realpath` 规范路径，限制在共享模型目录、`TRIM_DATA_ACCESSIBLE_PATHS` 或应用私有目录下，杜绝越权访问。
+  - **安全卸载保留策略**：支持三档卸载策略（默认 `keep` 保留全部模型与环境；`keep_runtime` 仅保留模型与环境；`delete` 彻底删除应用数据），且**绝不删除用户共享目录源文件**。
 - **严格校验器矩阵**：中国身份证 18 位校验码与出生日期、银行卡 Luhn 算法、统一社会信用代码 GB 32100 校验码、IBAN Mod-97 校验、IPv4/IPv6 合法性、MAC 地址格式。
 - **稳定可逆占位符**：中文类型前缀 + 序号 + SHA-256 局部指纹（如 `⟦姓名_01_B94F⟧`），同一原值全局一致，AI 回复后精确放回。
 - **端到端隐私边界**：文本检测与还原全在本地或浏览器完成；无数据库、不记日志正文；加密保险箱在浏览器端使用 PBKDF2-SHA256 + AES-256-GCM 本地加解密导出。
@@ -80,9 +84,20 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.4.0_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.4.1_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
+
+## 模型存储与管理位置说明
+
+- **应用管理模型副本**：位于 `${TRIM_PKGVAR}/data/models/`，由系统自动维护，不建议用户手动修改。
+- **用户共享模型源目录**：位于 `AI 脱敏器/models`（通过 fnOS `data-share` 挂载），专供用户自行存放从魔搭下载的大模型文件。
+- **典型使用流程**：
+  1. 用户在 NAS 共享文件夹 `AI 脱敏器/models/` 中放入模型（如 `gliner-pii-edge` 或 `memprivacy-1.7b-rl`）；
+  2. 打开应用“模型与硬件”面板，点击“扫描共享目录”；
+  3. 系统自动校验完整性并提供“导入到应用”按钮；
+  4. 应用执行暂存校验并原子激活私有副本；
+  5. **卸载保护**：卸载应用时无论选择何种策略，默认均绝不删除用户手动放入共享目录的模型源文件。
 
 ## 模型管理与硬件加速
 

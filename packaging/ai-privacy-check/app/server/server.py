@@ -66,8 +66,16 @@ class ModelLifecycleController:
             "installing": running,
             "install_states": install_states,
             "device": device_diag,
+            "shared_dirs": self.get_shared_dirs(),
+            "shared_candidates": self.scan_shared(),
             "log_tail": self._log_tail(),
         }
+
+    def scan_shared(self) -> List[Dict[str, Any]]:
+        return model_installer.scan_shared_models_directory(self.data_dir)
+
+    def get_shared_dirs(self) -> List[str]:
+        return [str(d) for d in model_installer.get_shared_models_dirs()]
 
     def _log_tail(self, lines: int = 16) -> List[str]:
         if not self.log_file.is_file():
@@ -137,7 +145,7 @@ INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.4.0"
+    server_version = "AIPrivacyCheck/0.4.1"
 
     def log_message(self, fmt: str, *args) -> None:
         safe_path = urlsplit(self.path).path
@@ -218,7 +226,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.4.0",
+                    "version": "0.4.1",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },
@@ -230,6 +238,20 @@ class AppHandler(BaseHTTPRequestHandler):
             payload["is_admin"] = self._is_admin()
             payload["disk_hint_gb"] = "4-8"
             self._json(HTTPStatus.OK, payload)
+            return
+
+        if route == "/api/model/shared/scan":
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "shared_dirs": INSTALLER.get_shared_dirs(),
+                    "candidates": INSTALLER.scan_shared(),
+                },
+            )
+            return
+
+        if route == "/api/device":
+            self._json(HTTPStatus.OK, DEVICE_MANAGER.probe_diagnostics(force_refresh=True))
             return
 
         self._serve_static(route)
@@ -276,6 +298,25 @@ class AppHandler(BaseHTTPRequestHandler):
                 source_path = str(payload.get("source_path", "")).strip()
                 if not source_path:
                     raise ValueError("必须指定模型导入路径 source_path")
+                ok, message = INSTALLER.import_model(model_name, source_path)
+                status = HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST
+                self._json(status, {"ok": ok, "message": message, "status": INSTALLER.status()})
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"导入失败: {exc}"})
+            return
+
+        if route == "/api/model/shared/import":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以导入模型"})
+                return
+            try:
+                payload = self._read_json()
+                model_name = str(payload.get("model", "")).strip()
+                source_path = str(payload.get("source_path", "")).strip()
+                if not model_name or not source_path:
+                    raise ValueError("必须指定 model 和 source_path")
                 ok, message = INSTALLER.import_model(model_name, source_path)
                 status = HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST
                 self._json(status, {"ok": ok, "message": message, "status": INSTALLER.status()})

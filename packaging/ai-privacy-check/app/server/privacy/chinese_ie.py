@@ -213,7 +213,7 @@ class ChineseIEDetector:
                 installed = True
                 model_path = str(model_dir)
 
-        actual_device, _ = DEVICE_MANAGER.resolve()
+        actual_device, _, _ = DEVICE_MANAGER.resolve_for_framework("paddle")
         return {
             "id": self.id,
             "slot": self.slot,
@@ -248,7 +248,7 @@ class ChineseIEDetector:
             try:
                 from paddlenlp import Taskflow  # type: ignore
 
-                device, _ = DEVICE_MANAGER.resolve()
+                device, _, _ = DEVICE_MANAGER.resolve_for_framework("paddle")
                 use_gpu = device == "cuda"
                 self._uie_model = Taskflow(
                     "information_extraction",

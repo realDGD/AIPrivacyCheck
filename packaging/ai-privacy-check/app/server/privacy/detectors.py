@@ -132,7 +132,7 @@ class GLiNERDetector(Detector):
         has_config = (model_dir / "config.json").is_file() or (model_dir / "gliner_config.json").is_file()
         has_weights = bool(list(model_dir.glob("*.safetensors")) or list(model_dir.glob("*.bin")))
         installed = model_dir.is_dir() and has_config and has_weights
-        actual_device, _ = DEVICE_MANAGER.resolve()
+        actual_device, _, _ = DEVICE_MANAGER.resolve_for_framework("torch")
         descriptor = get_model_descriptor(self.active_model_id)
         return {
             "id": self.id,
@@ -157,7 +157,7 @@ class GLiNERDetector(Detector):
             try:
                 from gliner import GLiNER  # type: ignore
 
-                actual_device, _ = DEVICE_MANAGER.resolve()
+                actual_device, _, _ = DEVICE_MANAGER.resolve_for_framework("torch")
                 device = "cuda" if actual_device == "cuda" else "cpu"
                 self._model = GLiNER.from_pretrained(str(model_dir), local_files_only=True).to(device)
                 self._model_available = True
@@ -228,6 +228,160 @@ class GLiNERDetector(Detector):
         return entities, warnings
 
 
+MEMPRIVACY_SYSTEM_PROMPT = (
+    "You are a professional privacy extraction assistant. "
+    "Please identify privacy-sensitive information in the user's text and output a JSON list "
+    "containing original_text, privacy_type, and privacy_level (PL2, PL3, or PL4). "
+    "Do not modify or mask original_text."
+)
+
+MEMPRIVACY_TYPE_MAP: Dict[str, Tuple[str, str]] = {
+    "real name": ("PERSON", "Real Name"),
+    "name": ("PERSON", "Real Name"),
+    "姓名": ("CN_NAME", "Real Name"),
+    "人名": ("CN_NAME", "Real Name"),
+    "phone": ("PHONE", "Phone Number"),
+    "phone number": ("PHONE", "Phone Number"),
+    "telephone": ("PHONE", "Phone Number"),
+    "手机号": ("CN_PHONE_NUMBER", "Phone Number"),
+    "电话": ("PHONE", "Phone Number"),
+    "email": ("EMAIL", "Email Address"),
+    "email address": ("EMAIL", "Email Address"),
+    "邮箱": ("EMAIL", "Email Address"),
+    "id card": ("GOVERNMENT_ID", "ID Card"),
+    "id number": ("GOVERNMENT_ID", "ID Card"),
+    "身份证": ("CN_ID_CARD", "ID Card"),
+    "身份证号": ("CN_ID_CARD", "ID Card"),
+    "bank card": ("CREDIT_CARD", "Bank Card"),
+    "card number": ("CREDIT_CARD", "Bank Card"),
+    "银行卡": ("CN_BANK_CARD", "Bank Card"),
+    "password": ("PASSWORD", "Password"),
+    "code": ("PASSWORD", "Secret / Password"),
+    "密码": ("PASSWORD", "Password"),
+    "口令": ("PASSWORD", "Password"),
+    "address": ("ADDRESS", "Physical Address"),
+    "住址": ("CN_ADDRESS", "Physical Address"),
+    "家庭住址": ("CN_ADDRESS", "Physical Address"),
+    "地址": ("ADDRESS", "Physical Address"),
+    "medical record": ("MEDICAL_RECORD_ID", "Medical Record"),
+    "health": ("MEDICAL", "Health Condition"),
+    "病历": ("MEDICAL_RECORD_ID", "Medical Record"),
+    "病情": ("MEDICAL", "Health Condition"),
+    "organization": ("ORGANIZATION", "Organization"),
+    "company": ("ORGANIZATION", "Organization"),
+    "公司": ("ORGANIZATION", "Organization"),
+    "机构": ("ORGANIZATION", "Organization"),
+    "学校": ("ORGANIZATION", "Organization"),
+}
+
+
+def parse_memprivacy_json(
+    raw_output: str, full_text: str
+) -> List[Tuple[str, str, float, Optional[str], Optional[str], Optional[str]]]:
+    """Extracts structured privacy entities from MemPrivacy JSON output into typed tuples.
+
+    Tuple layout:
+      (entity_type, snippet, confidence, semantic_type, privacy_level, context_hint)
+    """
+    if not raw_output or not full_text:
+        return []
+
+    cleaned = raw_output.strip()
+    # Match json code block or standalone bracketed array
+    json_str: Optional[str] = None
+    if "```json" in cleaned:
+        parts = cleaned.split("```json", 1)[1]
+        if "```" in parts:
+            json_str = parts.split("```", 1)[0].strip()
+    elif "```" in cleaned:
+        parts = cleaned.split("```", 1)[1]
+        if "```" in parts:
+            json_str = parts.split("```", 1)[0].strip()
+
+    if not json_str:
+        import re
+
+        array_match = re.search(r"\[\s*\{.*?\}\s*\]", cleaned, re.DOTALL)
+        if array_match:
+            json_str = array_match.group(0)
+
+    if not json_str and cleaned.startswith("[") and cleaned.endswith("]"):
+        json_str = cleaned
+
+    parsed_items: List[Any] = []
+    if json_str:
+        import json
+        import re
+
+        # Remove trailing commas before closing braces/brackets
+        sanitized = re.sub(r",\s*([\]\}])", r"\1", json_str)
+        try:
+            data = json.loads(sanitized)
+            if isinstance(data, list):
+                parsed_items = data
+        except Exception:
+            parsed_items = []
+
+    results: List[Tuple[str, str, float, Optional[str], Optional[str], Optional[str]]] = []
+    for item in parsed_items:
+        if not isinstance(item, dict):
+            continue
+
+        # Extract original_text
+        snippet = (
+            item.get("original_text")
+            or item.get("text")
+            or item.get("entity")
+            or item.get("value")
+            or item.get("content")
+        )
+        if not snippet or not isinstance(snippet, str):
+            continue
+        snippet = snippet.strip()
+        if not snippet or snippet not in full_text:
+            continue
+
+        # Extract privacy_type
+        raw_type = (
+            item.get("privacy_type")
+            or item.get("type")
+            or item.get("category")
+            or item.get("entity_type")
+            or item.get("label")
+            or "PII"
+        )
+        raw_type_str = str(raw_type).strip()
+        lookup_key = raw_type_str.lower()
+        mapped_type, sem_type = MEMPRIVACY_TYPE_MAP.get(
+            lookup_key,
+            (raw_type_str.upper().replace(" ", "_"), raw_type_str),
+        )
+
+        # Extract privacy_level
+        raw_pl = (
+            item.get("privacy_level")
+            or item.get("level")
+            or item.get("pl")
+            or item.get("risk_level")
+        )
+        pl_val: Optional[str] = None
+        if raw_pl:
+            cand = str(raw_pl).strip().upper()
+            if cand in (PL2, PL3, PL4, "PL1"):
+                pl_val = cand
+
+        if not pl_val:
+            pl_val = resolve_privacy_level(mapped_type, semantic_type=sem_type)
+
+        context_hint = item.get("context") or item.get("context_hint")
+        if context_hint and not isinstance(context_hint, str):
+            context_hint = None
+
+        results.append((mapped_type, snippet, 0.95, sem_type, pl_val, context_hint))
+
+    return results
+
+
 class MemPrivacyDetector(Detector):
     """Tier 3: Deep semantic privacy inference model (ModelScope: MemTensor/MemPrivacy)."""
 
@@ -263,7 +417,7 @@ class MemPrivacyDetector(Detector):
             and (model_dir / "config.json").is_file()
             and (any(model_dir.glob("*.safetensors")) or any(model_dir.glob("*.bin")))
         )
-        actual_device, _ = DEVICE_MANAGER.resolve()
+        actual_device, _, _ = DEVICE_MANAGER.resolve_for_framework("torch")
         descriptor = get_model_descriptor(self.active_model_id)
         return {
             "id": self.id,
@@ -288,7 +442,7 @@ class MemPrivacyDetector(Detector):
             try:
                 from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
 
-                actual_device, _ = DEVICE_MANAGER.resolve()
+                actual_device, _, _ = DEVICE_MANAGER.resolve_for_framework("torch")
                 device = "cuda" if actual_device == "cuda" else "cpu"
                 self._tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
                 self._model = AutoModelForCausalLM.from_pretrained(
@@ -327,8 +481,6 @@ class MemPrivacyDetector(Detector):
             return entities, warnings
 
         try:
-            # When model inference runs, parse its structured output
-            # (original_text, privacy_type, privacy_level) and safely resolve exact spans
             raw_predictions = self._infer_memprivacy(text)
             resolved, resolve_warns = resolve_semantic_spans(text, raw_predictions, f"{self.name}:{self.active_model_id}")
             entities.extend(resolved)
@@ -340,5 +492,42 @@ class MemPrivacyDetector(Detector):
 
     def _infer_memprivacy(self, text: str) -> List[Tuple[str, str, float, Optional[str], Optional[str], Optional[str]]]:
         """Runs generation or token evaluation and extracts (entity_type, snippet, conf, semantic_type, pl, context)."""
-        # Internal model invocation returning typed extraction tuples
-        return []
+        if not self._model or not self._tokenizer:
+            return []
+
+        try:
+            messages = [
+                {"role": "system", "content": MEMPRIVACY_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ]
+            if hasattr(self._tokenizer, "apply_chat_template"):
+                prompt = self._tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                prompt = (
+                    f"<|im_start|>system\n{MEMPRIVACY_SYSTEM_PROMPT}<|im_end|>\n"
+                    f"<|im_start|>user\n{text}<|im_end|>\n"
+                    f"<|im_start|>assistant\n"
+                )
+
+            inputs = self._tokenizer(prompt, return_tensors="pt")
+            if hasattr(self._model, "device"):
+                inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
+
+            import torch
+            with torch.no_grad():
+                outputs = self._model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    temperature=None,
+                    top_p=None,
+                )
+
+            input_len = inputs["input_ids"].shape[1]
+            generated_tokens = outputs[0][input_len:]
+            generated_text = self._tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            return parse_memprivacy_json(generated_text, text)
+        except Exception:
+            return []

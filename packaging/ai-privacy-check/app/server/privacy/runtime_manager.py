@@ -1,0 +1,345 @@
+"""Isolated Model Runtime Manager for AI Privacy Check.
+
+Manages isolated virtual environments (venv) for CPU and CUDA profiles across frameworks:
+  - torch-cpu
+  - torch-cuda
+  - paddle-cpu
+  - paddle-cuda
+
+Decoupled from control-plane Python. Control plane does not import torch/paddle.
+Workers and framework verification run exclusively within the profile's isolated interpreter.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+PYPI_MIRROR_URL = "https://mirrors.aliyun.com/pypi/simple/"
+PYPI_OFFICIAL_URL = "https://pypi.org/simple"
+PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
+PADDLE_CPU_INDEX = "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
+PADDLE_CUDA_INDEX = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+
+PROFILE_TORCH_CPU = "torch-cpu"
+PROFILE_TORCH_CUDA = "torch-cuda"
+PROFILE_PADDLE_CPU = "paddle-cpu"
+PROFILE_PADDLE_CUDA = "paddle-cuda"
+
+ALL_PROFILES = (
+    PROFILE_TORCH_CPU,
+    PROFILE_TORCH_CUDA,
+    PROFILE_PADDLE_CPU,
+    PROFILE_PADDLE_CUDA,
+)
+
+
+@dataclass(frozen=True)
+class RuntimeProfileDescriptor:
+    profile: str
+    framework: str  # "torch" or "paddle"
+    device_target: str  # "cpu" or "cuda"
+    display_name: str
+    description: str
+
+
+RUNTIME_PROFILES: Dict[str, RuntimeProfileDescriptor] = {
+    PROFILE_TORCH_CPU: RuntimeProfileDescriptor(
+        profile=PROFILE_TORCH_CPU,
+        framework="torch",
+        device_target="cpu",
+        display_name="PyTorch CPU 运行时",
+        description="适用于 GLiNER 与 MemPrivacy 模型的纯 CPU 轻量级推理环境。",
+    ),
+    PROFILE_TORCH_CUDA: RuntimeProfileDescriptor(
+        profile=PROFILE_TORCH_CUDA,
+        framework="torch",
+        device_target="cuda",
+        display_name="PyTorch CUDA 运行时",
+        description="基于 NVIDIA CUDA 加速的 PyTorch 环境，提供高吞吐大模型推理能力。",
+    ),
+    PROFILE_PADDLE_CPU: RuntimeProfileDescriptor(
+        profile=PROFILE_PADDLE_CPU,
+        framework="paddle",
+        device_target="cpu",
+        display_name="PaddlePaddle CPU 运行时",
+        description="专用于 SiameseUIE 中文信息抽取模型的 CPU 推理环境。",
+    ),
+    PROFILE_PADDLE_CUDA: RuntimeProfileDescriptor(
+        profile=PROFILE_PADDLE_CUDA,
+        framework="paddle",
+        device_target="cuda",
+        display_name="PaddlePaddle CUDA 运行时",
+        description="基于 NVIDIA CUDA 加速的 Paddle 环境，优化中文 UIE 批量抽取延时。",
+    ),
+}
+
+
+class RuntimeManager:
+    """Manages independent virtual environments for each model runtime profile."""
+
+    def __init__(
+        self,
+        data_dir: Path,
+        control_python: Optional[str] = None,
+        command_runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+    ) -> None:
+        self.data_dir = data_dir
+        self.runtimes_dir = data_dir / "runtimes"
+        self.control_python = control_python or sys.executable
+        self._runner = command_runner or self._default_runner
+        self._lock = threading.Lock()
+        self._probe_cache: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _default_runner(
+        cmd: List[str],
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+        timeout: int = 15,
+    ) -> Tuple[int, str, str]:
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=cwd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            return res.returncode, res.stdout, res.stderr
+        except FileNotFoundError:
+            return 127, "", f"command not found: {cmd[0] if cmd else ''}"
+        except subprocess.TimeoutExpired:
+            return 124, "", "command timed out"
+        except Exception as exc:
+            return 1, "", str(exc)
+
+    def profile_dir(self, profile: str) -> Path:
+        return self.runtimes_dir / profile
+
+    def venv_dir(self, profile: str) -> Path:
+        return self.profile_dir(profile) / "venv"
+
+    def interpreter_path(self, profile: str) -> Optional[Path]:
+        venv_python = self.venv_dir(profile) / "bin" / "python"
+        if venv_python.is_file() and os.access(venv_python, os.X_OK):
+            return venv_python
+        # Check Windows fallback just in case
+        venv_python_win = self.venv_dir(profile) / "Scripts" / "python.exe"
+        if venv_python_win.is_file():
+            return venv_python_win
+        return None
+
+    def is_installed(self, profile: str) -> bool:
+        interp = self.interpreter_path(profile)
+        installed_flag = self.profile_dir(profile) / "installed.json"
+        return interp is not None and installed_flag.is_file()
+
+    def probe_profile(self, profile: str, force_refresh: bool = False) -> Dict[str, Any]:
+        """Probes an isolated runtime profile via its dedicated interpreter."""
+        with self._lock:
+            if not force_refresh and profile in self._probe_cache:
+                return dict(self._probe_cache[profile])
+
+        descriptor = RUNTIME_PROFILES.get(profile)
+        if not descriptor:
+            return {"installed": False, "verified": False, "error": f"Unknown profile: {profile}"}
+
+        interp = self.interpreter_path(profile)
+        if not interp:
+            # Check 0.4.0 legacy unmigrated path
+            legacy_dir = self.runtimes_dir / descriptor.framework
+            legacy_hint = legacy_dir.is_dir()
+            status: Dict[str, Any] = {
+                "profile": profile,
+                "framework": descriptor.framework,
+                "device_target": descriptor.device_target,
+                "display_name": descriptor.display_name,
+                "installed": False,
+                "verified": False,
+                "cuda_available": False,
+                "framework_version": None,
+                "cuda_version": None,
+                "device_name": None,
+                "device_count": 0,
+                "interpreter": None,
+                "error": "运行时未安装" + ("（检测到旧版非隔离运行时，请重新安装以升级隔离环境）" if legacy_hint else ""),
+                "legacy_unmigrated": legacy_hint,
+            }
+            with self._lock:
+                self._probe_cache[profile] = status
+            return status
+
+        # Execute framework-specific verification probe in isolated subprocess
+        if descriptor.framework == "torch":
+            probe_code = (
+                "import json, sys, torch\n"
+                "is_cuda = bool(torch.cuda.is_available())\n"
+                "res = {\n"
+                "  'framework_version': torch.__version__,\n"
+                "  'cuda_version': getattr(torch.version, 'cuda', None),\n"
+                "  'cuda_available': is_cuda,\n"
+                "  'device_count': torch.cuda.device_count() if is_cuda else 0,\n"
+                "  'device_name': torch.cuda.get_device_name(0) if is_cuda and torch.cuda.device_count() > 0 else None\n"
+                "}\n"
+                "print(json.dumps(res))\n"
+            )
+        else:
+            probe_code = (
+                "import json, sys, paddle\n"
+                "is_cuda = bool(paddle.is_compiled_with_cuda())\n"
+                "res = {\n"
+                "  'framework_version': paddle.__version__,\n"
+                "  'cuda_available': is_cuda,\n"
+                "  'device_count': paddle.device.cuda.device_count() if is_cuda else 0,\n"
+                "  'device_name': paddle.device.cuda.get_device_name() if is_cuda and paddle.device.cuda.device_count() > 0 else None\n"
+                "}\n"
+                "print(json.dumps(res))\n"
+            )
+
+        cmd = [str(interp), "-c", probe_code]
+        retcode, stdout, stderr = self._runner(cmd, timeout=10)
+        if retcode != 0:
+            err_msg = stderr.strip() or stdout.strip() or f"Probe failed with code {retcode}"
+            status = {
+                "profile": profile,
+                "framework": descriptor.framework,
+                "device_target": descriptor.device_target,
+                "display_name": descriptor.display_name,
+                "installed": True,
+                "verified": False,
+                "cuda_available": False,
+                "framework_version": None,
+                "cuda_version": None,
+                "device_name": None,
+                "device_count": 0,
+                "interpreter": str(interp),
+                "error": f"运行时验证失败: {err_msg}",
+            }
+        else:
+            try:
+                data = json.loads(stdout.strip())
+                cuda_avail = bool(data.get("cuda_available", False))
+                # For CUDA profile, verified requires cuda_available is True
+                if descriptor.device_target == "cuda":
+                    verified = cuda_avail
+                    err = None if cuda_avail else "框架已安装，但未检测到可用 CUDA 驱动与硬件。"
+                else:
+                    verified = True
+                    err = None
+
+                status = {
+                    "profile": profile,
+                    "framework": descriptor.framework,
+                    "device_target": descriptor.device_target,
+                    "display_name": descriptor.display_name,
+                    "installed": True,
+                    "verified": verified,
+                    "cuda_available": cuda_avail,
+                    "framework_version": data.get("framework_version"),
+                    "cuda_version": data.get("cuda_version"),
+                    "device_name": data.get("device_name"),
+                    "device_count": data.get("device_count", 0),
+                    "interpreter": str(interp),
+                    "error": err,
+                }
+            except Exception as parse_exc:
+                status = {
+                    "profile": profile,
+                    "framework": descriptor.framework,
+                    "device_target": descriptor.device_target,
+                    "display_name": descriptor.display_name,
+                    "installed": True,
+                    "verified": False,
+                    "cuda_available": False,
+                    "framework_version": None,
+                    "cuda_version": None,
+                    "device_name": None,
+                    "device_count": 0,
+                    "interpreter": str(interp),
+                    "error": f"无法解析验证输出: {parse_exc}",
+                }
+
+        with self._lock:
+            self._probe_cache[profile] = status
+        return status
+
+    def probe_all(self, force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+        results = {}
+        for profile in ALL_PROFILES:
+            results[profile] = self.probe_profile(profile, force_refresh=force_refresh)
+        return results
+
+    def best_runtime_for_framework(
+        self,
+        framework: str,
+        prefer_cuda: bool = True,
+        hardware_nvidia_available: bool = False,
+    ) -> Optional[str]:
+        """Resolves the best available runtime profile for a given framework."""
+        cuda_profile = f"{framework}-cuda"
+        cpu_profile = f"{framework}-cpu"
+
+        cuda_status = self.probe_profile(cuda_profile)
+        cpu_status = self.probe_profile(cpu_profile)
+
+        if prefer_cuda and hardware_nvidia_available:
+            if cuda_status.get("installed") and cuda_status.get("verified") and cuda_status.get("cuda_available"):
+                return cuda_profile
+
+        if cpu_status.get("installed") and cpu_status.get("verified"):
+            return cpu_profile
+
+        if cuda_status.get("installed") and cuda_status.get("verified") and cuda_status.get("cuda_available"):
+            return cuda_profile
+
+        return None
+
+    def run_in_runtime(
+        self,
+        profile: str,
+        args: List[str],
+        cwd: Optional[Path] = None,
+        env_overrides: Optional[Dict[str, str]] = None,
+        timeout: int = 60,
+    ) -> Tuple[int, str, str]:
+        """Executes a command using the isolated virtual environment interpreter."""
+        interp = self.interpreter_path(profile)
+        if not interp:
+            return 127, "", f"Runtime {profile} is not installed or interpreter missing."
+
+        cmd = [str(interp)] + args
+        env = os.environ.copy()
+        venv_root = str(self.venv_dir(profile))
+        env["VIRTUAL_ENV"] = venv_root
+        env["PATH"] = f"{venv_root}/bin:{env.get('PATH', '')}"
+        if env_overrides:
+            env.update(env_overrides)
+
+        return self._runner(cmd, cwd=cwd, env=env, timeout=timeout)
+
+
+_GLOBAL_MANAGER: Optional[RuntimeManager] = None
+
+
+def get_runtime_manager(data_dir: Optional[Path] = None) -> RuntimeManager:
+    global _GLOBAL_MANAGER
+    if _GLOBAL_MANAGER is None:
+        if data_dir is None:
+            data_dir = Path("/tmp")
+        _GLOBAL_MANAGER = RuntimeManager(data_dir)
+    elif data_dir is not None and _GLOBAL_MANAGER.data_dir != data_dir:
+        _GLOBAL_MANAGER = RuntimeManager(data_dir)
+    return _GLOBAL_MANAGER

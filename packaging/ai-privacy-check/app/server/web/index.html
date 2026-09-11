@@ -5,21 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <meta name="description" content="在 fnOS 本地检测、脱敏并恢复中英文隐私字段。" />
-    <title>隐私净化器 · AI Privacy Check</title>
+    <title>AI 脱敏器 · AI Privacy Check</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="app.js" defer></script>
   </head>
   <body>
     <div class="page-shell">
       <header class="topbar">
-        <a class="brand" href="./" aria-label="隐私净化器首页">
+        <a class="brand" href="./" aria-label="AI 脱敏器首页">
           <span class="brand-mark" aria-hidden="true">
             <svg viewBox="0 0 48 48" role="img">
               <path d="M24 4 41 10v12c0 11-6.8 18.5-17 22C13.8 40.5 7 33 7 22V10l17-6Z" />
               <path d="M18 24.5 22 29l8.5-10" />
             </svg>
           </span>
-          <span><strong>隐私净化器</strong><small>AI Privacy Check</small></span>
+          <span><strong>AI 脱敏器</strong><small>AI Privacy Check</small></span>
         </a>
         <div class="topbar-actions">
           <span class="local-status"><i></i>本地处理</span>
@@ -149,24 +149,25 @@
         </section>
 
         <section class="view" id="modelView" hidden>
-          <div class="model-grid">
             <article class="panel model-card">
-              <span class="eyebrow">COMPUTE DEVICE</span>
+              <span class="eyebrow">COMPUTE DEVICE & RUNTIMES</span>
               <div class="model-title-row">
-                <div><h2>计算设备管理</h2><p>NVIDIA CUDA / CPU 自动检测与安全降级</p></div>
+                <div><h2>计算设备与运行时</h2><p>NVIDIA 硬件探测与框架隔离运行时状态</p></div>
                 <span class="status-badge" id="deviceStatusBadge">检测中</span>
               </div>
               <div class="device-controls" style="margin: 12px 0;">
                 <label style="display:flex; align-items:center; gap:8px; font-weight:600; font-size:13px;">
-                  推理目标设备:
-                  <select id="deviceSelect" style="padding:4px 8px; border-radius:6px; border:1px solid var(--line);">
+                  全局设备偏好:
+                  <select id="deviceSelect" style="padding:4px 8px; border-radius:6px; border:1px solid var(--line); background:var(--paper);">
                     <option value="auto">Auto（优先使用 CUDA）</option>
                     <option value="cpu">强制 CPU</option>
                     <option value="cuda">强制 NVIDIA CUDA</option>
                   </select>
                 </label>
               </div>
-              <p class="model-detail" id="deviceDetail">正在检测硬件环境…</p>
+              <div id="deviceTelemetry" style="display:flex; flex-direction:column; gap:8px; font-size:13px; margin-top:8px;">
+                <p class="model-detail" id="deviceDetail">正在检测硬件环境…</p>
+              </div>
             </article>
 
             <article class="panel model-card" style="grid-column: 1 / -1;">
@@ -182,24 +183,33 @@
             </article>
 
             <article class="panel model-card">
-              <span class="eyebrow">LOCAL MANUAL IMPORT</span>
-              <div class="model-title-row"><div><h2>手动导入已有模型</h2><p>无需外网，从 fnOS 授权目录原子导入</p></div></div>
-              <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
-                <label style="font-size:12px;">模型目标类型
-                  <select id="importModelType" style="width:100%; padding:6px; border-radius:6px; border:1px solid var(--line); margin-top:4px;">
-                    <option value="gliner-pii-edge">GLiNER PII Edge (通用 PII 实体抽取, ~500MB)</option>
-                    <option value="gliner-pii-base">GLiNER PII Base (高精度通用 PII, ~1.2GB)</option>
-                    <option value="memprivacy-1.7b-rl">MemPrivacy 1.7B RL (深度语义隐私推理, ~3.5GB)</option>
-                    <option value="memprivacy-4b-rl">MemPrivacy 4B RL (强语义隐私推理大模型, ~8.0GB)</option>
-                    <option value="siamese-uie">SiameseUIE (中文信息抽取模型, ~400MB)</option>
-                  </select>
-                </label>
-                <label style="font-size:12px;">授权路径
-                  <input id="importSourcePath" type="text" placeholder="例如：/var/apps/ai-privacy-check/shares/models/gliner-pii-edge" style="width:100%; padding:6px; border-radius:6px; border:1px solid var(--line); margin-top:4px;" />
-                </label>
-                <button class="button button-secondary" id="confirmImportButton" type="button">校验并导入模型</button>
+              <span class="eyebrow">LOCAL MODELS & SHARES</span>
+              <div class="model-title-row">
+                <div><h2>本地共享模型源</h2><p>用户共享目录：AI 脱敏器/models</p></div>
+                <button class="button button-ghost button-small" id="scanSharedButton" type="button">扫描共享目录</button>
               </div>
-              <p class="form-help">符合 fnOS ACL 授权体系，package 用户只访问获授权目录，导入过程不中断现有服务。</p>
+              <div id="sharedModelsList" style="display:flex; flex-direction:column; gap:8px; margin: 10px 0;">
+                <!-- Scanned models rendered here -->
+              </div>
+              <details style="margin-top: 10px;">
+                <summary style="cursor:pointer; font-size:12px; color:var(--text-muted);">高级：从已授权自定义目录导入</summary>
+                <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
+                  <label style="font-size:12px;">模型目标类型
+                    <select id="importModelType" style="width:100%; padding:6px; border-radius:6px; border:1px solid var(--line); margin-top:4px;">
+                      <option value="gliner-pii-edge">GLiNER PII Edge (通用 PII 实体抽取, ~310MB)</option>
+                      <option value="gliner-pii-base">GLiNER PII Base (高精度通用 PII, ~850MB)</option>
+                      <option value="memprivacy-1.7b-rl">MemPrivacy 1.7B RL (深度语义隐私推理, ~3.4GB)</option>
+                      <option value="memprivacy-4b-rl">MemPrivacy 4B RL (强语义隐私推理大模型, ~7.8GB)</option>
+                      <option value="siamese-uie">SiameseUIE (中文信息抽取模型, ~420MB)</option>
+                    </select>
+                  </label>
+                  <label style="font-size:12px;">授权路径
+                    <input id="importSourcePath" type="text" placeholder="例如：/var/apps/ai-privacy-check/shares/ai-privacy-check/models/gliner-pii-edge" style="width:100%; padding:6px; border-radius:6px; border:1px solid var(--line); margin-top:4px;" />
+                  </label>
+                  <button class="button button-secondary" id="confirmImportButton" type="button">校验并导入模型</button>
+                </div>
+              </details>
+              <p class="form-help">将模型下载并放入共享目录后点击扫描即可一键导入。应用复制校验后激活，不修改用户共享源文件。</p>
             </article>
 
             <article class="panel boundary-card">

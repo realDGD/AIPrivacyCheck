@@ -46,6 +46,9 @@ const elements = {
   deviceSelect: $("deviceSelect"),
   deviceStatusBadge: $("deviceStatusBadge"),
   deviceDetail: $("deviceDetail"),
+  deviceTelemetry: $("deviceTelemetry"),
+  scanSharedButton: $("scanSharedButton"),
+  sharedModelsList: $("sharedModelsList"),
   reloadModelButton: $("reloadModelButton"),
   importModelType: $("importModelType"),
   importSourcePath: $("importSourcePath"),
@@ -439,19 +442,119 @@ function updateModelUI(data) {
     }
   }
 
-  // Device status
+  // Device & Runtime Telemetry
   const dev = data.device || {};
+  const hw = dev.hardware || {};
+  const runtimes = dev.runtimes || {};
+  const modelDevices = dev.model_devices || {};
+
   if (elements.deviceStatusBadge) {
     elements.deviceStatusBadge.textContent = dev.actual_device === "cuda" ? "NVIDIA CUDA 加速" : "CPU 运行模式";
     elements.deviceStatusBadge.className = `status-badge${dev.actual_device === "cuda" ? " is-ready" : ""}`;
   }
-  if (elements.deviceDetail) {
-    elements.deviceDetail.textContent = dev.cuda_available
-      ? `检测到 GPU: ${dev.cuda_device_name || "NVIDIA 显卡"} (驱动就绪，目标: ${dev.requested_device})`
-      : `未检测到 NVIDIA CUDA 环境 (使用 CPU 推理，PyTorch: ${dev.torch_version || "未加载"})`;
-  }
+
   if (elements.deviceSelect && dev.requested_device) {
     elements.deviceSelect.value = dev.requested_device;
+  }
+
+  if (elements.deviceTelemetry) {
+    elements.deviceTelemetry.replaceChildren();
+
+    // 1. Hardware section
+    const hwCard = document.createElement("div");
+    hwCard.style.padding = "8px 12px";
+    hwCard.style.borderRadius = "6px";
+    hwCard.style.background = "var(--surface)";
+    hwCard.style.border = "1px solid var(--line)";
+
+    const hwTitle = document.createElement("div");
+    hwTitle.style.fontWeight = "600";
+    hwTitle.style.marginBottom = "4px";
+    if (hw.nvidia_available && hw.gpus && hw.gpus.length > 0) {
+      const gpu = hw.gpus[0];
+      hwTitle.textContent = `✅ NVIDIA 显卡硬件: ${gpu.name}`;
+      hwTitle.style.color = "var(--brand-green, #137333)";
+
+      const hwDesc = document.createElement("div");
+      hwDesc.style.color = "var(--text-muted)";
+      hwDesc.style.fontSize = "12px";
+      hwDesc.textContent = `驱动版本: ${hw.driver_version || "未知"} · 显存: ${gpu.memory_total_mb ? gpu.memory_total_mb + " MB" : "未知"} (共 ${hw.gpu_count} 块)`;
+      hwCard.append(hwTitle, hwDesc);
+    } else {
+      hwTitle.textContent = "○ NVIDIA 显卡硬件: 未检测到";
+      hwTitle.style.color = "var(--text-muted)";
+      const hwDesc = document.createElement("div");
+      hwDesc.style.color = "var(--text-muted)";
+      hwDesc.style.fontSize = "12px";
+      hwDesc.textContent = hw.reason || "未找到 nvidia-smi 驱动或无可用英伟达 GPU。";
+      hwCard.append(hwTitle, hwDesc);
+    }
+
+    // 2. PyTorch Runtime section
+    const torchCard = document.createElement("div");
+    torchCard.style.padding = "8px 12px";
+    torchCard.style.borderRadius = "6px";
+    torchCard.style.background = "var(--surface)";
+    torchCard.style.border = "1px solid var(--line)";
+
+    const torchTitle = document.createElement("div");
+    torchTitle.style.fontWeight = "600";
+    torchTitle.style.marginBottom = "4px";
+
+    const tCuda = runtimes.torch_cuda || {};
+    const tCpu = runtimes.torch_cpu || {};
+    if (tCuda.installed && tCuda.verified && tCuda.cuda_available) {
+      torchTitle.textContent = "✅ PyTorch CUDA 运行时: 已就绪";
+      torchTitle.style.color = "var(--brand-green, #137333)";
+    } else if (tCpu.installed && tCpu.verified) {
+      torchTitle.textContent = "○ PyTorch CPU 运行时: 已就绪 (CUDA 未安装)";
+      torchTitle.style.color = "var(--text)";
+    } else {
+      torchTitle.textContent = "○ PyTorch 运行时: 未就绪";
+      torchTitle.style.color = "var(--text-muted)";
+    }
+    const torchDesc = document.createElement("div");
+    torchDesc.style.color = "var(--text-muted)";
+    torchDesc.style.fontSize = "12px";
+    const torchDevInfo = modelDevices.torch || {};
+    torchDesc.textContent = `服务模型: GLiNER, MemPrivacy · 当前分配设备: ${torchDevInfo.device ? torchDevInfo.device.toUpperCase() : "CPU"}`;
+    torchCard.append(torchTitle, torchDesc);
+
+    // 3. Paddle Runtime section
+    const paddleCard = document.createElement("div");
+    paddleCard.style.padding = "8px 12px";
+    paddleCard.style.borderRadius = "6px";
+    paddleCard.style.background = "var(--surface)";
+    paddleCard.style.border = "1px solid var(--line)";
+
+    const paddleTitle = document.createElement("div");
+    paddleTitle.style.fontWeight = "600";
+    paddleTitle.style.marginBottom = "4px";
+
+    const pCuda = runtimes.paddle_cuda || {};
+    const pCpu = runtimes.paddle_cpu || {};
+    if (pCuda.installed && pCuda.verified && pCuda.cuda_available) {
+      paddleTitle.textContent = "✅ Paddle CUDA 运行时: 已就绪";
+      paddleTitle.style.color = "var(--brand-green, #137333)";
+    } else if (pCpu.installed && pCpu.verified) {
+      paddleTitle.textContent = "○ Paddle CPU 运行时: 已就绪 (CUDA 未安装)";
+      paddleTitle.style.color = "var(--text)";
+    } else {
+      paddleTitle.textContent = "○ Paddle 运行时: 未就绪（内置语义规则正常工作）";
+      paddleTitle.style.color = "var(--text-muted)";
+    }
+    const paddleDesc = document.createElement("div");
+    paddleDesc.style.color = "var(--text-muted)";
+    paddleDesc.style.fontSize = "12px";
+    const paddleDevInfo = modelDevices.paddle || {};
+    paddleDesc.textContent = `服务模型: SiameseUIE · 当前分配设备: ${paddleDevInfo.device ? paddleDevInfo.device.toUpperCase() : "CPU"}`;
+    paddleCard.append(paddleTitle, paddleDesc);
+
+    elements.deviceTelemetry.append(hwCard, torchCard, paddleCard);
+  } else if (elements.deviceDetail) {
+    elements.deviceDetail.textContent = hw.nvidia_available
+      ? `检测到 GPU: ${hw.driver_version ? "驱动 " + hw.driver_version : "就绪"} (目标: ${dev.requested_device})`
+      : `未检测到 NVIDIA CUDA 环境 (使用 CPU 推理)`;
   }
 
   // Render Slots in #slotListContainer
@@ -566,6 +669,61 @@ function updateModelUI(data) {
       item.append(header, desc, controls);
       elements.slotListContainer.append(item);
     });
+  }
+
+  // Render Shared Models
+  if (elements.sharedModelsList) {
+    elements.sharedModelsList.replaceChildren();
+    const candidates = data.shared_candidates || [];
+    const sharedDirs = data.shared_dirs || [];
+
+    if (candidates.length === 0) {
+      const emptyHint = document.createElement("p");
+      emptyHint.style.fontSize = "12px";
+      emptyHint.style.color = "var(--text-muted)";
+      const dirText = sharedDirs.length > 0 ? sharedDirs.join(" 或 ") : "AI 脱敏器/models";
+      emptyHint.textContent = `未在共享目录 (${dirText}) 中扫描到匹配的模型文件夹。将模型文件夹放置后点击“扫描共享目录”即可一键导入。`;
+      elements.sharedModelsList.append(emptyHint);
+    } else {
+      candidates.forEach((cand) => {
+        const row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.justifyContent = "space-between";
+        row.style.padding = "8px 12px";
+        row.style.borderRadius = "6px";
+        row.style.background = "var(--surface)";
+        row.style.border = "1px solid var(--line)";
+
+        const info = document.createElement("div");
+        info.innerHTML = `<strong>${cand.display_name}</strong> <small style="color:var(--text-muted);">(${cand.folder_name} · ${cand.approx_size})</small><div style="font-size:11px; color:${cand.valid ? "var(--brand-green, #137333)" : "var(--danger, #d93025)"};">${cand.valid ? "格式校验通过" : cand.reason}</div>`;
+
+        const btn = document.createElement("button");
+        btn.className = "button button-secondary button-small";
+        btn.textContent = "导入到应用";
+        btn.disabled = !cand.valid;
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          btn.textContent = "正在导入…";
+          try {
+            const res = await api("/api/model/shared/import", {
+              method: "POST",
+              body: JSON.stringify({ model: cand.model_id, source_path: cand.source_path }),
+            });
+            toast(res.message || "模型导入成功！");
+            await refreshModelStatus();
+          } catch (err) {
+            toast(`导入失败: ${err.message}`);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "导入到应用";
+          }
+        });
+
+        row.append(info, btn);
+        elements.sharedModelsList.append(row);
+      });
+    }
   }
 
   if (elements.installLog) {
@@ -704,6 +862,12 @@ if (elements.deviceSelect) elements.deviceSelect.addEventListener("change", chan
 if (elements.confirmImportButton) elements.confirmImportButton.addEventListener("click", importModel);
 if (elements.uninstallModelButton) elements.uninstallModelButton.addEventListener("click", uninstallModel);
 if (elements.reloadModelButton) elements.reloadModelButton.addEventListener("click", reloadModel);
+if (elements.scanSharedButton) {
+  elements.scanSharedButton.addEventListener("click", async () => {
+    toast("正在扫描共享模型目录…");
+    await refreshModelStatus();
+  });
+}
 if (elements.fillSampleButton) {
   elements.fillSampleButton.addEventListener("click", () => {
     elements.sourceText.value = "请寄给上海市浦东新区世纪大道100号的收件人张伟先生，联系手机 13800138000，邮箱 zhangwei@example.com，身份证号 11010519491231002X。另请备份数据库 postgresql://appuser:SecretPass123@db.internal:5432/crm。";

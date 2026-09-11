@@ -1,5 +1,117 @@
 #!/bin/bash
+set -Eeuo pipefail
 
-### This script is called after the user uninstalls the application.
+# AI 脱敏器 (AIPrivacyCheck) 卸载数据管理回调
+# 读取卸载向导中用户选择的数据清理策略，默认值为 keep（安全优先，防止意外丢弃大型模型）
+DATA_ACTION="${wizard_data_action:-${pkg_wizard_uninstall_data_choice:-${pkg_wizard_data_action:-keep}}}"
+
+validate_data_dir() {
+  local path="$1"
+  if [ -z "$path" ] || [ "$path" = "/" ] || [ -L "$path" ]; then
+    echo "拒绝清理非法数据目录：$path" >&2
+    exit 1
+  fi
+  # 必须确认为当前应用目录，防止误删 NAS 系统卷
+  case "$path" in
+    *ai-privacy-check*) ;;
+    *)
+      echo "拒绝清理非 AI 脱敏器目录：$path" >&2
+      exit 1
+      ;;
+  esac
+}
+
+validate_config_dir() {
+  local path="$1"
+  if [ -z "$path" ] || [ "$path" = "/" ] || [ -L "$path" ]; then
+    echo "拒绝清理非法配置目录：$path" >&2
+    exit 1
+  fi
+  case "$path" in
+    *ai-privacy-check*) ;;
+    *)
+      echo "拒绝清理非 AI 脱敏器配置目录：$path" >&2
+      exit 1
+      ;;
+  esac
+}
+
+prepare_cleanup_paths() {
+  APP_DATA_DIR="${TRIM_PKGVAR:-}"
+  CONFIG_DIR="${TRIM_PKGETC:-}"
+
+  if [ -n "$APP_DATA_DIR" ]; then
+    APP_DATA_DIR="${APP_DATA_DIR%/}"
+    validate_data_dir "$APP_DATA_DIR"
+  fi
+
+  if [ -n "$CONFIG_DIR" ]; then
+    CONFIG_DIR="${CONFIG_DIR%/}"
+    validate_config_dir "$CONFIG_DIR"
+  fi
+}
+
+remove_config_dir() {
+  if [ -n "$CONFIG_DIR" ] && [ -d "$CONFIG_DIR" ]; then
+    rm -rf -- "$CONFIG_DIR"
+  fi
+}
+
+clean_keep_runtime() {
+  local data_subdir="$APP_DATA_DIR/data"
+  if [ ! -d "$data_subdir" ]; then
+    return 0
+  fi
+
+  # 仅保留 models 和 runtimes，清理缓存、状态与日志
+  shopt -s dotglob nullglob
+  for entry in "$data_subdir"/*; do
+    local name="${entry##*/}"
+    case "$name" in
+      models|runtimes)
+        ;;
+      *)
+        rm -rf -- "$entry"
+        ;;
+    esac
+  done
+  shopt -u dotglob nullglob
+
+  # 清理根下 pid 与日志
+  rm -f -- "$APP_DATA_DIR"/*.pid "$APP_DATA_DIR"/*.sock "$APP_DATA_DIR"/*.log
+  remove_config_dir
+}
+
+clean_all_app_data() {
+  local data_subdir="$APP_DATA_DIR/data"
+  if [ -d "$data_subdir" ]; then
+    # 彻底删除应用私有数据副本（注意：绝不触碰用户共享模型源 TRIM_DATA_SHARE_PATHS）
+    rm -rf -- "$data_subdir"
+  fi
+
+  rm -f -- "$APP_DATA_DIR"/*.pid "$APP_DATA_DIR"/*.sock "$APP_DATA_DIR"/*.log
+  remove_config_dir
+}
+
+clean_keep() {
+  # 默认保留：仅清理临时运行产生的 pid 和 socket
+  if [ -n "$APP_DATA_DIR" ] && [ -d "$APP_DATA_DIR" ]; then
+    rm -f -- "$APP_DATA_DIR"/*.pid "$APP_DATA_DIR"/*.sock
+  fi
+}
+
+prepare_cleanup_paths
+
+case "$DATA_ACTION" in
+  keep_runtime)
+    clean_keep_runtime
+    ;;
+  delete)
+    clean_all_app_data
+    ;;
+  keep|*)
+    clean_keep
+    ;;
+esac
 
 exit 0
