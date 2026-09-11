@@ -1,0 +1,87 @@
+# ==========================================
+# 操作系统与元数据 (macOS, Windows, Linux)
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# 运行时构建与打包产物 (fnOS Package / Dist)
+# ==========================================
+dist/
+*.fpk
+packaging/ai-privacy-check/app/server/.opf/
+packaging/ai-privacy-check/app/server/data/
+
+# ==========================================
+# 临时运行状态、日志、Socket 与 PID
+# ==========================================
+*.log
+*.pid
+*.sock
+*.tmp
+/tmp/
+*.log.*
+
+# ==========================================
+# Python 字节码与缓存
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.so
+
+# ==========================================
+# Python 虚拟环境与包管理 (uv / venv / env)
+# ==========================================
+.venv/
+venv/
+ENV/
+env/
+.env.local
+.env.*.local
+
+# ==========================================
+# 测试、代码质量与覆盖率缓存
+# ==========================================
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+
+# ==========================================
+# 编辑器与 IDE 配置
+# ==========================================
+.vscode/
+!.vscode/settings.json.example
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# ==========================================
+# 敏感数据、脱敏保险箱与开发凭据
+# ==========================================
+data/
+*.aipvault.json
+*.pem
+*.key
+*.crt
+*.cert
+.env
+

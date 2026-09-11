@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "ai-privacy-check.main": {
+      "title": "隐私净化器",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/ai-privacy-check",
+      "gatewaySocket": "ai-privacy-check.sock",
+      "url": "/app/ai-privacy-check/",
+      "allUsers": true
+    }
+  }
+}

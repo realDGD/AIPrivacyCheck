@@ -1,0 +1,16 @@
+appname               = ai-privacy-check
+version               = 0.2.0
+display_name          = 隐私净化器
+desc                  = 在 fnOS 本地检测、脱敏并恢复中英文隐私字段。中文规则开箱即用，可选安装 OpenAI Privacy Filter 模型增强。
+platform              = all
+source                = thirdparty
+maintainer            = AI Privacy Check Contributors
+distributor           = AI Privacy Check Contributors
+install_dep_apps      = python312
+os_min_version        = 1.1.3100
+desktop_uidir         = ui
+desktop_applaunchname = ai-privacy-check.main
+ctl_stop              = true
+checkport              = false
+disable_authorization_path = true
+changelog             = 改为 fnOS Native 应用：使用官方 Python 3.12 运行时、package 用户和统一网关 Unix Socket，不再依赖 Docker。

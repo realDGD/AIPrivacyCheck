@@ -1,0 +1,439 @@
+"""Multilingual, Chinese-first deterministic PII recognizers.
+
+Rules favor validated identifiers and contextual matches. Ambiguous values such as
+names, dates, account numbers, and addresses are only emitted when nearby labels
+make their meaning reasonably clear.
+"""
+
+from dataclasses import dataclass
+import re
+from typing import Callable, Iterable, List, Match, Optional, Pattern
+
+from .entities import Entity
+from .validators import (
+    card_expiry_valid,
+    cn_id_card_valid,
+    cn_uscc_valid,
+    iban_valid,
+    international_phone_valid,
+    ipv4_valid,
+    ipv6_valid,
+    luhn_valid,
+    mac_valid,
+)
+
+
+Validator = Callable[[str], bool]
+
+
+@dataclass(frozen=True)
+class RegexRule:
+    entity_type: str
+    pattern: Pattern[str]
+    confidence: float
+    group: int = 0
+    validator: Optional[Validator] = None
+    validated: bool = False
+
+
+def _compile(pattern: str, flags: int = 0) -> Pattern[str]:
+    return re.compile(pattern, flags)
+
+
+EXACT_RULES = (
+    RegexRule(
+        "SECRET",
+        _compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        1.0,
+        validated=True,
+    ),
+    RegexRule(
+        "SECRET",
+        _compile(
+            r"(?<![A-Za-z0-9])(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|mssql)://[^\s<>\"'，。；;]+",
+            re.IGNORECASE,
+        ),
+        0.995,
+        validated=True,
+    ),
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
+        0.99,
+        validated=True,
+    ),
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{12,20})(?![A-Za-z0-9])"),
+        0.99,
+        validated=True,
+    ),
+    RegexRule(
+        "IBAN",
+        _compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Z0-9])", re.IGNORECASE),
+        0.995,
+        validator=iban_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "EMAIL",
+        _compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}(?![\w.-])", re.IGNORECASE),
+        0.99,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_ID_CARD",
+        _compile(r"(?<![0-9A-Za-z])(?:\d{17}[0-9Xx]|\d{15})(?![0-9A-Za-z])"),
+        0.995,
+        validator=cn_id_card_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_USCC",
+        _compile(r"(?<![0-9A-Z])[159Y][1239]\d{6}[0-9A-HJ-NPQRTUWXY]{10}(?![0-9A-Z])", re.IGNORECASE),
+        0.995,
+        validator=cn_uscc_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_PHONE_NUMBER",
+        _compile(r"(?<!\d)(?:(?:\+?86|0086)[ -]?)?1[3-9]\d(?:[ -]?\d){8}(?!\d)"),
+        0.99,
+        validator=lambda value: len(re.sub(r"\D", "", value).removeprefix("0086").removeprefix("86")) == 11,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_BANK_CARD",
+        _compile(r"(?<!\d)(?:\d[ -]?){15,18}\d(?!\d)"),
+        0.97,
+        validator=luhn_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_PASSPORT",
+        _compile(r"(?<![A-Z0-9])(?:[EG]\d{8}|[KJ]\d{7}|P\d{7}|S\d{7,8}|D\d{7,8})(?![A-Z0-9])", re.IGNORECASE),
+        0.94,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_LICENSE_PLATE",
+        _compile(r"(?<![A-Z0-9\u4e00-\u9fff])[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z][·•]?[A-HJ-NP-Z0-9]{5,6}(?![A-Z0-9])"),
+        0.95,
+        validated=True,
+    ),
+    RegexRule(
+        "MAC_ADDRESS",
+        _compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])"),
+        0.98,
+        validator=mac_valid,
+        validated=True,
+    ),
+)
+
+
+CONTEXT_RULES = (
+    RegexRule(
+        "SECRET",
+        _compile(
+            r"(?:SSH\s*私钥标识|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GitHub\s+token|"
+            r"OpenAI-style\s+test\s+token|API\s*Token|Temporary\s+password|"
+            r"OTP\s+backup\s+code|recovery\s+code|登录密码|密码|口令|passwd|password|secret|"
+            r"api[_ -]?key|access[_ -]?token|パスワード|비밀번호|mot\s+de\s+passe|"
+            r"Passwort|Contraseña|Пароль|كلمة\s+المرور|รหัสผ่าน)"
+            r"\s*(?:[=:：]|为|是|is|ist|est|es|lautet|هو|คือ|は|는|은)?\s*[\r\n ]*['\"]?"
+            r"([A-Za-z0-9][A-Za-z0-9_!@#$%^&*()+\-=/{}\[\]:?]{3,255})",
+            re.IGNORECASE,
+        ),
+        0.96,
+        group=1,
+    ),
+    RegexRule(
+        "CARD_SECURITY_CODE",
+        _compile(r"(?:CVV2?|CVC2?|card\s+security\s+code)\s*(?:[=:：]|为|是|is)?\s*(\d{3,4})(?!\d)", re.IGNORECASE),
+        0.99,
+        group=1,
+        validated=True,
+    ),
+    RegexRule(
+        "CARD_EXPIRY",
+        _compile(r"(?:有效期|expiration\s+date|expiry(?:\s+date)?)\s*(?:[=:：]|为|是|is)?\s*(\d{1,2}\s*[/.-]\s*\d{2,4})", re.IGNORECASE),
+        0.97,
+        group=1,
+        validator=card_expiry_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "PHONE",
+        _compile(
+            r"(?:手机号|备用电话|电话(?:号码)?|联系电话|電話番号|휴대전화\s*번호|전화번호|"
+            r"phone(?:\s+number)?|Telefonnummer|numéro\s+de\s+téléphone|teléfono|"
+            r"номер\s+телефона|رقم\s+الهاتف|หมายเลขโทรศัพท์)"
+            r"\s*(?:[=:：]|为|是|is|est|lautet|es|هو|คือ|は|는|은)?\s*"
+            r"(\+?\d(?:[\d ()-]{5,25}\d))",
+            re.IGNORECASE,
+        ),
+        0.96,
+        group=1,
+        validator=international_phone_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_LANDLINE",
+        _compile(r"(?:座机|固定电话|联系电话|传真)\s*[：:=]?\s*((?:\(?0\d{2,3}\)?[- ]?)?\d{7,8}(?:-\d{1,6})?)"),
+        0.93,
+        group=1,
+    ),
+    RegexRule(
+        "IP_ADDRESS",
+        _compile(r"(?:IPv4|Internal\s+IP|IP(?:地址)?|服务器地址|主机地址)\s*[：:=]?\s*((?:\d{1,3}\.){3}\d{1,3})", re.IGNORECASE),
+        0.94,
+        group=1,
+        validator=ipv4_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "IPV6_ADDRESS",
+        _compile(r"(?:IPv6|IPv6\s+address)\s*[：:=]?\s*([0-9A-Fa-f:]{2,45})", re.IGNORECASE),
+        0.97,
+        group=1,
+        validator=ipv6_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "MAC_ADDRESS",
+        _compile(r"(?:MAC(?:\s+address)?|物理地址)\s*[：:=]?\s*((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})", re.IGNORECASE),
+        0.98,
+        group=1,
+        validator=mac_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "PRIVATE_URL",
+        _compile(r"(?:个人主页|私有网址|回调地址|内网地址|服务地址)\s*[：:=]?\s*(https?://[^\s，。；;]+)", re.IGNORECASE),
+        0.9,
+        group=1,
+    ),
+    RegexRule(
+        "PRIVATE_URL",
+        _compile(r"(?:Database\s+Host|Host|数据库主机)\s*[：:=]\s*([A-Z0-9.-]+\.[A-Z]{2,63})", re.IGNORECASE),
+        0.9,
+        group=1,
+    ),
+    RegexRule(
+        "CN_ID_CARD",
+        _compile(r"(?:身份证(?:测试)?(?:号码|号)?)\s*(?:[：:=]|为|是)?\s*(\d{17}[0-9Xx]|\d{15})(?![0-9A-Za-z])"),
+        0.88,
+        group=1,
+        validator=cn_id_card_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "GOVERNMENT_ID",
+        _compile(
+            r"(?:SSN|social\s+security\s+number|マイナンバー|주민등록번호)"
+            r"\s*(?:[：:=]|为|是|is|は|는|은)?\s*(\d[\d -]{7,18}\d)",
+            re.IGNORECASE,
+        ),
+        0.96,
+        group=1,
+    ),
+    RegexRule(
+        "PASSPORT",
+        _compile(
+            r"(?:(?:test[- ]?)?passport(?:\s+number)?|(?:Test[- ]?)?Passnummer|"
+            r"numéro\s+de\s+passeport(?:\s+de\s+test)?|número\s+de\s+pasaporte(?:\s+de\s+prueba)?|"
+            r"номер\s+паспорта|جواز\s+السفر(?:\s+التجريبي)?|"
+            r"หมายเลขหนังสือเดินทาง(?:ทดสอบ)?|パスポート番号|여권번호)"
+            r"\s*(?:[：:=]|为|是|is|est|lautet|es|هو|คือ|は|는|은)?\s*"
+            r"([A-Z0-9](?:[A-Z0-9 -]{4,18}[A-Z0-9]))",
+            re.IGNORECASE,
+        ),
+        0.95,
+        group=1,
+    ),
+    RegexRule(
+        "BIC",
+        _compile(r"(?:BIC|SWIFT(?:\s+code)?)\s*[：:=]?\s*([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)", re.IGNORECASE),
+        0.98,
+        group=1,
+        validated=True,
+    ),
+    RegexRule(
+        "CN_BIRTH_DATE",
+        _compile(r"(?:出生日期|出生年月|生日)\s*[：:=]?\s*((?:19|20)\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月](?:0?[1-9]|[12]\d|3[01])日?)?))"),
+        0.93,
+        group=1,
+    ),
+    RegexRule(
+        "CN_SOCIAL_ACCOUNT",
+        _compile(r"(?:微信号|微信|WeChat|QQ(?:号)?|钉钉号)\s*[：:=]?\s*([A-Za-z][-_A-Za-z0-9]{5,19}|[1-9]\d{4,11})", re.IGNORECASE),
+        0.92,
+        group=1,
+    ),
+    RegexRule(
+        "CN_ACCOUNT",
+        _compile(r"(?:账号|账户|工号|学号|社保号|医保号|订单号|快递单号|客户编号|会员号|设备序列号|VIN)\s*(?:[：:=]|为|是)?\s*([A-Z0-9][A-Z0-9_.-]{4,63})", re.IGNORECASE),
+        0.89,
+        group=1,
+    ),
+    RegexRule(
+        "USERNAME",
+        _compile(
+            r"(?:username|user\s+name|公司账号|登录ID|ログインID|계정\s+이름|identifiant|"
+            r"Benutzername|Usuario|Логин|اسم\s+المستخدم|ชื่อผู้ใช้)"
+            r"\s*(?:[：:=]|为|是|is|est|ist|es|は|는|은)?\s*"
+            r"([A-Z0-9][A-Z0-9_.-]{3,63})",
+            re.IGNORECASE,
+        ),
+        0.91,
+        group=1,
+    ),
+    RegexRule(
+        "RECORD_ID",
+        _compile(
+            r"(?:employee\s+(?:number|ID)|student\s+ID|medical\s+record(?:\s+test)?\s+ID|"
+            r"insurance\s+policy(?:\s+test)?\s+ID|Account\s+ID|员工编号|Database)"
+            r"\s*(?:[：:=]|为|是|is)?\s*([A-Z0-9][A-Z0-9_.-]{3,63})",
+            re.IGNORECASE,
+        ),
+        0.93,
+        group=1,
+    ),
+)
+
+
+COMMON_SURNAMES = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜戚谢邹喻柏水窦章云苏潘葛奚范彭郎鲁韦昌马苗凤花方俞任袁柳鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄和穆萧尹姚邵湛汪祁毛禹狄米贝明臧计伏成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季麻强贾路娄危江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞万支柯昝管卢莫经房裘缪干解应宗宣丁邓郁单杭洪包诸左石崔吉龚程嵇邢裴陆荣翁荀羊於惠甄曲封芮储靳汲邴糜松井段富巫乌焦巴弓牧隗山谷车侯宓蓬全郗班仰秋仲伊宫宁仇栾暴甘钭厉戎祖武符刘景詹束龙叶幸司韶黎乔苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍郤璩桑桂濮牛寿通边扈燕冀郏浦尚农温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红游竺权逯盖益桓公"
+COMPOUND_SURNAMES = "欧阳|太史|端木|上官|司马|东方|独孤|南宫|万俟|闻人|夏侯|诸葛|尉迟|公羊|赫连|澹台|皇甫|宗政|濮阳|公冶|太叔|申屠|公孙|慕容|仲孙|钟离|长孙|宇文|司徒|鲜于|司空|闾丘|子车|亓官|司寇|巫马|公西|颛孙|壤驷|公良|漆雕|乐正|宰父|谷梁|拓跋|夹谷|轩辕|令狐|段干|百里|呼延|东郭|南门|羊舌|微生"
+NAME_VALUE = rf"(?:(?:{COMPOUND_SURNAMES})[\u4e00-\u9fff]{{1,2}}|[{COMMON_SURNAMES}][\u4e00-\u9fff]{{1,2}}|[\u4e00-\u9fff]{{2,4}}·[A-Za-z\u4e00-\u9fff·]{{1,12}})"
+NAME_PATTERNS = (
+    _compile(rf"(?:姓名|联系人|收件人|患者|客户|员工|申请人|负责人|法定代表人|法人|户主|开户名|我叫)\s*[：:=为]?\s*({NAME_VALUE})"),
+    _compile(rf"(?<![\u4e00-\u9fff])({NAME_VALUE})(?:先生|女士|医生|老师|经理|主任)(?![\u4e00-\u9fff])"),
+)
+
+LATIN_NAME_WORD = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’.-]{1,30}"
+LATIN_NAME_VALUE = rf"{LATIN_NAME_WORD}(?:\s+{LATIN_NAME_WORD}){{1,4}}"
+CYRILLIC_NAME_WORD = r"[А-ЯЁ][А-Яа-яЁё'’-]{1,30}"
+CYRILLIC_NAME_VALUE = rf"{CYRILLIC_NAME_WORD}(?:\s+{CYRILLIC_NAME_WORD}){{1,4}}"
+
+MULTILINGUAL_NAME_PATTERNS = (
+    _compile(rf"(?:My\s+name\s+is|Customer\s+Name\s*:|Name\s*:)\s*({LATIN_NAME_VALUE})", re.IGNORECASE),
+    _compile(rf"Je\s+m['’]appelle\s+({LATIN_NAME_VALUE})", re.IGNORECASE),
+    _compile(rf"Mein\s+Name\s+ist\s+({LATIN_NAME_VALUE})", re.IGNORECASE),
+    _compile(rf"Me\s+llamo\s+({LATIN_NAME_VALUE})", re.IGNORECASE),
+    _compile(rf"Меня\s+зовут\s+({CYRILLIC_NAME_VALUE})", re.IGNORECASE),
+    _compile(r"(?:私の名前は|Customer\s+Name\s*:)\s*([\u3040-\u30ff\u3400-\u9fff]{2,12})(?=です|[。\n]|$)", re.IGNORECASE),
+    _compile(r"(?:제\s+이름은|负责人\s*)\s*([가-힣]{2,8})(?=입니다|\s+can|\s|[.\n]|$)", re.IGNORECASE),
+    _compile(r"اسمي\s+([\u0600-\u06ff]+(?:\s+[\u0600-\u06ff]+){1,4})(?=[.\n]|$)"),
+    _compile(r"ฉันชื่อ\s+([\u0e00-\u0e7f]+(?:\s+[\u0e00-\u0e7f]+){1,3})(?=\s+ที่อยู่|[.\n]|$)"),
+    _compile(rf"Please\s+contact\s+({NAME_VALUE})(?=\s+at)", re.IGNORECASE),
+)
+
+ADDRESS_PATTERN = _compile(
+    r"(?:收货地址|家庭地址|通讯地址|开户地址|住址|地址|(?:目前)?住在)\s*[：:=为]?\s*"
+    r"([^\n，,。；;]{5,100}(?:省|自治区|市|自治州|盟|区|县|旗|镇|乡|街道|路|街|巷|弄|村|社区|号|栋|室)[^\n，,。；;]{0,40})"
+)
+
+MULTILINGUAL_ADDRESS_PATTERNS = (
+    _compile(r"(?:I\s+live\s+at|I\s+live\s+in)\s+([^\n.]{5,160})", re.IGNORECASE),
+    _compile(r"J['’]habite\s+au\s+([^\n.]{5,160})", re.IGNORECASE),
+    _compile(r"Ich\s+wohne\s+in\s+der\s+([^\n.]{5,160})", re.IGNORECASE),
+    _compile(r"Vivo\s+en\s+([^\n.]{5,160})", re.IGNORECASE),
+    _compile(r"Я\s+живу\s+по\s+адресу\s*:\s*([^\n.]{5,160})", re.IGNORECASE),
+    _compile(r"أسكن\s+في\s+([^\n.]{5,160})"),
+    _compile(r"(?:住所は|住所\s*[：:])\s*(.{5,160}?)(?=です|[。\n]|$)"),
+    _compile(r"주소는\s*(.{5,160}?)(?=입니다|[.\n]|$)"),
+    _compile(r"ที่อยู่คือ\s*(.{5,160}?)(?=\s+หมายเลขโทรศัพท์|[.\n]|$)"),
+)
+
+MULTILINGUAL_DATE_PATTERNS = (
+    _compile(
+        r"(?:出生日期|出生年月|生日|生年月日|생년월일)\s*(?:[：:=]|为|是|は|는|은)?\s*"
+        r"((?:19|20)\d{2}\s*(?:年|년|[-/.])\s*\d{1,2}\s*(?:月|월|[-/.])\s*\d{1,2}\s*(?:日|일)?)"
+    ),
+    _compile(r"(?:My\s+date\s+of\s+birth\s+is|date\s+of\s+birth\s+is)\s*([^\W\d_]{3,20}\s+\d{1,2},\s*(?:19|20)\d{2})", re.IGNORECASE),
+    _compile(
+        r"(?:Ma\s+date\s+de\s+naissance\s+est\s+le|Mein\s+Geburtsdatum\s+ist\s+der|"
+        r"Nací\s+el|Дата\s+рождения\s*:|تاريخ\s+الميلاد\s+هو|วันเกิดคือ)\s*"
+        r"(\d{1,2}\s+[^\W\d_]{3,24}\s+(?:19|20)\d{2}(?:\s+года)?)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _entity_from_match(text: str, rule: RegexRule, match: Match[str]) -> Optional[Entity]:
+    start, end = match.span(rule.group)
+    value = text[start:end]
+    left_trim = len(value) - len(value.lstrip())
+    right_trim = len(value) - len(value.rstrip())
+    start += left_trim
+    end -= right_trim
+    value = text[start:end]
+    if not value or (rule.validator is not None and not rule.validator(value)):
+        return None
+    if rule.entity_type == "CN_PHONE_NUMBER" and not value.lstrip().startswith(("+86", "0086")):
+        prefix = text[max(0, start - 10) : start]
+        if re.search(r"(?:\+\d{1,3}|00\d{1,3})[ ()-]*$", prefix):
+            return None
+    return Entity(
+        entity_type=rule.entity_type,
+        start=start,
+        end=end,
+        text=value,
+        confidence=rule.confidence,
+        sources=("chinese_rules",),
+        validated=rule.validated,
+    )
+
+
+class MultilingualRuleDetector:
+    """Detect multilingual identifiers and context-bound PII without network calls."""
+
+    name = "multilingual_rules"
+
+    def detect(self, text: str) -> List[Entity]:
+        entities: List[Entity] = []
+        for rule in EXACT_RULES + CONTEXT_RULES:
+            for match in rule.pattern.finditer(text):
+                entity = _entity_from_match(text, rule, match)
+                if entity is not None:
+                    entities.append(entity)
+
+        for pattern in NAME_PATTERNS:
+            for match in pattern.finditer(text):
+                start, end = match.span(1)
+                entities.append(Entity("CN_NAME", start, end, text[start:end], 0.84, (self.name,)))
+
+        for pattern in MULTILINGUAL_NAME_PATTERNS:
+            for match in pattern.finditer(text):
+                start, end = match.span(1)
+                entities.append(Entity("PRIVATE_PERSON", start, end, text[start:end], 0.9, (self.name,)))
+
+        for match in ADDRESS_PATTERN.finditer(text):
+            start, end = match.span(1)
+            value = text[start:end].rstrip(" 的")
+            end = start + len(value)
+            entities.append(Entity("CN_ADDRESS", start, end, value, 0.86, (self.name,)))
+
+        for pattern in MULTILINGUAL_ADDRESS_PATTERNS:
+            for match in pattern.finditer(text):
+                start, end = match.span(1)
+                value = text[start:end].strip().rstrip("。,.،")
+                end = start + len(value)
+                entities.append(Entity("PRIVATE_ADDRESS", start, end, value, 0.88, (self.name,)))
+
+        for pattern in MULTILINGUAL_DATE_PATTERNS:
+            for match in pattern.finditer(text):
+                start, end = match.span(1)
+                entities.append(Entity("PRIVATE_DATE", start, end, text[start:end], 0.91, (self.name,)))
+
+        return entities
+
+
+def supported_rule_types() -> Iterable[str]:
+    values = {rule.entity_type for rule in EXACT_RULES + CONTEXT_RULES}
+    values.update(("CN_NAME", "CN_ADDRESS", "PRIVATE_PERSON", "PRIVATE_ADDRESS", "PRIVATE_DATE"))
+    return sorted(values)
+
+
+# Compatibility alias for integrations that imported the original class name.
+ChineseRuleDetector = MultilingualRuleDetector

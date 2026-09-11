@@ -1,0 +1,121 @@
+#!/bin/bash
+
+set -u
+
+LOG_FILE="${TRIM_PKGVAR}/app.log"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+APP_DIR="${TRIM_APPDEST}/server"
+DATA_DIR="${TRIM_PKGVAR}/data"
+SOCKET_PATH="${TRIM_APPDEST}/ai-privacy-check.sock"
+GATEWAY_PREFIX="/app/ai-privacy-check"
+PYTHON_BIN="${AI_PRIVACY_PYTHON_BIN:-/var/apps/python312/target/bin/python3}"
+ERROR_LOG="${TRIM_TEMP_LOGFILE:-${TRIM_PKGVAR}/lifecycle-error.log}"
+
+log_msg() {
+  printf '%s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE"
+}
+
+check_process() {
+  [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+}
+
+read_pid() {
+  if [ -f "$PID_FILE" ]; then
+    head -n 1 "$PID_FILE" | tr -d '[:space:]'
+  fi
+}
+
+status_app() {
+  local pid
+  pid="$(read_pid)"
+  if check_process "$pid"; then
+    return 0
+  fi
+  rm -f "$PID_FILE"
+  return 1
+}
+
+start_app() {
+  local pid count
+  if status_app; then
+    return 0
+  fi
+  if [ ! -x "$PYTHON_BIN" ]; then
+    printf '找不到 fnOS Python 3.12 运行时：%s\n' "$PYTHON_BIN" > "$ERROR_LOG"
+    return 1
+  fi
+
+  mkdir -p "$DATA_DIR" "${DATA_DIR}/status" "${DATA_DIR}/huggingface" "${DATA_DIR}/pip-cache"
+  rm -f "$SOCKET_PATH"
+  log_msg "Starting AI Privacy Check native service..."
+  cd "$APP_DIR" || return 1
+  env \
+    APP_DATA_DIR="$DATA_DIR" \
+    APP_BASE_PATH="$GATEWAY_PREFIX" \
+    GATEWAY_SOCKET="$SOCKET_PATH" \
+    HF_HOME="${DATA_DIR}/huggingface" \
+    PIP_CACHE_DIR="${DATA_DIR}/pip-cache" \
+    OPF_DEVICE="cpu" \
+    PYTHONDONTWRITEBYTECODE="1" \
+    PYTHONUNBUFFERED="1" \
+    "$PYTHON_BIN" "$APP_DIR/server.py" >> "$LOG_FILE" 2>&1 &
+  pid="$!"
+  printf '%s\n' "$pid" > "$PID_FILE"
+
+  count=0
+  while [ ! -S "$SOCKET_PATH" ] && [ "$count" -lt 20 ]; do
+    if ! check_process "$pid"; then
+      printf '原生服务启动失败，请查看 %s\n' "$LOG_FILE" > "$ERROR_LOG"
+      rm -f "$PID_FILE" "$SOCKET_PATH"
+      return 1
+    fi
+    sleep 0.5
+    count=$((count + 1))
+  done
+  if [ ! -S "$SOCKET_PATH" ]; then
+    printf '统一网关 Socket 未按时就绪，请查看 %s\n' "$LOG_FILE" > "$ERROR_LOG"
+    kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE" "$SOCKET_PATH"
+    return 1
+  fi
+}
+
+stop_app() {
+  local pid count
+  pid="$(read_pid)"
+  if ! check_process "$pid"; then
+    rm -f "$PID_FILE" "$SOCKET_PATH"
+    return 0
+  fi
+
+  log_msg "Stopping AI Privacy Check native service..."
+  kill -TERM "$pid" 2>> "$LOG_FILE" || true
+  count=0
+  while check_process "$pid" && [ "$count" -lt 10 ]; do
+    sleep 1
+    count=$((count + 1))
+  done
+  if check_process "$pid"; then
+    kill -KILL "$pid" 2>> "$LOG_FILE" || true
+  fi
+  rm -f "$PID_FILE" "$SOCKET_PATH"
+}
+
+case "${1:-}" in
+  start)
+    start_app
+    ;;
+  stop)
+    stop_app
+    ;;
+  status)
+    if status_app; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    printf 'Unknown command: %s\n' "${1:-}" > "$ERROR_LOG"
+    exit 1
+    ;;
+esac
