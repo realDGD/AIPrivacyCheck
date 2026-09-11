@@ -1,7 +1,8 @@
 """Model lifecycle management for AI Privacy Check.
 
+All officially supported models originate exclusively from ModelScope (魔搭社区).
 Supports:
-1. Online installation and downloading (OpenAI Privacy Filter, Chinese IE).
+1. Online transactional download and installation via ModelScope.
 2. Local manual import from user-authorized fnOS directories with atomic replacement.
 3. Integrity checks and smoke testing before activation.
 4. Model uninstallation, status reporting, and safe hot-reload.
@@ -18,28 +19,32 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from privacy.device import DEVICE_MANAGER
-from privacy.model import OPF_MODEL_REVISION, OPF_SOURCE_REVISION
+from privacy.model_catalog import MODEL_CATALOG, get_model_descriptor
 
 
 def emit(message: str) -> None:
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
 
-def get_model_dir(data_dir: Path, model_name: str) -> Path:
-    return data_dir / "models" / model_name
+def get_model_dir(data_dir: Path, model_id: str) -> Path:
+    return data_dir / "models" / model_id
 
 
-def write_state(data_dir: Path, state: str, detail: str, model_name: str = "privacy-filter") -> None:
+def get_staging_dir(data_dir: Path, model_id: str) -> Path:
+    return data_dir / "models" / ".staging" / model_id
+
+
+def write_state(data_dir: Path, state: str, detail: str, model_id: str) -> None:
     status_dir = data_dir / "status"
     status_dir.mkdir(parents=True, exist_ok=True)
     payload = {
-        "model": model_name,
+        "model": model_id,
         "state": state,
         "detail": detail,
         "updated_at": int(time.time()),
     }
-    target = status_dir / f"{model_name}-install.json"
-    temporary = status_dir / f"{model_name}-install.json.tmp"
+    target = status_dir / f"{model_id}-install.json"
+    temporary = status_dir / f"{model_id}-install.json.tmp"
     temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     os.replace(temporary, target)
 
@@ -58,47 +63,44 @@ def get_dir_size(path: Path) -> int:
     return total
 
 
-def verify_opf_integrity(model_dir: Path) -> Tuple[bool, str]:
-    """Verify presence of config and weights for OpenAI Privacy Filter."""
+def verify_model_integrity(model_dir: Path, model_id: str) -> Tuple[bool, str]:
+    """Verify integrity of model weights and configs based on catalog descriptor."""
     if not model_dir.is_dir():
         return False, "模型目录不存在"
-    config_file = model_dir / "config.json"
-    if not config_file.is_file():
-        return False, "缺少 config.json 配置文件"
-    try:
-        data = json.loads(config_file.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return False, "config.json 格式无效"
-    except Exception as exc:
-        return False, f"config.json 读取失败: {exc}"
 
-    safetensors = list(model_dir.glob("*.safetensors"))
-    bin_files = list(model_dir.glob("*.bin"))
-    if not safetensors and not bin_files:
-        return False, "未找到权重文件 (*.safetensors 或 *.bin)"
+    descriptor = get_model_descriptor(model_id)
+    if not descriptor:
+        # Fallback heuristic check
+        weights = list(model_dir.glob("*.safetensors")) + list(model_dir.glob("*.bin")) + list(model_dir.glob("*.pdparams"))
+        if not weights:
+            return False, "未找到模型权重文件"
+        return True, "验证通过"
+
+    if descriptor.runtime == "paddle":
+        weights = list(model_dir.glob("*.pdparams")) + list(model_dir.glob("*.bin")) + list(model_dir.glob("*.safetensors"))
+        if not weights:
+            return False, "未检测到 Paddle/UIE 权重文件 (*.pdparams / *.safetensors / *.bin)"
+    else:
+        # PyTorch / Transformers format
+        config_file = model_dir / "config.json"
+        gliner_config = model_dir / "gliner_config.json"
+        if not config_file.is_file() and not gliner_config.is_file():
+            return False, "缺少模型配置文件 (config.json / gliner_config.json)"
+        weights = list(model_dir.glob("*.safetensors")) + list(model_dir.glob("*.bin"))
+        if not weights:
+            return False, "未检测到 PyTorch 权重文件 (*.safetensors / *.bin)"
+
     return True, "验证通过"
 
 
-def verify_chinese_ie_integrity(model_dir: Path) -> Tuple[bool, str]:
-    """Verify presence of PaddleNLP UIE or custom IE model weights."""
-    if not model_dir.is_dir():
-        return False, "模型目录不存在"
-    params = list(model_dir.glob("*.pdparams")) + list(model_dir.glob("*.bin")) + list(model_dir.glob("*.safetensors"))
-    if not params:
-        return False, "未检测到模型权重文件 (*.pdparams / *.safetensors)"
-    return True, "验证通过"
-
-
-def install_python_dependencies(data_dir: Path) -> Path:
-    """Install PyTorch and runtime packages respecting hardware and architecture."""
-    package_dir = data_dir / "python-packages"
-    marker = package_dir / ".opf-revision"
-    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == OPF_SOURCE_REVISION:
-        emit("OPF 运行库已是固定版本，跳过基础安装。")
-        return package_dir
-
+def install_runtime_dependencies(data_dir: Path, runtime_name: str) -> Path:
+    """Install isolated Python dependencies for specific runtime group."""
+    package_dir = data_dir / "runtimes" / runtime_name
     package_dir.mkdir(parents=True, exist_ok=True)
-    source_url = f"https://github.com/openai/privacy-filter/archive/{OPF_SOURCE_REVISION}.tar.gz"
+
+    marker = package_dir / f".{runtime_name}-installed"
+    if marker.is_file():
+        return package_dir
 
     def pip_install(*requirements: str, extra: tuple = ()) -> None:
         cmd = [
@@ -116,170 +118,184 @@ def install_python_dependencies(data_dir: Path) -> Path:
         ]
         subprocess.run(cmd, check=True)
 
-    emit("正在安装基础推理依赖 (huggingface_hub, safetensors, numpy, tiktoken)...")
-    pip_install("huggingface_hub", "numpy", "packaging", "safetensors", "tiktoken", "tqdm")
+    emit(f"正在准备 [{runtime_name}] 运行环境依赖...")
+    # Base requirements
+    pip_install("modelscope", "numpy", "packaging", "tqdm")
 
     device_diag = DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
     machine = platform.machine().lower()
-    emit(f"检测到运行平台架构: {machine}, 目标设备请求: {device_diag.get('requested_device')}")
 
-    # Adaptive PyTorch install
-    if device_diag.get("requested_device") == "cuda" or (device_diag.get("requested_device") == "auto" and shutil.which("nvidia-smi")):
-        emit("检测到 NVIDIA 环境，尝试安装 CUDA 适配版 PyTorch...")
-        try:
-            pip_install("torch", extra=("--index-url", "https://download.pytorch.org/whl/cu124"))
-        except subprocess.CalledProcessError:
-            emit("CUDA wheel 安装遇到问题，正在安全回退至标准 PyTorch...")
+    if runtime_name in ("torch", "gliner"):
+        if device_diag.get("requested_device") == "cuda" or (device_diag.get("requested_device") == "auto" and shutil.which("nvidia-smi")):
+            try:
+                pip_install("torch", extra=("--index-url", "https://download.pytorch.org/whl/cu124"))
+            except subprocess.CalledProcessError:
+                pip_install("torch")
+        elif machine in ("x86_64", "amd64"):
+            try:
+                pip_install("torch", extra=("--index-url", "https://download.pytorch.org/whl/cpu"))
+            except subprocess.CalledProcessError:
+                pip_install("torch")
+        else:
             pip_install("torch")
-    elif machine in ("x86_64", "amd64"):
-        emit("正在安装 CPU 优化版 PyTorch...")
-        try:
-            pip_install("torch", extra=("--index-url", "https://download.pytorch.org/whl/cpu"))
-        except subprocess.CalledProcessError:
-            pip_install("torch")
-    else:
-        emit("正在安装标准版 PyTorch...")
-        pip_install("torch")
 
-    emit("正在安装 OpenAI Privacy Filter 核心驱动...")
-    pip_install(source_url, extra=("--no-deps",))
-    marker.write_text(OPF_SOURCE_REVISION + "\n", encoding="utf-8")
-    emit("运行库依赖安装完成。")
+        if runtime_name == "gliner":
+            pip_install("gliner")
+        else:
+            pip_install("transformers", "accelerate")
+
+    elif runtime_name == "paddle":
+        emit("准备 PaddleNLP 推理依赖...")
+        try:
+            pip_install("paddlepaddle", "paddlenlp")
+        except Exception as exc:
+            emit(f"Paddle 安装提示: {exc}")
+
+    marker.write_text("ok\n", encoding="utf-8")
+    emit(f"[{runtime_name}] 运行环境准备完成。")
     return package_dir
 
 
-def download_openai_privacy_filter(data_dir: Path, package_dir: Path) -> Path:
-    target_dir = get_model_dir(data_dir, "privacy-filter")
-    ok, _ = verify_opf_integrity(target_dir)
+def download_modelscope_model(data_dir: Path, model_id: str) -> Path:
+    """Download model snapshot from ModelScope into transactional staging and activate."""
+    descriptor = get_model_descriptor(model_id)
+    if not descriptor:
+        raise ValueError(f"未知的 ModelScope 模型标识: {model_id}")
+
+    target_dir = get_model_dir(data_dir, model_id)
+    ok, _ = verify_model_integrity(target_dir, model_id)
     if ok:
-        emit("OpenAI Privacy Filter 模型权重完整，跳过下载。")
+        emit(f"模型 [{model_id}] 已存在且完整，跳过下载。")
         return target_dir
 
-    package_path = str(package_dir)
-    if package_path not in sys.path:
-        sys.path.insert(0, package_path)
-    from huggingface_hub import snapshot_download  # type: ignore
+    staging_dir = get_staging_dir(data_dir, model_id)
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    download_dir = data_dir / "models" / "privacy-filter.download.tmp"
-    if download_dir.exists():
-        shutil.rmtree(download_dir)
-    download_dir.mkdir(parents=True)
+    emit(f"正在从 ModelScope (魔搭社区) 下载模型 [{descriptor.display_name}] (repo: {descriptor.repo_id})...")
 
-    emit(f"正在从 Hugging Face 下载 OpenAI Privacy Filter 权重 (revision: {OPF_MODEL_REVISION})...")
-    snapshot_download(
-        repo_id="openai/privacy-filter",
-        revision=OPF_MODEL_REVISION,
-        local_dir=str(download_dir),
-        allow_patterns=["original/*"],
-    )
+    # Use ModelScope SDK snapshot_download if available, or official HTTP API
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download  # type: ignore
 
-    payload_dir = download_dir / "original"
-    ok, reason = verify_opf_integrity(payload_dir)
+        snapshot_download(
+            model_id=descriptor.repo_id,
+            revision=descriptor.revision,
+            local_dir=str(staging_dir),
+        )
+    except ImportError:
+        # Fallback to direct git/http download or subprocess if modelscope package not yet in current sys.path
+        emit("正在调用 ModelScope 专用下载器...")
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                f"from modelscope.hub.snapshot_download import snapshot_download; snapshot_download(model_id='{descriptor.repo_id}', revision='{descriptor.revision}', local_dir='{staging_dir}')",
+            ],
+            check=True,
+        )
+
+    # Integrity verification on staging
+    ok, reason = verify_model_integrity(staging_dir, model_id)
     if not ok:
-        raise RuntimeError(f"下载文件完整性校验失败: {reason}")
-
-    # Metadata
-    (payload_dir / ".metadata.json").write_text(
-        json.dumps({
-            "source": "huggingface",
-            "repo_id": "openai/privacy-filter",
-            "revision": OPF_MODEL_REVISION,
-            "installed_at": int(time.time()),
-        }, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(payload_dir, target_dir)
-    shutil.rmtree(download_dir, ignore_errors=True)
-    emit("OpenAI Privacy Filter 权重下载与校验成功。")
-    return target_dir
-
-
-def import_local_model(data_dir: Path, model_name: str, source_path: Path) -> Tuple[bool, str]:
-    """Import an existing model from a user-authorized path into app-managed data storage.
-
-    Never modifies or deletes the user's source directory.
-    Uses atomic replacement so existing working models remain untouched on error.
-    """
-    if not source_path.exists():
-        return False, f"源路径不存在: {source_path}"
-
-    target_dir = get_model_dir(data_dir, model_name)
-    temp_dir = data_dir / "models" / f"{model_name}.import.tmp"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir)
-
-    emit(f"开始导入模型 [{model_name}]，源目录: {source_path}")
-
-    # Copy files into temporary staging area
-    if source_path.is_file():
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, temp_dir / source_path.name)
-    else:
-        shutil.copytree(source_path, temp_dir, symlinks=False)
-
-    # Integrity verification
-    if model_name == "privacy-filter":
-        # Sometimes user points to parent directory containing 'original'
-        if not (temp_dir / "config.json").is_file() and (temp_dir / "original" / "config.json").is_file():
-            actual_staging = temp_dir / "original"
-        else:
-            actual_staging = temp_dir
-        ok, reason = verify_opf_integrity(actual_staging)
-        if not ok:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return False, f"OpenAI Privacy Filter 格式校验失败: {reason}"
-        active_src = actual_staging
-    elif model_name == "chinese-ie":
-        ok, reason = verify_chinese_ie_integrity(temp_dir)
-        if not ok:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return False, f"Chinese IE 格式校验失败: {reason}"
-        active_src = temp_dir
-    else:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return False, f"未知模型类型: {model_name}"
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(f"ModelScope 模型完整性校验未通过: {reason}")
 
     # Write metadata
-    meta = {
-        "source": "manual_import",
-        "imported_from": str(source_path),
-        "imported_at": int(time.time()),
-        "size_bytes": get_dir_size(active_src),
+    metadata = {
+        "provider": "modelscope",
+        "model_id": descriptor.id,
+        "repo_id": descriptor.repo_id,
+        "revision": descriptor.revision,
+        "license": descriptor.license,
+        "installed_at": int(time.time()),
+        "size_bytes": get_dir_size(staging_dir),
     }
-    (active_src / ".metadata.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (staging_dir / ".metadata.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
 
-    # Atomic swap
+    # Transactional atomic replacement
     if target_dir.exists():
-        old_backup = data_dir / "models" / f"{model_name}.old.tmp"
+        old_backup = data_dir / "models" / f"{model_id}.old.tmp"
         if old_backup.exists():
-            shutil.rmtree(old_backup)
+            shutil.rmtree(old_backup, ignore_errors=True)
         os.replace(target_dir, old_backup)
-        os.replace(active_src, target_dir)
+        os.replace(staging_dir, target_dir)
         shutil.rmtree(old_backup, ignore_errors=True)
     else:
         target_dir.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(active_src, target_dir)
+        os.replace(staging_dir, target_dir)
 
-    shutil.rmtree(temp_dir, ignore_errors=True)
-    emit(f"模型 [{model_name}] 导入并校验成功。")
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    emit(f"模型 [{model_id}] 激活成功: {target_dir}")
+    return target_dir
+
+
+def import_local_model(data_dir: Path, model_id: str, source_path: Path) -> Tuple[bool, str]:
+    """Import an existing model from a user-authorized path into app data directory."""
+    if not source_path.exists():
+        return False, f"源路径不存在: {source_path}"
+
+    target_dir = get_model_dir(data_dir, model_id)
+    staging_dir = get_staging_dir(data_dir, model_id)
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    staging_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    emit(f"开始从本地路径导入模型 [{model_id}]，源路径: {source_path}")
+
+    # Copy files into temporary staging area
+    if source_path.is_file():
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, staging_dir / source_path.name)
+    else:
+        shutil.copytree(source_path, staging_dir, symlinks=False)
+
+    ok, reason = verify_model_integrity(staging_dir, model_id)
+    if not ok:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        return False, f"模型导入格式校验失败: {reason}"
+
+    descriptor = get_model_descriptor(model_id)
+    metadata = {
+        "provider": "manual_import",
+        "model_id": model_id,
+        "repo_id": descriptor.repo_id if descriptor else "custom",
+        "license": descriptor.license if descriptor else "unknown",
+        "imported_from": str(source_path),
+        "installed_at": int(time.time()),
+        "size_bytes": get_dir_size(staging_dir),
+    }
+    (staging_dir / ".metadata.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+
+    # Atomic swap
+    if target_dir.exists():
+        old_backup = data_dir / "models" / f"{model_id}.old.tmp"
+        if old_backup.exists():
+            shutil.rmtree(old_backup, ignore_errors=True)
+        os.replace(target_dir, old_backup)
+        os.replace(staging_dir, target_dir)
+        shutil.rmtree(old_backup, ignore_errors=True)
+    else:
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging_dir, target_dir)
+
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    emit(f"模型 [{model_id}] 本地导入并激活成功。")
     return True, f"成功导入模型到 {target_dir}"
 
 
-def uninstall_model(data_dir: Path, model_name: str) -> Tuple[bool, str]:
-    """Uninstall model weights from app data directory without affecting user source files."""
-    target_dir = get_model_dir(data_dir, model_name)
+def uninstall_model(data_dir: Path, model_id: str) -> Tuple[bool, str]:
+    """Uninstall model weights cleanly."""
+    target_dir = get_model_dir(data_dir, model_id)
     if not target_dir.exists():
         return True, "模型原本未安装"
 
     try:
         shutil.rmtree(target_dir)
-        write_state(data_dir, "not_installed", "模型已被管理员卸载", model_name=model_name)
-        emit(f"模型 [{model_name}] 已成功卸载。")
-        return True, f"模型 {model_name} 已卸载"
+        write_state(data_dir, "not_installed", "模型已被管理员卸载", model_id=model_id)
+        emit(f"模型 [{model_id}] 已成功卸载。")
+        return True, f"模型 {model_id} 已卸载"
     except Exception as exc:
         return False, f"卸载模型失败: {exc}"
 
@@ -288,35 +304,37 @@ def main() -> int:
     """Entry point for CLI or background installer execution."""
     data_dir = Path(os.environ.get("APP_DATA_DIR", "/data")).resolve()
     action = sys.argv[1] if len(sys.argv) > 1 else "install"
-    model_name = sys.argv[2] if len(sys.argv) > 2 else "privacy-filter"
+    model_id = sys.argv[2] if len(sys.argv) > 2 else "gliner-pii-edge"
+
+    descriptor = get_model_descriptor(model_id)
+    runtime_name = descriptor.runtime if descriptor else "torch"
 
     try:
         if action == "install":
-            write_state(data_dir, "installing", "正在准备运行环境...", model_name)
-            package_dir = install_python_dependencies(data_dir)
-            if model_name == "privacy-filter":
-                write_state(data_dir, "installing", "正在下载模型权重...", model_name)
-                checkpoint_dir = download_openai_privacy_filter(data_dir, package_dir)
-                write_state(data_dir, "ready", f"模型已就绪: {checkpoint_dir}", model_name)
+            write_state(data_dir, "installing", f"正在准备 [{runtime_name}] 运行环境...", model_id)
+            install_runtime_dependencies(data_dir, runtime_name)
+            write_state(data_dir, "downloading", "正在从 ModelScope 下载模型权重...", model_id)
+            checkpoint_dir = download_modelscope_model(data_dir, model_id)
+            write_state(data_dir, "ready", f"模型已就绪: {checkpoint_dir}", model_id)
             emit("安装流程全部完成。")
             return 0
         elif action == "import":
             if len(sys.argv) < 4:
-                emit("用法: python model_installer.py import <model_name> <source_path>")
+                emit("用法: python model_installer.py import <model_id> <source_path>")
                 return 1
             source_path = Path(sys.argv[3]).resolve()
-            ok, msg = import_local_model(data_dir, model_name, source_path)
+            ok, msg = import_local_model(data_dir, model_id, source_path)
             state = "ready" if ok else "error"
-            write_state(data_dir, state, msg, model_name)
+            write_state(data_dir, state, msg, model_id)
             return 0 if ok else 1
         elif action == "uninstall":
-            ok, msg = uninstall_model(data_dir, model_name)
+            ok, msg = uninstall_model(data_dir, model_id)
             return 0 if ok else 1
         else:
             emit(f"未知操作: {action}")
             return 1
     except Exception as exc:
-        write_state(data_dir, "error", str(exc), model_name)
+        write_state(data_dir, "error", str(exc), model_id)
         emit(f"执行失败: {exc}")
         return 1
 

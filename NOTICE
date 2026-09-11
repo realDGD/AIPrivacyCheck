@@ -1,9 +1,10 @@
 AI Privacy Check
 Copyright 2026 AI Privacy Check Contributors
 
-This product can optionally download and run OpenAI Privacy Filter, which is
-licensed separately under the Apache License 2.0. The optional runtime and model
-weights are not distributed inside this fnOS package.
+This product can optionally download and run open-source models from ModelScope
+(魔搭社区), including GLiNER (Apache-2.0), MemPrivacy (CC BY-NC-ND 4.0), and SiameseUIE
+(Apache-2.0). The optional runtime and model weights are not distributed inside this
+fnOS package and are fetched or imported on demand by the system administrator.
 
 The Chinese entity scope, information extraction architecture, and local-review
 product principles were informed by the public documentation of cn_pii_anonymization,

@@ -18,6 +18,8 @@ const elements = {
   sourceCounter: $("sourceCounter"),
   detectButton: $("detectButton"),
   useModelToggle: $("useModelToggle"),
+  policySelect: $("policySelect"),
+  slotListContainer: $("slotListContainer"),
   modelInlineStatus: $("modelInlineStatus") || $("modelToggleLabel"),
   entityList: $("entityList") || $("entityTableBody"),
   entityEmpty: $("entityEmpty") || { hidden: false },
@@ -38,17 +40,12 @@ const elements = {
   copyRestoredButton: $("copyRestoredButton"),
   restoreReport: $("restoreReport") || { hidden: true },
   activeVaultBadge: $("activeVaultBadge") || { textContent: "" },
-  modelStatusBadge: $("modelStatusBadge"),
-  modelDetail: $("modelDetail"),
-  installModelButton: $("installModelButton"),
   installLog: $("installLog"),
   exportDialog: $("exportDialog"),
   openNewTabButton: $("openNewTabButton"),
   deviceSelect: $("deviceSelect"),
   deviceStatusBadge: $("deviceStatusBadge"),
   deviceDetail: $("deviceDetail"),
-  modelActiveDevice: $("modelActiveDevice"),
-  uninstallModelButton: $("uninstallModelButton"),
   reloadModelButton: $("reloadModelButton"),
   importModelType: $("importModelType"),
   importSourcePath: $("importSourcePath"),
@@ -145,6 +142,13 @@ function renderEntities() {
   elements.reviewFooter.hidden = state.entities.length === 0;
   elements.entityCount.textContent = `${state.entities.filter((item) => item.enabled).length} / ${state.entities.length} 项`;
 
+  const SOURCE_NAMES = {
+    multilingual_rules: "基础规则",
+    chinese_ie: "中文语义",
+    gliner_pii: "GLiNER通用",
+    memprivacy: "MemPrivacy深度",
+  };
+
   state.entities.forEach((entity, index) => {
     const card = document.createElement("label");
     card.className = "entity-card";
@@ -165,10 +169,16 @@ function renderEntities() {
     const type = document.createElement("span");
     type.className = "entity-type";
     type.textContent = entity.label;
+
+    const pl = entity.privacy_level || "PL2";
+    const plBadge = document.createElement("span");
+    plBadge.className = `pl-tag pl-${pl.toLowerCase()}`;
+    plBadge.textContent = pl;
+
     const score = document.createElement("span");
     score.className = "entity-score";
     score.textContent = entity.validated ? "已校验" : `${Math.round(entity.confidence * 100)}%`;
-    top.append(type, score);
+    top.append(type, plBadge, score);
 
     const value = document.createElement("span");
     value.className = "entity-value";
@@ -186,7 +196,8 @@ function renderEntities() {
 
     const sources = document.createElement("div");
     sources.className = "source-tags";
-    sources.textContent = entity.sources.includes("openai_privacy_filter") ? "本地多语言规则 + 本地模型" : "本地多语言规则";
+    const readableSources = (entity.sources || []).map((s) => SOURCE_NAMES[s] || s).join(" + ") || "本地规则";
+    sources.textContent = `引擎: ${readableSources}`;
     main.append(top, value, replacement, sources);
     card.append(checkbox, main);
     elements.entityList.append(card);
@@ -235,17 +246,22 @@ async function detect() {
   elements.detectButton.textContent = "正在本地检测…";
   showNotice([]);
   try {
+    const policyLevel = elements.policySelect ? elements.policySelect.value : "PL2";
     const result = await api("/api/detect", {
       method: "POST",
-      body: JSON.stringify({ text, use_model: elements.useModelToggle.checked }),
+      body: JSON.stringify({
+        text,
+        use_model: elements.useModelToggle ? elements.useModelToggle.checked : false,
+        policy_level: policyLevel,
+      }),
     });
     state.source = text;
     state.entities = await prepareEntities(result.entities);
     renderEntities();
     generateRedacted();
     const summary = state.entities.length
-      ? `检测完成：发现 ${state.entities.length} 项，耗时 ${result.processing_ms} ms。请逐项复核后再发送。`
-      : "未发现明确的隐私字段。自动检测可能漏检，请人工检查原文。";
+      ? `检测完成 [${result.policy_level || policyLevel}]：发现 ${state.entities.length} 项，耗时 ${result.processing_ms} ms。请逐项复核后再发送。`
+      : `未发现符合 [${result.policy_level || policyLevel}] 策略的隐私字段。自动检测可能漏检，请人工检查原文。`;
     showNotice([summary, ...(result.warnings || [])]);
   } catch (error) {
     showNotice(error.message, true);
@@ -399,20 +415,29 @@ async function importVault() {
 
 function updateModelUI(data) {
   state.model = data;
-  const opf = (data.models && data.models.privacy_filter) || (data.model) || {};
-  const status = opf.state || "packages_missing";
-  const labels = {
-    ready: "已就绪",
-    installing: "安装中",
-    packages_missing: "未安装",
-    model_missing: "待下载权重",
-    error: "安装失败",
-  };
-  elements.modelStatusBadge.textContent = labels[status] || status || "未知状态";
-  elements.modelStatusBadge.className = `status-badge${status === "ready" ? " is-ready" : status === "error" ? " is-error" : ""}`;
-  elements.useModelToggle.disabled = status !== "ready";
-  if (status !== "ready") elements.useModelToggle.checked = false;
-  elements.modelInlineStatus.textContent = status === "ready" ? "增强模型已就绪" : status === "installing" ? "正在后台安装" : "未安装（中文语义与多语言规则始终可用）";
+  const reg = data.registry || {};
+  const slots = reg.slots || {};
+
+  // Check overall model readiness for optional enhanced detectors
+  const glinerSlot = slots.general_pii || {};
+  const memSlot = slots.semantic_privacy || {};
+  const glinerReady = glinerSlot.detector && glinerSlot.detector.ready;
+  const memReady = memSlot.detector && memSlot.detector.ready;
+  const anyModelReady = glinerReady || memReady;
+
+  if (elements.useModelToggle) {
+    elements.useModelToggle.disabled = !anyModelReady;
+    if (!anyModelReady) elements.useModelToggle.checked = false;
+  }
+  if (elements.modelInlineStatus) {
+    if (data.installing) {
+      elements.modelInlineStatus.textContent = "正在后台下载/安装模型…";
+    } else if (anyModelReady) {
+      elements.modelInlineStatus.textContent = "增强模型已就绪 (GLiNER / MemPrivacy)";
+    } else {
+      elements.modelInlineStatus.textContent = "未安装增强模型（基础规则与中文语义始终可用）";
+    }
+  }
 
   // Device status
   const dev = data.device || {};
@@ -428,22 +453,124 @@ function updateModelUI(data) {
   if (elements.deviceSelect && dev.requested_device) {
     elements.deviceSelect.value = dev.requested_device;
   }
-  if (elements.modelActiveDevice) {
-    elements.modelActiveDevice.textContent = (dev.actual_device || "CPU").toUpperCase();
+
+  // Render Slots in #slotListContainer
+  if (elements.slotListContainer) {
+    elements.slotListContainer.replaceChildren();
+
+    const slotOrder = ["built_in", "chinese_ie", "general_pii", "semantic_privacy"];
+    slotOrder.forEach((slotId) => {
+      const slot = slots[slotId];
+      if (!slot) return;
+
+      const item = document.createElement("div");
+      item.className = "slot-item";
+
+      const header = document.createElement("div");
+      header.className = "slot-item-header";
+
+      const title = document.createElement("div");
+      title.className = "slot-item-title";
+      title.textContent = slot.name;
+
+      const badge = document.createElement("span");
+      badge.className = "status-badge";
+
+      const det = slot.detector || {};
+      const isReady = det.ready;
+      const isInstalled = det.installed;
+      const installState = data.install_states && data.install_states[slot.active_model];
+
+      if (slotId === "built_in") {
+        badge.textContent = "系统内置 (始终运行)";
+        badge.className = "status-badge is-ready";
+      } else if (slotId === "chinese_ie") {
+        badge.textContent = isInstalled ? "已加载 SiameseUIE" : "系统内置语法 (始终就绪)";
+        badge.className = "status-badge is-ready";
+      } else if (installState && installState.state === "installing") {
+        badge.textContent = "正在安装";
+        badge.className = "status-badge";
+      } else if (isReady) {
+        badge.textContent = "已就绪";
+        badge.className = "status-badge is-ready";
+      } else if (isInstalled) {
+        badge.textContent = "已安装 (待加载)";
+        badge.className = "status-badge";
+      } else {
+        badge.textContent = "未安装";
+        badge.className = "status-badge";
+      }
+      header.append(title, badge);
+
+      const desc = document.createElement("div");
+      desc.className = "slot-item-desc";
+      desc.textContent = slot.description;
+
+      const controls = document.createElement("div");
+      controls.className = "slot-item-controls";
+
+      if (slot.available_models && slot.available_models.length > 0) {
+        const select = document.createElement("select");
+        select.style.padding = "4px 8px";
+        select.style.borderRadius = "6px";
+        select.style.border = "1px solid var(--line)";
+        select.style.fontSize = "12px";
+
+        slot.available_models.forEach((m) => {
+          const opt = document.createElement("option");
+          opt.value = m.id;
+          opt.textContent = `${m.display_name} (${m.size_hint}, ${m.license})`;
+          if (m.id === slot.active_model) opt.selected = true;
+          select.append(opt);
+        });
+
+        select.addEventListener("change", async () => {
+          try {
+            await api("/api/model/select", {
+              method: "POST",
+              body: JSON.stringify({ slot: slotId, model: select.value }),
+            });
+            toast(`已切换激活模型为 ${select.value}`);
+            await refreshModelStatus();
+          } catch (err) {
+            toast(`切换失败: ${err.message}`);
+          }
+        });
+        controls.append(select);
+      }
+
+      const actions = document.createElement("div");
+      actions.style.display = "flex";
+      actions.style.gap = "8px";
+      actions.style.alignItems = "center";
+
+      if (slotId !== "built_in") {
+        if (!isInstalled && slot.active_model) {
+          const installBtn = document.createElement("button");
+          installBtn.className = "button button-primary button-small";
+          installBtn.textContent = "从魔搭下载安装";
+          installBtn.disabled = !data.is_admin || data.installing;
+          installBtn.addEventListener("click", () => installModel(slot.active_model));
+          actions.append(installBtn);
+        } else if (isInstalled && slot.active_model) {
+          const uninstallBtn = document.createElement("button");
+          uninstallBtn.className = "button button-ghost button-small";
+          uninstallBtn.textContent = "卸载模型";
+          uninstallBtn.disabled = !data.is_admin || data.installing;
+          uninstallBtn.addEventListener("click", () => uninstallModel(slot.active_model));
+          actions.append(uninstallBtn);
+        }
+      }
+
+      controls.append(actions);
+      item.append(header, desc, controls);
+      elements.slotListContainer.append(item);
+    });
   }
 
-  // Model details
-  const installDetail = (data.install_states && data.install_states["privacy-filter-install"] && data.install_states["privacy-filter-install"].detail)
-    || (opf.install && opf.install.detail);
-  elements.modelDetail.textContent = status === "ready"
-    ? "OpenAI Privacy Filter 权重完整，已保存在 fnOS 数据目录中，离线推理保护中。"
-    : installDetail || "中文规则与中文语义信息抽取开箱即用；可选模型增强可进一步提升长难句泛化度。";
-  elements.installModelButton.disabled = !data.is_admin || data.installing || status === "ready";
-  elements.installModelButton.textContent = data.installing ? "正在处理中..." : status === "ready" ? "模型已就绪" : "在线安装增强模型";
-  if (elements.uninstallModelButton) {
-    elements.uninstallModelButton.style.display = status === "ready" ? "inline-block" : "none";
+  if (elements.installLog) {
+    elements.installLog.textContent = data.log_tail && data.log_tail.length ? data.log_tail.join("\n") : "暂无日志";
   }
-  elements.installLog.textContent = data.log_tail && data.log_tail.length ? data.log_tail.join("\n") : "暂无日志";
 
   clearTimeout(state.modelPoll);
   if (data.installing) state.modelPoll = setTimeout(refreshModelStatus, 3000);
@@ -453,20 +580,18 @@ async function refreshModelStatus() {
   try {
     updateModelUI(await api("/api/model/status"));
   } catch (error) {
-    elements.modelInlineStatus.textContent = "无法读取模型状态";
-    elements.modelDetail.textContent = error.message;
+    if (elements.modelInlineStatus) elements.modelInlineStatus.textContent = "无法读取模型状态";
   }
 }
 
-async function installModel() {
-  const confirmed = window.confirm("在线安装将从 GitHub 和 Hugging Face 下载运行库与约 2.8GB 权重。继续吗？");
+async function installModel(modelId = "gliner-pii-edge") {
+  const confirmed = window.confirm(`在线安装将从 ModelScope (魔搭社区) 下载运行库与模型权重。继续吗？`);
   if (!confirmed) return;
-  elements.installModelButton.disabled = true;
   try {
-    const result = await api("/api/model/install", { method: "POST", body: JSON.stringify({ model: "privacy-filter" }) });
-    updateModelUI({ ...result.model, is_admin: true });
-    $("installLogPanel").open = true;
-    toast("模型已开始在后台下载与安装");
+    const result = await api("/api/model/install", { method: "POST", body: JSON.stringify({ model: modelId }) });
+    updateModelUI({ ...result.status, is_admin: true });
+    if ($("installLogPanel")) $("installLogPanel").open = true;
+    toast("模型已开始在后台从 ModelScope 下载与安装");
   } catch (error) {
     toast(error.message);
     await refreshModelStatus();
@@ -474,13 +599,13 @@ async function installModel() {
 }
 
 async function importModel() {
-  const modelType = elements.importModelType ? elements.importModelType.value : "privacy-filter";
+  const modelType = elements.importModelType ? elements.importModelType.value : "gliner-pii-edge";
   const sourcePath = (elements.importSourcePath ? elements.importSourcePath.value : "").trim();
   if (!sourcePath) {
     toast("请输入已授权的模型源目录路径");
     return;
   }
-  elements.confirmImportButton.disabled = true;
+  if (elements.confirmImportButton) elements.confirmImportButton.disabled = true;
   try {
     const result = await api("/api/model/import", {
       method: "POST",
@@ -492,16 +617,16 @@ async function importModel() {
   } catch (error) {
     toast(`导入失败: ${error.message}`);
   } finally {
-    elements.confirmImportButton.disabled = false;
+    if (elements.confirmImportButton) elements.confirmImportButton.disabled = false;
   }
 }
 
-async function uninstallModel() {
-  if (!window.confirm("确定要卸载当前存储在应用目录内的该模型副本吗？不会影响您原始导入的文件。")) return;
+async function uninstallModel(modelId = "gliner-pii-edge") {
+  if (!window.confirm(`确定要卸载应用目录内的该模型 (${modelId}) 吗？`)) return;
   try {
     const result = await api("/api/model/uninstall", {
       method: "POST",
-      body: JSON.stringify({ model: "privacy-filter" }),
+      body: JSON.stringify({ model: modelId }),
     });
     toast(result.message || "已卸载");
     updateModelUI(result.status);
@@ -513,7 +638,7 @@ async function uninstallModel() {
 async function reloadModel() {
   try {
     const result = await api("/api/model/reload", { method: "POST", body: "{}" });
-    toast("模型已成功重载");
+    toast("全部模型已成功重载");
     updateModelUI(result.status);
   } catch (error) {
     toast(`重载失败: ${error.message}`);

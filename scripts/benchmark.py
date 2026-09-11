@@ -83,6 +83,8 @@ def run_benchmark(fixture_path: Path):
 
         lang_stats = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
         type_stats = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
+        pl_stats = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
+        detector_counts = defaultdict(int)
 
         start_time = time.perf_counter()
 
@@ -94,11 +96,16 @@ def run_benchmark(fixture_path: Path):
             result = service.detect(text, use_model=False)
             predictions = result["entities"]
 
+            for eng in result.get("engines", []):
+                detector_counts[eng] += 1
+
             matched_preds = set()
             for true_ent in ground_truth:
                 t_start = true_ent["start"]
                 t_end = true_ent["end"]
                 t_type = true_ent["type"]
+                from privacy.taxonomy import resolve_privacy_level
+                t_pl = resolve_privacy_level(t_type)
 
                 found = False
                 for p_idx, pred in enumerate(predictions):
@@ -113,16 +120,20 @@ def run_benchmark(fixture_path: Path):
                     total_tp += 1
                     lang_stats[lang]["tp"] += 1
                     type_stats[t_type]["tp"] += 1
+                    pl_stats[t_pl]["tp"] += 1
                 else:
                     total_fn += 1
                     lang_stats[lang]["fn"] += 1
                     type_stats[t_type]["fn"] += 1
+                    pl_stats[t_pl]["fn"] += 1
 
             for p_idx, pred in enumerate(predictions):
                 if p_idx not in matched_preds:
                     total_fp += 1
                     lang_stats[lang]["fp"] += 1
                     type_stats[pred["type"]]["fp"] += 1
+                    p_pl = pred.get("privacy_level", "PL2")
+                    pl_stats[p_pl]["fp"] += 1
 
         elapsed = time.perf_counter() - start_time
         total_prec, total_rec, total_f1 = compute_metrics(total_tp, total_fp, total_fn)
@@ -136,6 +147,16 @@ def run_benchmark(fixture_path: Path):
             print(f"{lang:<12} | {st['tp']:<10} | {st['fp']:<10} | {st['fn']:<10} | {p*100:>8.1f}% | {r*100:>8.1f}% | {f*100:>8.1f}%")
 
         print("-" * 80)
+        print(f"\n{'Privacy Level (PL)':<20} | {'TP':<6} | {'FP':<6} | {'FN':<6} | {'Precision':<10} | {'Recall':<10} | {'F1 Score':<10}")
+        print("-" * 80)
+        pl_order = ["PL4", "PL3", "PL2", "PL1"]
+        for pl in pl_order:
+            if pl in pl_stats:
+                st = pl_stats[pl]
+                p, r, f = compute_metrics(st["tp"], st["fp"], st["fn"])
+                print(f"{pl:<20} | {st['tp']:<6} | {st['fp']:<6} | {st['fn']:<6} | {p*100:>8.1f}% | {r*100:>8.1f}% | {f*100:>8.1f}%")
+
+        print("-" * 80)
         print(f"\n{'Entity Type':<20} | {'TP':<6} | {'FP':<6} | {'FN':<6} | {'Precision':<10} | {'Recall':<10} | {'F1 Score':<10}")
         print("-" * 80)
         for etype in sorted(type_stats.keys()):
@@ -145,6 +166,7 @@ def run_benchmark(fixture_path: Path):
 
         print("=" * 80)
         print(f"Overall Metrics: Precision = {total_prec*100:.2f}%, Recall = {total_rec*100:.2f}%, F1 = {total_f1*100:.2f}%")
+        print(f"Active Engines: {dict(detector_counts)}")
         print(f"Total Spans Processed: {total_tp + total_fn} ground truth, Elapsed: {elapsed*1000:.2f}ms")
         print("=" * 80)
 

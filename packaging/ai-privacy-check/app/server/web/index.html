@@ -55,13 +55,24 @@
                 <span class="counter" id="sourceCounter">0 字</span>
               </div>
               <textarea id="sourceText" spellcheck="false" placeholder="例如：联系人张三，手机号 13800138000，邮箱 zhangsan@example.com……"></textarea>
-              <div class="engine-row">
-                <label class="switch-label" for="useModelToggle">
-                  <input id="useModelToggle" type="checkbox" disabled />
-                  <span class="switch" aria-hidden="true"></span>
-                  <span><strong>OpenAI 模型增强</strong><small id="modelInlineStatus">正在检查模型状态…</small></span>
-                </label>
-                <button class="text-button" id="goModelButton" type="button">模型设置 →</button>
+              <div class="engine-row" style="display:flex; gap:16px; align-items:center; justify-content:space-between; flex-wrap:wrap;">
+                <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+                  <label class="switch-label" for="useModelToggle">
+                    <input id="useModelToggle" type="checkbox" />
+                    <span class="switch" aria-hidden="true"></span>
+                    <span><strong>模型增强检测</strong><small id="modelInlineStatus">正在检查模型状态…</small></span>
+                  </label>
+                  <label style="display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:var(--text);">
+                    脱敏策略:
+                    <select id="policySelect" style="padding:4px 8px; border-radius:6px; border:1px solid var(--line); font-size:12px; background:var(--paper);">
+                      <option value="PL2" selected>PL2 (可识别个人信息 - 推荐)</option>
+                      <option value="PL3">PL3 (高敏身份与合规)</option>
+                      <option value="PL4">PL4 (核心密码与凭证)</option>
+                      <option value="PL1">PL1 (全部包含低敏偏好)</option>
+                    </select>
+                  </label>
+                </div>
+                <button class="text-button" id="goModelButton" type="button">模型管理 →</button>
               </div>
               <button class="button button-primary button-wide" id="detectButton" type="button">
                 <span aria-hidden="true">⌕</span> 检测隐私字段
@@ -158,36 +169,33 @@
               <p class="model-detail" id="deviceDetail">正在检测硬件环境…</p>
             </article>
 
-            <article class="panel model-card">
-              <span class="eyebrow">OPTIONAL LOCAL MODEL</span>
-              <div class="model-title-row"><div><h2>OpenAI Privacy Filter</h2><p>1.5B 参数 MoE 隐私片段分类模型</p></div><span class="status-badge" id="modelStatusBadge">检查中</span></div>
-              <div class="model-facts">
-                <div><span>运行位置</span><strong>fnOS 本机</strong></div>
-                <div><span>权重大小</span><strong>约 2.8 GB</strong></div>
-                <div><span>当前设备</span><strong id="modelActiveDevice">CPU</strong></div>
-                <div><span>许可证</span><strong>Apache-2.0</strong></div>
+            <article class="panel model-card" style="grid-column: 1 / -1;">
+              <span class="eyebrow">PLUGGABLE DETECTOR REGISTRY</span>
+              <div class="model-title-row">
+                <div><h2>检测器槽位与模型管理</h2><p>支持多槽位独立启闭、多模型切换与 ModelScope (魔搭社区) 官方下载</p></div>
+                <button class="button button-ghost button-small" id="reloadModelButton" type="button">重载全部模型</button>
               </div>
-              <p class="model-detail" id="modelDetail">正在读取模型状态…</p>
-              <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                <button class="button button-primary" id="installModelButton" type="button" disabled>在线安装增强模型</button>
-                <button class="button button-ghost" id="uninstallModelButton" type="button" style="display:none;">卸载本地模型</button>
-                <button class="button button-ghost" id="reloadModelButton" type="button">重载模型单例</button>
+              <div class="slot-list" id="slotListContainer">
+                <!-- Dynamically rendered by app.js from /api/model/status -->
               </div>
-              <p class="form-help">支持在线下载，也支持从 NAS 授权目录手动导入已下载好的权重。</p>
+              <p class="form-help">所有可下载模型均直接托管于 ModelScope (魔搭社区)；安装过程支持断点重试与环境隔离。</p>
             </article>
 
             <article class="panel model-card">
               <span class="eyebrow">LOCAL MANUAL IMPORT</span>
               <div class="model-title-row"><div><h2>手动导入已有模型</h2><p>无需外网，从 fnOS 授权目录原子导入</p></div></div>
               <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
-                <label style="font-size:12px;">模型类型
+                <label style="font-size:12px;">模型目标类型
                   <select id="importModelType" style="width:100%; padding:6px; border-radius:6px; border:1px solid var(--line); margin-top:4px;">
-                    <option value="privacy-filter">OpenAI Privacy Filter (含 config.json 和 safetensors)</option>
-                    <option value="chinese-ie">Chinese IE / UIE 模型目录</option>
+                    <option value="gliner-pii-edge">GLiNER PII Edge (通用 PII 实体抽取, ~500MB)</option>
+                    <option value="gliner-pii-base">GLiNER PII Base (高精度通用 PII, ~1.2GB)</option>
+                    <option value="memprivacy-1.7b-rl">MemPrivacy 1.7B RL (深度语义隐私推理, ~3.5GB)</option>
+                    <option value="memprivacy-4b-rl">MemPrivacy 4B RL (强语义隐私推理大模型, ~8.0GB)</option>
+                    <option value="siamese-uie">SiameseUIE (中文信息抽取模型, ~400MB)</option>
                   </select>
                 </label>
                 <label style="font-size:12px;">授权路径
-                  <input id="importSourcePath" type="text" placeholder="例如：/var/apps/ai-privacy-check/shares/models/privacy-filter" style="width:100%; padding:6px; border-radius:6px; border:1px solid var(--line); margin-top:4px;" />
+                  <input id="importSourcePath" type="text" placeholder="例如：/var/apps/ai-privacy-check/shares/models/gliner-pii-edge" style="width:100%; padding:6px; border-radius:6px; border:1px solid var(--line); margin-top:4px;" />
                 </label>
                 <button class="button button-secondary" id="confirmImportButton" type="button">校验并导入模型</button>
               </div>
@@ -196,12 +204,12 @@
 
             <article class="panel boundary-card">
               <span class="eyebrow">PRIVACY BOUNDARY</span>
-              <h2>这款应用会做什么</h2>
+              <h2>隐私与数据边界保证</h2>
               <ul class="boundary-list">
-                <li><span>01</span><div><strong>中文规则始终可用</strong><p>身份证、银行卡、手机号等高敏字段优先使用格式与校验位识别。</p></div></li>
-                <li><span>02</span><div><strong>模型只接收本地文本</strong><p>模型权重从 Hugging Face 下载或本地导入；检测时不会调用任何云端 API。</p></div></li>
-                <li><span>03</span><div><strong>不会承诺 100% 漏检率</strong><p>姓名、地址和专业领域标识符可能漏检或误检，发送前必须人工复核。</p></div></li>
-                <li><span>04</span><div><strong>不保存原文与回复</strong><p>服务不建立文本数据库、不记录请求正文；刷新页面会丢失当前映射。</p></div></li>
+                <li><span>01</span><div><strong>基础规则始终可用</strong><p>身份证、银行卡、手机号等高敏法定字段优先使用校验位与格式识别，零模型依赖。</p></div></li>
+                <li><span>02</span><div><strong>模型只接收本地文本</strong><p>模型权重从 ModelScope (魔搭社区) 下载或本地导入；推理 100% 本地离线执行，不调用任何外部云端 API。</p></div></li>
+                <li><span>03</span><div><strong>严格层级冲突仲裁</strong><p>校验位规则 > 严格规则 > 专用抽取模型 > 生成式模型，高敏凭据决不被模型随意降级。</p></div></li>
+                <li><span>04</span><div><strong>不保存原文与回复</strong><p>服务不建立文本数据库、不落盘明文；会话映射仅留存在浏览器内存中，随时可清空。</p></div></li>
               </ul>
             </article>
           </div>
@@ -212,7 +220,7 @@
         </section>
       </main>
 
-      <footer><span>AI Privacy Check 0.3.1 · fnOS Native</span><span>自动检测仅用于辅助，敏感内容外发前请人工复核。</span></footer>
+      <footer><span>AI Privacy Check · fnOS Native</span><span>自动检测仅用于辅助，敏感内容外发前请人工复核。</span></footer>
     </div>
 
     <dialog id="exportDialog">

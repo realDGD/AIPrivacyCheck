@@ -11,8 +11,7 @@
 
 ## 会保存的数据
 
-- 可选推理依赖与 Python wheel。
-- 可选神经网络模型权重（OpenAI Privacy Filter 或 PaddleNLP UIE 权重）。
+- 可选神经网络模型权重（来自 ModelScope 的 GLiNER、MemPrivacy 或 SiameseUIE 权重）。
 - 不含任何用户文本的模型安装状态与运行日志。
 
 ## 攻击面与缓解措施

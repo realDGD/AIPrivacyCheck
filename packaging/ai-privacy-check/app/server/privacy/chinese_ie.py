@@ -168,46 +168,81 @@ class BuiltinChineseIE:
 
 
 class ChineseIEDetector:
-    """Unified Chinese IE detector: supports builtin rules and optional deep UIE models."""
+    """Unified Chinese IE detector: supports builtin rules and optional deep SiameseUIE / UIE models."""
 
+    id = "chinese_ie"
+    slot = "chinese_ie"
     name = "chinese_ie"
 
-    def __init__(self, data_dir: Optional[Path] = None) -> None:
+    def __init__(self, data_dir: Optional[Path] = None, active_model_id: str = "siamese-uie") -> None:
         self.data_dir = data_dir
+        self.active_model_id = active_model_id
         self._builtin = BuiltinChineseIE()
         self._uie_model = None
         self._model_lock = threading.Lock()
         self._model_attempted = False
         self._model_available = False
 
+    def _get_model_dir(self) -> Optional[Path]:
+        if not self.data_dir:
+            return None
+        # Support both new siamese-uie and legacy chinese-ie directories
+        p1 = self.data_dir / "models" / self.active_model_id
+        if p1.is_dir():
+            return p1
+        p2 = self.data_dir / "models" / "siamese-uie"
+        if p2.is_dir():
+            return p2
+        p3 = self.data_dir / "models" / "chinese-ie"
+        if p3.is_dir():
+            return p3
+        return p1
+
     def status(self) -> Dict[str, object]:
         installed = False
         model_path = None
-        if self.data_dir:
-            target = self.data_dir / "models" / "chinese-ie"
-            if target.is_dir() and (target / "model_state.pdparams").is_file():
+        model_dir = self._get_model_dir()
+        if model_dir and model_dir.is_dir():
+            has_weights = (
+                (model_dir / "model_state.pdparams").is_file()
+                or (model_dir / "config.json").is_file()
+                or any(model_dir.glob("*.safetensors"))
+                or any(model_dir.glob("*.pdparams"))
+            )
+            if has_weights:
                 installed = True
-                model_path = str(target)
+                model_path = str(model_dir)
 
         actual_device, _ = DEVICE_MANAGER.resolve()
         return {
+            "id": self.id,
+            "slot": self.slot,
             "name": self.name,
-            "engine": "paddlenlp_uie" if installed and self._model_available else "builtin_semantic_ie",
+            "engine": "siamese_uie" if installed and self._model_available else "builtin_semantic_ie",
+            "active_model": self.active_model_id,
             "installed": installed,
             "ready": True,  # Built-in is always ready
+            "model_ready": self._model_available,
             "device": actual_device,
             "path": model_path,
         }
 
-    def _try_init_paddlenlp(self) -> None:
+    def load(self) -> None:
+        self._try_init_uie()
+
+    def unload(self) -> None:
+        with self._model_lock:
+            self._uie_model = None
+            self._model_attempted = False
+            self._model_available = False
+
+    def _try_init_uie(self) -> None:
         with self._model_lock:
             if self._model_attempted:
                 return
             self._model_attempted = True
-            if not self.data_dir:
-                return
-            model_dir = self.data_dir / "models" / "chinese-ie"
-            if not model_dir.is_dir():
+            model_dir = self._get_model_dir()
+            if not model_dir or not model_dir.is_dir():
                 return
 
             try:
@@ -217,7 +252,7 @@ class ChineseIEDetector:
                 use_gpu = device == "cuda"
                 self._uie_model = Taskflow(
                     "information_extraction",
-                    schema=["姓名", "地址"],
+                    schema=["姓名", "地址", "机构", "学校", "职位", "医院"],
                     task_path=str(model_dir),
                     device_id=0 if use_gpu else -1,
                 )
@@ -261,8 +296,8 @@ class ChineseIEDetector:
                 )
             )
 
-        # 2. Check if optional PaddleNLP UIE is ready
-        self._try_init_paddlenlp()
+        # 2. Check if optional SiameseUIE / UIE is ready
+        self._try_init_uie()
         if self._model_available and self._uie_model is not None:
             try:
                 uie_entities, uie_warn = self._infer_uie(text)

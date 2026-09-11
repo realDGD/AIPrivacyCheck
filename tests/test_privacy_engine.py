@@ -96,8 +96,29 @@ class ServiceTests(unittest.TestCase):
             result = service.detect("联系人张三，手机号13800138000", use_model=True)
         self.assertIn(service.rules.name, result["engines"])
         self.assertIn(service.chinese_ie.name, result["engines"])
-        self.assertNotIn("openai_privacy_filter", result["engines"])
+        self.assertNotIn("gliner_pii", result["engines"])
+        self.assertNotIn("memprivacy", result["engines"])
         self.assertTrue(result["warnings"])
+
+    def test_registry_slots_and_capabilities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = PrivacyService(Path(directory))
+            caps = service.capabilities()
+            self.assertIn("registry", caps)
+            self.assertIn("slots", caps["registry"])
+            slots = caps["registry"]["slots"]
+            self.assertIn("built_in", slots)
+            self.assertIn("chinese_ie", slots)
+            self.assertIn("general_pii", slots)
+            self.assertIn("semantic_privacy", slots)
+
+    def test_privacy_policy_filtering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = PrivacyService(Path(directory))
+            text = "私钥 -----BEGIN PRIVATE KEY----- ABC -----END PRIVATE KEY----- 姓名张三"
+            res_pl4 = service.detect(text, policy_level="PL4")
+            for ent in res_pl4["entities"]:
+                self.assertEqual(ent["privacy_level"], "PL4")
 
 
 if __name__ == "__main__":

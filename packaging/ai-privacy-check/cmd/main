@@ -45,7 +45,7 @@ start_app() {
     return 1
   fi
 
-  mkdir -p "$DATA_DIR" "${DATA_DIR}/status" "${DATA_DIR}/huggingface" "${DATA_DIR}/pip-cache"
+  mkdir -p "$DATA_DIR" "${DATA_DIR}/status" "${DATA_DIR}/modelscope" "${DATA_DIR}/pip-cache"
   rm -f "$SOCKET_PATH"
   log_msg "Starting AI Privacy Check native service..."
   cd "$APP_DIR" || return 1
@@ -53,10 +53,9 @@ start_app() {
     APP_DATA_DIR="$DATA_DIR" \
     APP_BASE_PATH="$GATEWAY_PREFIX" \
     GATEWAY_SOCKET="$SOCKET_PATH" \
-    HF_HOME="${DATA_DIR}/huggingface" \
+    MODELSCOPE_CACHE="${DATA_DIR}/modelscope" \
     PIP_CACHE_DIR="${DATA_DIR}/pip-cache" \
     AI_PRIVACY_DEVICE="${AI_PRIVACY_DEVICE:-auto}" \
-    OPF_DEVICE="${AI_PRIVACY_DEVICE:-auto}" \
     PYTHONDONTWRITEBYTECODE="1" \
     PYTHONUNBUFFERED="1" \
     "$PYTHON_BIN" "$APP_DIR/server.py" >> "$LOG_FILE" 2>&1 &

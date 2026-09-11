@@ -18,35 +18,42 @@ fnOS 统一网关 (/app/ai-privacy-check)
   │ Unix Stream Socket: ai-privacy-check.sock
   ▼
 fnOS Native Python 3.12 进程 (package 用户)
-  ├── MultilingualRuleDetector (Tier 1)
-  │     ├── 20+ 种格式正则与跨语言上下文约束 (中文/英/德/法/西/俄/日/韩/阿/泰)
-  │     └── 校验位/日期/Luhn/IBAN/USCC 算法校验器
-  ├── ChineseIEDetector (Tier 2)
-  │     ├── 内置零依赖语言学启发式信息抽取 (百家姓/动词锚点/行政拓扑)
-  │     ├── safe_sequential_span_alignment 游标防重定位
-  │     └── 可选 PaddleNLP Taskflow UIE 适配器
-  ├── OpenAIModelDetector (Tier 3, 可选、惰性加载)
-  │     └── opf.OPF Token Classification 模型
+  ├── DetectorRegistry (插拔式检测器管理器)
+  │     ├── BuiltInRuleDetector (Tier 1, 槽位 built_in, 始终就绪)
+  │     │     ├── 20+ 种格式正则与跨语言上下文约束 (中文/英/德/法/西/俄/日/韩/阿/泰)
+  │     │     └── 校验位/日期/Luhn/IBAN/USCC 算法校验器
+  │     ├── ChineseIEDetector (Tier 2, 槽位 chinese_ie, 始终就绪)
+  │     │     ├── 内置零依赖语言学启发式信息抽取 (百家姓/动词锚点/行政拓扑)
+  │     │     ├── safe_sequential_span_alignment 游标防重定位
+  │     │     └── 可选 ModelScope SiameseUIE 适配器
+  │     ├── GLiNERDetector (Tier 3, 槽位 general_pii, ModelScope: gliner-pii-edge / base)
+  │     │     └── 原生 token-level span extraction, 零偏移漂移
+  │     └── MemPrivacyDetector (Tier 4, 槽位 semantic_privacy, ModelScope: memprivacy-1.7b-rl / 4b-rl)
+  │           └── 深度隐私逻辑推理与安全跨度对齐 (resolve_semantic_spans)
   ├── DeviceManager
   │     └── auto / cpu / cuda 惰性探测与智能降级
   └── 静态 Web UI
         ├── 人工复核与稳定占位符
+        ├── PL2 / PL3 / PL4 策略级联筛选
         ├── 实时脱敏与本地精确还原
         └── Web Crypto PBKDF2 + AES-256-GCM 本地加密保险箱
 ```
 
-## 三级检测与实体仲裁
+## 多级检测、PL策略与实体仲裁
 
-所有检测器输出标准半开区间 `[start, end)`。在 `merge_entities()` 阶段：
+所有检测器对**原始文本**进行纯读操作，检测输出标准半开区间 `[start, end)`。在 `merge_entities()` 阶段：
 
 1. **同跨度同类型合并**：合并检测引擎来源（`sources`），取最高置信度。
-2. **重叠冲突仲裁（优先级阶梯）**：
-   - **高危凭证/密钥**（Priority 125~121）：`DATABASE_URI` (125), `PRIVATE_KEY` (124), `API_TOKEN` (122), `PASSWORD` (121)
-   - **强校验法定证件**（Priority 114~108）：`US_SSN` (114), `CREDIT_CARD` / `CN_BANK_CARD` (111), `CN_ID_CARD` (110), `CN_USCC` (108)
-   - **高置信通信标识**（Priority 105~100）：`PHONE` / `CN_PHONE_NUMBER` (105), `EMAIL` (103), `IPV6_ADDRESS` (102), `IP_ADDRESS` (100)
-   - **业务/语义实体**（Priority 95~85）：`CN_ADDRESS` (92), `CN_NAME` (90), `MEDICAL_RECORD_ID` (90), `INSURANCE_ID` (89), `EMPLOYEE_ID` (86), `STUDENT_ID` (85)
-   - **神经网络通用模型输出**（Priority 50）：`OpenAIModelDetector` 输出作为兜底补充。
-3. **校验位优先原则**：通过校验位（如身份证校验码、银行卡 Luhn、企业税号 GB 32100、IBAN）验证的实体享有绝对优先权，杜绝普通文本模型误分类覆盖。
+2. **PL1 - PL4 敏感度分级与静态策略保护**：
+   - **PL4（核心密码凭据）**：`DATABASE_URI` (125), `PRIVATE_KEY` (124), `API_TOKEN` (122), `PASSWORD` (121), `CARD_SECURITY_CODE` (119)
+   - **PL3（高敏合规凭据）**：`US_SSN` (114), `IBAN` (113), `CN_USCC` (112), `CREDIT_CARD` (111), `CN_BANK_CARD` (110), `CN_ID_CARD` (115), `PASSPORT` (108)
+   - **PL2（可识别个人信息）**：`CN_PHONE_NUMBER` (105), `EMAIL` (98), `CN_LICENSE_PLATE` (96), `IPV6_ADDRESS` (92), `IP_ADDRESS` (92), `CN_NAME` (65), `CN_ADDRESS` (70)
+   - **PL1（低敏偏好标签）**：个人公开偏好与低关联职业标签。
+   法定确定性实体具备绝对静态敏感度，不可被后续模型随意降级。
+3. **重叠冲突仲裁（优先级阶梯）**：
+   - **校验位优先原则**：通过校验位（如身份证校验码、银行卡 Luhn、企业税号 GB 32100、IBAN）验证的实体享有绝对优先权（`validated=True` 权重大于任何未校验候选）。
+   - **优先级阶梯**：高危凭证密钥 (125) > 校验法定证件 (115) > 通信标识 (105) > 专用实体抽取 (90) > 生成式模型 (50)。
+   - **强规则防覆盖**：确定性强规则结果永不被模型覆盖。
 
 ## 中文信息抽取（ChineseIEDetector）设计
 

@@ -19,6 +19,7 @@ from urllib.parse import unquote, urlsplit
 
 from privacy import PrivacyService
 from privacy.device import DEVICE_MANAGER
+from privacy.model_catalog import list_all_models
 import model_installer
 
 
@@ -43,17 +44,13 @@ class ModelLifecycleController:
 
     def status(self) -> Dict[str, object]:
         status_dir = self.data_dir / "status"
-        models_info: Dict[str, object] = {
-            "privacy_filter": PRIVACY.model.status(),
-            "chinese_ie": PRIVACY.chinese_ie.status(),
-        }
 
         # Read status files
         install_states: Dict[str, object] = {}
         if status_dir.is_dir():
             for sf in status_dir.glob("*-install.json"):
                 try:
-                    install_states[sf.stem] = json.loads(sf.read_text(encoding="utf-8"))
+                    install_states[sf.stem.replace("-install", "")] = json.loads(sf.read_text(encoding="utf-8"))
                 except Exception:
                     pass
 
@@ -61,9 +58,11 @@ class ModelLifecycleController:
             running = self._process is not None and self._process.poll() is None
 
         device_diag = DEVICE_MANAGER.probe_diagnostics()
+        catalog_items = [m.to_dict() for m in list_all_models()]
 
         return {
-            "models": models_info,
+            "registry": PRIVACY.registry.status(),
+            "catalog": catalog_items,
             "installing": running,
             "install_states": install_states,
             "device": device_diag,
@@ -79,7 +78,7 @@ class ModelLifecycleController:
         except OSError:
             return []
 
-    def start_install(self, model_name: str = "privacy-filter") -> bool:
+    def start_install(self, model_name: str = "gliner-pii-edge") -> bool:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 return False
@@ -243,6 +242,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 result = PRIVACY.detect(
                     text=payload.get("text"),
                     use_model=bool(payload.get("use_model", False)),
+                    slots=payload.get("slots"),
+                    policy_level=payload.get("policy_level"),
                 )
                 self._json(HTTPStatus.OK, result)
             except ValueError as exc:
@@ -259,10 +260,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
             except Exception:
                 payload = {}
-            model_name = str(payload.get("model", "privacy-filter"))
+            model_name = str(payload.get("model", "gliner-pii-edge"))
             started = INSTALLER.start_install(model_name)
             status = HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT
-            self._json(status, {"started": started, "model": INSTALLER.status()})
+            self._json(status, {"started": started, "status": INSTALLER.status()})
             return
 
         if route == "/api/model/import":
@@ -271,7 +272,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             try:
                 payload = self._read_json()
-                model_name = str(payload.get("model", "privacy-filter"))
+                model_name = str(payload.get("model", "gliner-pii-edge"))
                 source_path = str(payload.get("source_path", "")).strip()
                 if not source_path:
                     raise ValueError("必须指定模型导入路径 source_path")
@@ -290,7 +291,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             try:
                 payload = self._read_json()
-                model_name = str(payload.get("model", "privacy-filter"))
+                model_name = str(payload.get("model", "gliner-pii-edge"))
                 ok, message = INSTALLER.uninstall_model(model_name)
                 self._json(HTTPStatus.OK, {"ok": ok, "message": message, "status": INSTALLER.status()})
             except Exception as exc:
@@ -303,6 +304,36 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             PRIVACY.reset_models()
             self._json(HTTPStatus.OK, {"ok": True, "status": INSTALLER.status()})
+            return
+
+        if route == "/api/model/slot/toggle":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以配置模型槽位"})
+                return
+            try:
+                payload = self._read_json()
+                slot = str(payload.get("slot", "")).strip()
+                enabled = bool(payload.get("enabled", True))
+                PRIVACY.registry.set_slot_enabled(slot, enabled)
+                self._json(HTTPStatus.OK, {"ok": True, "status": INSTALLER.status()})
+            except Exception as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
+        if route == "/api/model/select":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以切换激活模型"})
+                return
+            try:
+                payload = self._read_json()
+                slot = str(payload.get("slot", "")).strip()
+                model_id = str(payload.get("model", "")).strip()
+                ok = PRIVACY.registry.set_active_model(slot, model_id)
+                if not ok:
+                    raise ValueError(f"无法将模型 {model_id} 分配给槽位 {slot}")
+                self._json(HTTPStatus.OK, {"ok": True, "status": INSTALLER.status()})
+            except Exception as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
         if route == "/api/device/select":

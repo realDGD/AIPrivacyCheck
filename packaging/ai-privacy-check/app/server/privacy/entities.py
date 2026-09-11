@@ -1,7 +1,7 @@
 """Shared privacy-entity data structures."""
 
 from dataclasses import dataclass, replace
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 
 LABELS_ZH: Dict[str, str] = {
@@ -49,6 +49,18 @@ LABELS_ZH: Dict[str, str] = {
     "STUDENT_ID": "学生学号",
     "CARD_EXPIRY": "卡片有效期",
     "CARD_SECURITY_CODE": "卡片安全码",
+    "ORGANIZATION": "机构/企业",
+    "LOCATION": "地理位置",
+    "FINANCIAL": "财务资产",
+    "MEDICAL": "医疗健康",
+    "BIOMETRIC": "生物特征",
+    "CREDENTIAL": "认证凭据",
+    "TRADE_RECORD": "交易记录",
+    "LOCATION_TRAJECTORY": "轨迹位置",
+    "RELATIONSHIP": "人际关系",
+    "COMMUNICATION": "通信隐私",
+    "JUDICIAL": "司法记录",
+    "COMMERCIAL_SECRET": "商业秘密",
 }
 
 
@@ -59,6 +71,7 @@ PRIORITY: Dict[str, int] = {
     "PASSWORD": 121,
     "SECRET": 120,
     "CARD_SECURITY_CODE": 119,
+    "CREDENTIAL": 118,
     "CN_ID_CARD": 115,
     "US_SSN": 114,
     "GOVERNMENT_ID": 114,
@@ -73,14 +86,21 @@ PRIORITY: Dict[str, int] = {
     "CN_LANDLINE": 100,
     "EMAIL": 98,
     "CN_LICENSE_PLATE": 96,
+    "FINANCIAL": 95,
+    "MEDICAL": 94,
+    "BIOMETRIC": 93,
     "IP_ADDRESS": 92,
     "IPV6_ADDRESS": 92,
     "MAC_ADDRESS": 91,
     "MEDICAL_RECORD_ID": 90,
     "INSURANCE_ID": 89,
+    "TRADE_RECORD": 89,
     "BIC": 88,
+    "LOCATION_TRAJECTORY": 88,
     "RECORD_ID": 87,
+    "COMMERCIAL_SECRET": 87,
     "EMPLOYEE_ID": 86,
+    "JUDICIAL": 86,
     "STUDENT_ID": 85,
     "CN_ACCOUNT": 84,
     "ACCOUNT_NUMBER": 84,
@@ -92,10 +112,14 @@ PRIORITY: Dict[str, int] = {
     "CN_ADDRESS": 70,
     "ADDRESS": 69,
     "PRIVATE_ADDRESS": 68,
+    "LOCATION": 67,
+    "ORGANIZATION": 66,
     "CN_NAME": 65,
     "PERSON": 64,
     "PRIVATE_PERSON": 62,
+    "RELATIONSHIP": 61,
     "PHONE": 60,
+    "COMMUNICATION": 59,
     "PRIVATE_URL": 55,
 }
 
@@ -111,6 +135,8 @@ class Entity:
     confidence: float
     sources: Tuple[str, ...]
     validated: bool = False
+    privacy_level: Optional[str] = None
+    semantic_type: Optional[str] = None
 
     @property
     def label_zh(self) -> str:
@@ -120,6 +146,11 @@ class Entity:
     def priority(self) -> int:
         return PRIORITY.get(self.entity_type, 50)
 
+    @property
+    def resolved_privacy_level(self) -> str:
+        from .taxonomy import resolve_privacy_level
+        return resolve_privacy_level(self.entity_type, self.semantic_type, self.privacy_level)
+
     def with_sources(self, sources: Iterable[str], confidence: float) -> "Entity":
         return replace(
             self,
@@ -128,7 +159,7 @@ class Entity:
         )
 
     def to_dict(self) -> Dict[str, object]:
-        return {
+        payload: Dict[str, object] = {
             "type": self.entity_type,
             "label": self.label_zh,
             "start": self.start,
@@ -137,4 +168,8 @@ class Entity:
             "confidence": round(float(self.confidence), 4),
             "sources": list(self.sources),
             "validated": self.validated,
+            "privacy_level": self.resolved_privacy_level,
         }
+        if self.semantic_type is not None:
+            payload["semantic_type"] = self.semantic_type
+        return payload

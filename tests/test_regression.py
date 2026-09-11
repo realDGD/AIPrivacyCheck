@@ -76,7 +76,7 @@ class KeyRegressionTests(unittest.TestCase):
         self.assertNotEqual(aligned[0].start, aligned[1].start)
 
     def test_regression_4_deterministic_wins_over_model(self):
-        """4. OpenAI Privacy Filter and rule detector match overlapping spans.
+        """4. Model detector and rule detector match overlapping spans.
         Verify deterministic validated entity has precedence.
         """
         text = "4532 0151 1283 0366"
@@ -103,7 +103,6 @@ class KeyRegressionTests(unittest.TestCase):
         """6. When CUDA is unavailable in auto mode, falls back to CPU cleanly."""
         manager = DeviceManager()
         manager.set_requested_device("auto")
-        # In this test environment, probe will report actual_device as 'cuda' (if hardware has GPU) or 'cpu'
         actual, _ = manager.resolve()
         self.assertIn(actual, ("cpu", "cuda"))
 
@@ -117,11 +116,75 @@ class KeyRegressionTests(unittest.TestCase):
         self.assertEqual(diag["requested_device"], "cuda")
         self.assertIn("actual_device", diag)
 
-    def test_chinese_id_checksum_triplet(self):
-        """Positive, invalid checksum, and invalid birth date test for Chinese ID."""
+    def test_regression_8_chinese_id_checksum_triplet(self):
+        """8. Positive, invalid checksum, and invalid birth date test for Chinese ID."""
         self.assertTrue(cn_id_card_valid("11010519491231002X"))  # Valid checksum
         self.assertFalse(cn_id_card_valid("110105194912310021"))  # Invalid checksum
         self.assertFalse(cn_id_card_valid("110105199902300021"))  # Invalid birth date (Feb 30)
+
+    def test_regression_9_pl_level_enforcement(self):
+        """9. PL1 - PL4 Policy Enforcement & Statutory Invariant."""
+        from privacy.taxonomy import resolve_privacy_level, PL2, PL3, PL4
+
+        # Verify static deterministic mappings
+        self.assertEqual(resolve_privacy_level("DATABASE_URI"), PL4)
+        self.assertEqual(resolve_privacy_level("PRIVATE_KEY"), PL4)
+        self.assertEqual(resolve_privacy_level("CN_ID_CARD"), PL3)
+        self.assertEqual(resolve_privacy_level("CN_BANK_CARD"), PL3)
+        self.assertEqual(resolve_privacy_level("CN_PHONE_NUMBER"), PL2)
+        self.assertEqual(resolve_privacy_level("CN_NAME"), PL2)
+
+        # Policy level filtering in detect()
+        text = "联系人张三，手机号 13800138000，身份证号 11010519491231002X，数据库 postgresql://user:pass@db:5432/test"
+        res_pl4 = self.service.detect(text, policy_level="PL4")
+        types_pl4 = {e["type"] for e in res_pl4["entities"]}
+        self.assertIn("DATABASE_URI", types_pl4)
+        self.assertNotIn("CN_ID_CARD", types_pl4)
+        self.assertNotIn("CN_PHONE_NUMBER", types_pl4)
+
+        res_pl3 = self.service.detect(text, policy_level="PL3")
+        types_pl3 = {e["type"] for e in res_pl3["entities"]}
+        self.assertIn("DATABASE_URI", types_pl3)
+        self.assertIn("CN_ID_CARD", types_pl3)
+        self.assertNotIn("CN_PHONE_NUMBER", types_pl3)
+
+        res_pl2 = self.service.detect(text, policy_level="PL2")
+        types_pl2 = {e["type"] for e in res_pl2["entities"]}
+        self.assertIn("DATABASE_URI", types_pl2)
+        self.assertIn("CN_ID_CARD", types_pl2)
+        self.assertIn("CN_PHONE_NUMBER", types_pl2)
+
+    def test_regression_10_span_resolver_exact_offsets(self):
+        """10. Unified Span Resolver produces exact offsets without global replace."""
+        from privacy.span_resolver import resolve_semantic_spans
+
+        raw_text = "李明提交了文件，之后李明在办公室接待了张经理。"
+        candidates = [
+            {"entity_type": "PERSON", "text": "李明", "context_snippet": "之后李明在办公室", "confidence": 0.95},
+            {"entity_type": "PERSON", "text": "张经理", "confidence": 0.9},
+            {"entity_type": "ORGANIZATION", "text": "不存在的公司", "confidence": 0.8},
+        ]
+        entities, warnings = resolve_semantic_spans(raw_text, candidates, source_name="semantic_model")
+        self.assertEqual(len(entities), 2)
+        # Verify second occurrence of 李明 was disambiguated by context
+        lm_ent = entities[0]
+        self.assertEqual(lm_ent.text, "李明")
+        self.assertEqual(raw_text[lm_ent.start:lm_ent.end], "李明")
+        self.assertEqual(lm_ent.start, raw_text.find("李明", 2))
+        self.assertEqual(entities[1].text, "张经理")
+        self.assertEqual(raw_text[entities[1].start:entities[1].end], "张经理")
+
+    def test_regression_11_modelscope_catalog_integrity(self):
+        """11. All models in catalog originate from ModelScope and have valid descriptors."""
+        from privacy.model_catalog import MODEL_CATALOG, list_all_models
+
+        models = list_all_models()
+        self.assertTrue(len(models) >= 4)
+        for m in models:
+            self.assertEqual(m.provider, "modelscope")
+            self.assertTrue(len(m.repo_id.split("/")) == 2, f"Invalid ModelScope repo_id: {m.repo_id}")
+            self.assertTrue(m.slot in ("chinese_ie", "general_pii", "semantic_privacy"))
+            self.assertTrue(m.license in ("Apache-2.0", "CC BY-NC-ND 4.0"))
 
     def test_luhn_bank_card_validation(self):
         self.assertTrue(luhn_valid("4532 0151 1283 0366"))
