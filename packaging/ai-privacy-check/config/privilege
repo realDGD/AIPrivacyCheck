@@ -3,5 +3,6 @@
     "run-as": "package"
   },
   "username": "ai-privacy-check",
-  "groupname": "ai-privacy-check"
+  "groupname": "ai-privacy-check",
+  "join-groups": ["video", "render"]
 }

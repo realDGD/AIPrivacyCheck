@@ -5,8 +5,15 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-python3 -m unittest discover -s tests -v
-env PYTHONPYCACHEPREFIX=/tmp/ai-privacy-check-pycache python3 -m py_compile \
+if command -v uv >/dev/null 2>&1; then
+  PYTHON_CMD="uv run python3"
+else
+  PYTHON_CMD="python3"
+fi
+
+$PYTHON_CMD -m unittest discover -s tests -v
+$PYTHON_CMD scripts/benchmark.py
+env PYTHONPYCACHEPREFIX=/tmp/ai-privacy-check-pycache $PYTHON_CMD -m py_compile \
   packaging/ai-privacy-check/app/server/server.py \
   packaging/ai-privacy-check/app/server/model_installer.py \
   packaging/ai-privacy-check/app/server/privacy/*.py

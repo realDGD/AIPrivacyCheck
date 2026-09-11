@@ -34,5 +34,6 @@ chmod +x "$PACKAGE_DIR"/cmd/*
 export COPYFILE_DISABLE=1
 cd "$DIST_DIR"
 "$FNPACK_BIN" build --directory "$PACKAGE_DIR"
-mv -f ai-privacy-check.fpk ai-privacy-check_0.2.0_all.fpk
-echo "已生成：$DIST_DIR/ai-privacy-check_0.2.0_all.fpk"
+VERSION="$(grep -E '^version[[:space:]]*=' "$PACKAGE_DIR/manifest" | awk -F'=' '{print $2}' | tr -d '[:space:]')"
+mv -f ai-privacy-check.fpk "ai-privacy-check_${VERSION}_all.fpk"
+echo "已生成：$DIST_DIR/ai-privacy-check_${VERSION}_all.fpk"

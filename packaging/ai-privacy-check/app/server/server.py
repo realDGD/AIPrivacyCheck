@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free HTTP service for AI Privacy Check."""
+"""Dependency-free HTTP and Unix Stream Socket service for AI Privacy Check."""
 
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -7,17 +7,19 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import signal
 import socket
 import socketserver
 import subprocess
 import sys
-import signal
 import threading
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
 from privacy import PrivacyService
+from privacy.device import DEVICE_MANAGER
+import model_installer
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -30,41 +32,54 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 PRIVACY = PrivacyService(DATA_DIR)
 
 
-class ModelInstallController:
+class ModelLifecycleController:
+    """Manages online download, local manual import, uninstall, and device switching."""
+
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
-        self.state_file = data_dir / "status" / "model-install.json"
         self.log_file = data_dir / "status" / "model-install.log"
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
 
     def status(self) -> Dict[str, object]:
-        model_status = PRIVACY.model.status()
-        install_status: Dict[str, object] = {}
-        if self.state_file.is_file():
-            try:
-                install_status = json.loads(self.state_file.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                install_status = {"state": "unknown", "detail": "安装状态文件无法读取"}
+        status_dir = self.data_dir / "status"
+        models_info: Dict[str, object] = {
+            "privacy_filter": PRIVACY.model.status(),
+            "chinese_ie": PRIVACY.chinese_ie.status(),
+        }
+
+        # Read status files
+        install_states: Dict[str, object] = {}
+        if status_dir.is_dir():
+            for sf in status_dir.glob("*-install.json"):
+                try:
+                    install_states[sf.stem] = json.loads(sf.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
         with self._lock:
             running = self._process is not None and self._process.poll() is None
-        if running:
-            model_status["state"] = "installing"
-            model_status["ready"] = False
-        model_status["install"] = install_status
-        model_status["log_tail"] = self._log_tail()
-        return model_status
 
-    def _log_tail(self, lines: int = 14) -> list:
+        device_diag = DEVICE_MANAGER.probe_diagnostics()
+
+        return {
+            "models": models_info,
+            "installing": running,
+            "install_states": install_states,
+            "device": device_diag,
+            "log_tail": self._log_tail(),
+        }
+
+    def _log_tail(self, lines: int = 16) -> List[str]:
         if not self.log_file.is_file():
             return []
         try:
             content = self.log_file.read_text(encoding="utf-8", errors="replace")
+            return content.splitlines()[-lines:]
         except OSError:
             return []
-        return content.splitlines()[-lines:]
 
-    def start(self) -> bool:
+    def start_install(self, model_name: str = "privacy-filter") -> bool:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 return False
@@ -75,7 +90,7 @@ class ModelInstallController:
             env["APP_DATA_DIR"] = str(self.data_dir)
             env["PYTHONUNBUFFERED"] = "1"
             self._process = subprocess.Popen(
-                [sys.executable, str(APP_DIR / "model_installer.py")],
+                [sys.executable, str(APP_DIR / "model_installer.py"), "install", model_name],
                 cwd=str(APP_DIR),
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -88,10 +103,23 @@ class ModelInstallController:
             process.wait()
             log_handle.close()
             if process.returncode == 0:
-                PRIVACY.model.reset()
+                PRIVACY.reset_models()
 
         threading.Thread(target=wait_for_install, daemon=True).start()
         return True
+
+    def import_model(self, model_name: str, source_path: str) -> Tuple[bool, str]:
+        path = Path(source_path).resolve()
+        ok, msg = model_installer.import_local_model(self.data_dir, model_name, path)
+        if ok:
+            PRIVACY.reset_models()
+        return ok, msg
+
+    def uninstall_model(self, model_name: str) -> Tuple[bool, str]:
+        ok, msg = model_installer.uninstall_model(self.data_dir, model_name)
+        if ok:
+            PRIVACY.reset_models()
+        return ok, msg
 
     def stop(self) -> None:
         with self._lock:
@@ -106,21 +134,16 @@ class ModelInstallController:
             process.wait(timeout=2)
 
 
-INSTALLER = ModelInstallController(DATA_DIR)
+INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.2"
+    server_version = "AIPrivacyCheck/0.3.0"
 
     def log_message(self, fmt: str, *args) -> None:
-        # Never log request bodies or query values; paths are stripped to avoid
-        # accidental disclosure if a client puts text in a query string.
         safe_path = urlsplit(self.path).path
-        if isinstance(self.client_address, tuple) and self.client_address:
-            client = str(self.client_address[0])
-        else:
-            client = "local"
-        sys.stderr.write("%s - %s %s\n" % (client, self.command, safe_path))
+        client = str(self.client_address[0]) if isinstance(self.client_address, tuple) and self.client_address else "local"
+        sys.stderr.write(f"{client} - {self.command} {safe_path}\n")
 
     def _route(self) -> Optional[str]:
         path = unquote(urlsplit(self.path).path)
@@ -129,7 +152,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return "/"
             if not path.startswith(BASE_PATH + "/"):
                 return None
-            path = path[len(BASE_PATH) :]
+            path = path[len(BASE_PATH):]
         return path or "/"
 
     def _security_headers(self) -> None:
@@ -138,8 +161,8 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-            "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors *",
         )
 
     def _json(self, status: int, payload: Dict[str, object]) -> None:
@@ -185,28 +208,31 @@ class AppHandler(BaseHTTPRequestHandler):
             self._security_headers()
             self.end_headers()
             return
+
         route = self._route()
         if route is None:
             self._json(HTTPStatus.NOT_FOUND, {"error": "路径不存在"})
             return
+
         if route == "/api/health":
             self._json(
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
-                    "model": PRIVACY.model.status(),
                 },
             )
             return
+
         if route == "/api/model/status":
             payload = INSTALLER.status()
             payload["is_admin"] = self._is_admin()
             payload["disk_hint_gb"] = "4-8"
             self._json(HTTPStatus.OK, payload)
             return
+
         self._serve_static(route)
 
     def do_POST(self) -> None:
@@ -224,17 +250,75 @@ class AppHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "检测服务暂时不可用，请稍后重试"})
             return
+
         if route == "/api/model/install":
-            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
-                self._json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "请求必须使用 application/json"})
-                return
             if not self._is_admin():
                 self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以安装模型"})
                 return
-            started = INSTALLER.start()
+            try:
+                payload = self._read_json()
+            except Exception:
+                payload = {}
+            model_name = str(payload.get("model", "privacy-filter"))
+            started = INSTALLER.start_install(model_name)
             status = HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT
             self._json(status, {"started": started, "model": INSTALLER.status()})
             return
+
+        if route == "/api/model/import":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以导入模型"})
+                return
+            try:
+                payload = self._read_json()
+                model_name = str(payload.get("model", "privacy-filter"))
+                source_path = str(payload.get("source_path", "")).strip()
+                if not source_path:
+                    raise ValueError("必须指定模型导入路径 source_path")
+                ok, message = INSTALLER.import_model(model_name, source_path)
+                status = HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST
+                self._json(status, {"ok": ok, "message": message, "status": INSTALLER.status()})
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"导入失败: {exc}"})
+            return
+
+        if route == "/api/model/uninstall":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以卸载模型"})
+                return
+            try:
+                payload = self._read_json()
+                model_name = str(payload.get("model", "privacy-filter"))
+                ok, message = INSTALLER.uninstall_model(model_name)
+                self._json(HTTPStatus.OK, {"ok": ok, "message": message, "status": INSTALLER.status()})
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"卸载失败: {exc}"})
+            return
+
+        if route == "/api/model/reload":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以重载模型"})
+                return
+            PRIVACY.reset_models()
+            self._json(HTTPStatus.OK, {"ok": True, "status": INSTALLER.status()})
+            return
+
+        if route == "/api/device/select":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以切换计算设备"})
+                return
+            try:
+                payload = self._read_json()
+                device = str(payload.get("device", "auto"))
+                actual = DEVICE_MANAGER.set_requested_device(device)
+                PRIVACY.reset_models()
+                self._json(HTTPStatus.OK, {"ok": True, "device": DEVICE_MANAGER.probe_diagnostics()})
+            except Exception as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+
         self._json(HTTPStatus.NOT_FOUND, {"error": "路径不存在"})
 
     def _serve_static(self, route: str) -> None:
@@ -281,18 +365,19 @@ def run() -> None:
             socket_path.unlink()
         server = ThreadingUnixHTTPServer(str(socket_path), AppHandler)
         os.chmod(socket_path, 0o660)
-        destination = "unix://{}".format(socket_path)
+        destination = f"unix://{socket_path}"
     else:
         host = os.environ.get("APP_HOST", "127.0.0.1")
         port = int(os.environ.get("APP_PORT", "8976"))
         server = ThreadingHTTPServer((host, port), AppHandler)
-        destination = "http://{}:{}".format(host, port)
+        destination = f"http://{host}:{port}"
+
     def request_shutdown(_signum, _frame) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
-    print("AI Privacy Check native service listening on {}".format(destination), flush=True)
+    print(f"AI Privacy Check native service listening on {destination}", flush=True)
     try:
         server.serve_forever()
     finally:

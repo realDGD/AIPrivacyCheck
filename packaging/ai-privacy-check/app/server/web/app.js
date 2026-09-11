@@ -18,31 +18,42 @@ const elements = {
   sourceCounter: $("sourceCounter"),
   detectButton: $("detectButton"),
   useModelToggle: $("useModelToggle"),
-  modelInlineStatus: $("modelInlineStatus"),
-  entityList: $("entityList"),
-  entityEmpty: $("entityEmpty"),
-  entityCount: $("entityCount"),
-  reviewFooter: $("reviewFooter"),
-  redactedText: $("redactedText"),
-  redactedCounter: $("redactedCounter"),
-  copyRedactedButton: $("copyRedactedButton"),
-  copyPromptButton: $("copyPromptButton"),
-  vaultSummary: $("vaultSummary"),
+  modelInlineStatus: $("modelInlineStatus") || $("modelToggleLabel"),
+  entityList: $("entityList") || $("entityTableBody"),
+  entityEmpty: $("entityEmpty") || { hidden: false },
+  entityCount: $("entityCount") || $("entityCountTag"),
+  reviewFooter: $("reviewFooter") || { hidden: false },
+  redactedText: $("redactedText") || $("maskedText"),
+  redactedCounter: $("redactedCounter") || { textContent: "" },
+  copyRedactedButton: $("copyRedactedButton") || $("copyMaskedButton"),
+  copyPromptButton: $("copyPromptButton") || { disabled: false, addEventListener: () => {} },
+  vaultSummary: $("vaultSummary") || { textContent: "" },
   exportVaultButton: $("exportVaultButton"),
-  detectionNotice: $("detectionNotice"),
-  replyText: $("replyText"),
-  replyCounter: $("replyCounter"),
+  detectionNotice: $("detectionNotice") || { hidden: true },
+  replyText: $("replyText") || $("aiReplyText"),
+  replyCounter: $("replyCounter") || { textContent: "" },
   restoredText: $("restoredText"),
-  restoredCounter: $("restoredCounter"),
+  restoredCounter: $("restoredCounter") || { textContent: "" },
   restoreButton: $("restoreButton"),
   copyRestoredButton: $("copyRestoredButton"),
-  restoreReport: $("restoreReport"),
-  activeVaultBadge: $("activeVaultBadge"),
+  restoreReport: $("restoreReport") || { hidden: true },
+  activeVaultBadge: $("activeVaultBadge") || { textContent: "" },
   modelStatusBadge: $("modelStatusBadge"),
   modelDetail: $("modelDetail"),
   installModelButton: $("installModelButton"),
   installLog: $("installLog"),
   exportDialog: $("exportDialog"),
+  openNewTabButton: $("openNewTabButton"),
+  deviceSelect: $("deviceSelect"),
+  deviceStatusBadge: $("deviceStatusBadge"),
+  deviceDetail: $("deviceDetail"),
+  modelActiveDevice: $("modelActiveDevice"),
+  uninstallModelButton: $("uninstallModelButton"),
+  reloadModelButton: $("reloadModelButton"),
+  importModelType: $("importModelType"),
+  importSourcePath: $("importSourcePath"),
+  confirmImportButton: $("confirmImportButton"),
+  fillSampleButton: $("fillSampleButton"),
 };
 
 async function api(path, options = {}) {
@@ -386,9 +397,10 @@ async function importVault() {
   }
 }
 
-function updateModelUI(model) {
-  state.model = model;
-  const status = model.state;
+function updateModelUI(data) {
+  state.model = data;
+  const opf = (data.models && data.models.privacy_filter) || (data.model) || {};
+  const status = opf.state || "packages_missing";
   const labels = {
     ready: "已就绪",
     installing: "安装中",
@@ -396,22 +408,45 @@ function updateModelUI(model) {
     model_missing: "待下载权重",
     error: "安装失败",
   };
-  elements.modelStatusBadge.textContent = labels[status] || "未知状态";
+  elements.modelStatusBadge.textContent = labels[status] || status || "未知状态";
   elements.modelStatusBadge.className = `status-badge${status === "ready" ? " is-ready" : status === "error" ? " is-error" : ""}`;
   elements.useModelToggle.disabled = status !== "ready";
   if (status !== "ready") elements.useModelToggle.checked = false;
-  elements.modelInlineStatus.textContent = status === "ready" ? "模型已安装，可启用" : status === "installing" ? "正在后台安装" : "未安装，当前使用本地多语言规则";
+  elements.modelInlineStatus.textContent = status === "ready" ? "增强模型已就绪" : status === "installing" ? "正在后台安装" : "未安装（中文语义与多语言规则始终可用）";
 
-  const installDetail = model.install && model.install.detail;
+  // Device status
+  const dev = data.device || {};
+  if (elements.deviceStatusBadge) {
+    elements.deviceStatusBadge.textContent = dev.actual_device === "cuda" ? "NVIDIA CUDA 加速" : "CPU 运行模式";
+    elements.deviceStatusBadge.className = `status-badge${dev.actual_device === "cuda" ? " is-ready" : ""}`;
+  }
+  if (elements.deviceDetail) {
+    elements.deviceDetail.textContent = dev.cuda_available
+      ? `检测到 GPU: ${dev.cuda_device_name || "NVIDIA 显卡"} (驱动就绪，目标: ${dev.requested_device})`
+      : `未检测到 NVIDIA CUDA 环境 (使用 CPU 推理，PyTorch: ${dev.torch_version || "未加载"})`;
+  }
+  if (elements.deviceSelect && dev.requested_device) {
+    elements.deviceSelect.value = dev.requested_device;
+  }
+  if (elements.modelActiveDevice) {
+    elements.modelActiveDevice.textContent = (dev.actual_device || "CPU").toUpperCase();
+  }
+
+  // Model details
+  const installDetail = (data.install_states && data.install_states["privacy-filter-install"] && data.install_states["privacy-filter-install"].detail)
+    || (opf.install && opf.install.detail);
   elements.modelDetail.textContent = status === "ready"
-    ? "模型和运行库已保存在 fnOS 应用数据目录。推理过程不连接外部 API。"
-    : installDetail || "本地多语言规则无需安装即可使用；模型增强可补充上下文中的姓名、地址和私密日期。";
-  elements.installModelButton.disabled = !model.is_admin || status === "installing" || status === "ready";
-  elements.installModelButton.textContent = status === "installing" ? "正在安装，请保持设备联网" : status === "ready" ? "模型已安装" : "安装模型增强";
-  elements.installLog.textContent = model.log_tail && model.log_tail.length ? model.log_tail.join("\n") : "暂无日志";
+    ? "OpenAI Privacy Filter 权重完整，已保存在 fnOS 数据目录中，离线推理保护中。"
+    : installDetail || "中文规则与中文语义信息抽取开箱即用；可选模型增强可进一步提升长难句泛化度。";
+  elements.installModelButton.disabled = !data.is_admin || data.installing || status === "ready";
+  elements.installModelButton.textContent = data.installing ? "正在处理中..." : status === "ready" ? "模型已就绪" : "在线安装增强模型";
+  if (elements.uninstallModelButton) {
+    elements.uninstallModelButton.style.display = status === "ready" ? "inline-block" : "none";
+  }
+  elements.installLog.textContent = data.log_tail && data.log_tail.length ? data.log_tail.join("\n") : "暂无日志";
 
   clearTimeout(state.modelPoll);
-  if (status === "installing") state.modelPoll = setTimeout(refreshModelStatus, 4000);
+  if (data.installing) state.modelPoll = setTimeout(refreshModelStatus, 3000);
 }
 
 async function refreshModelStatus() {
@@ -424,17 +459,79 @@ async function refreshModelStatus() {
 }
 
 async function installModel() {
-  const confirmed = window.confirm("模型安装将从 GitHub 和 Hugging Face 下载约 4–8 GB 的运行库与权重，并占用较多内存。继续吗？");
+  const confirmed = window.confirm("在线安装将从 GitHub 和 Hugging Face 下载运行库与约 2.8GB 权重。继续吗？");
   if (!confirmed) return;
   elements.installModelButton.disabled = true;
   try {
-    const result = await api("/api/model/install", { method: "POST", body: "{}" });
+    const result = await api("/api/model/install", { method: "POST", body: JSON.stringify({ model: "privacy-filter" }) });
     updateModelUI({ ...result.model, is_admin: true });
     $("installLogPanel").open = true;
-    toast("模型已开始在后台安装");
+    toast("模型已开始在后台下载与安装");
   } catch (error) {
     toast(error.message);
     await refreshModelStatus();
+  }
+}
+
+async function importModel() {
+  const modelType = elements.importModelType ? elements.importModelType.value : "privacy-filter";
+  const sourcePath = (elements.importSourcePath ? elements.importSourcePath.value : "").trim();
+  if (!sourcePath) {
+    toast("请输入已授权的模型源目录路径");
+    return;
+  }
+  elements.confirmImportButton.disabled = true;
+  try {
+    const result = await api("/api/model/import", {
+      method: "POST",
+      body: JSON.stringify({ model: modelType, source_path: sourcePath }),
+    });
+    toast(result.message || "模型导入成功");
+    updateModelUI(result.status);
+    if (elements.importSourcePath) elements.importSourcePath.value = "";
+  } catch (error) {
+    toast(`导入失败: ${error.message}`);
+  } finally {
+    elements.confirmImportButton.disabled = false;
+  }
+}
+
+async function uninstallModel() {
+  if (!window.confirm("确定要卸载当前存储在应用目录内的该模型副本吗？不会影响您原始导入的文件。")) return;
+  try {
+    const result = await api("/api/model/uninstall", {
+      method: "POST",
+      body: JSON.stringify({ model: "privacy-filter" }),
+    });
+    toast(result.message || "已卸载");
+    updateModelUI(result.status);
+  } catch (error) {
+    toast(`卸载失败: ${error.message}`);
+  }
+}
+
+async function reloadModel() {
+  try {
+    const result = await api("/api/model/reload", { method: "POST", body: "{}" });
+    toast("模型已成功重载");
+    updateModelUI(result.status);
+  } catch (error) {
+    toast(`重载失败: ${error.message}`);
+  }
+}
+
+async function changeDevice() {
+  if (!elements.deviceSelect) return;
+  const target = elements.deviceSelect.value;
+  try {
+    await api("/api/device/select", {
+      method: "POST",
+      body: JSON.stringify({ device: target }),
+    });
+    toast(`计算设备已切换为: ${target}`);
+    await refreshModelStatus();
+  } catch (error) {
+    toast(`切换失败: ${error.message}`);
   }
 }
 
@@ -461,25 +558,59 @@ function clearAll() {
   toast("当前会话已清空");
 }
 
+if (elements.openNewTabButton) {
+  elements.openNewTabButton.addEventListener("click", () => {
+    // 1. Try fnOS Web SDK if embedded
+    if (window.parent && window.parent !== window && window.parent.fnos && typeof window.parent.fnos.openURL === "function") {
+      try {
+        window.parent.fnos.openURL("/app/ai-privacy-check/");
+        return;
+      } catch {}
+    }
+    // 2. Fallback to window.open with gateway URL
+    const targetUrl = window.location.pathname.startsWith("/app/ai-privacy-check")
+      ? window.location.pathname
+      : "/app/ai-privacy-check/";
+    window.open(targetUrl, "_blank");
+  });
+}
+
+if (elements.deviceSelect) elements.deviceSelect.addEventListener("change", changeDevice);
+if (elements.confirmImportButton) elements.confirmImportButton.addEventListener("click", importModel);
+if (elements.uninstallModelButton) elements.uninstallModelButton.addEventListener("click", uninstallModel);
+if (elements.reloadModelButton) elements.reloadModelButton.addEventListener("click", reloadModel);
+if (elements.fillSampleButton) {
+  elements.fillSampleButton.addEventListener("click", () => {
+    elements.sourceText.value = "请寄给上海市浦东新区世纪大道100号的收件人张伟先生，联系手机 13800138000，邮箱 zhangwei@example.com，身份证号 11010519491231002X。另请备份数据库 postgresql://appuser:SecretPass123@db.internal:5432/crm。";
+    setCounter(elements.sourceText, elements.sourceCounter);
+  });
+}
+
 document.querySelectorAll(".view-tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
-elements.sourceText.addEventListener("input", () => setCounter(elements.sourceText, elements.sourceCounter));
-elements.replyText.addEventListener("input", () => setCounter(elements.replyText, elements.replyCounter));
-elements.detectButton.addEventListener("click", detect);
-elements.restoreButton.addEventListener("click", restoreText);
-elements.copyRedactedButton.addEventListener("click", () => copyText(elements.redactedText.value, "脱敏文本已复制"));
-elements.copyPromptButton.addEventListener("click", () => copyText(
-  `请保留所有形如 ⟦类型_序号_校验码⟧ 的占位符原样，不要翻译、改写、删除或合并。\n\n${elements.redactedText.value}`,
-  "带占位符说明的文本已复制",
-));
-elements.copyRestoredButton.addEventListener("click", () => copyText(elements.restoredText.value, "恢复结果已复制"));
-$("selectAllButton").addEventListener("click", () => { state.entities.forEach((entity) => { entity.enabled = true; }); renderEntities(); generateRedacted(); });
-$("selectNoneButton").addEventListener("click", () => { state.entities.forEach((entity) => { entity.enabled = false; }); renderEntities(); generateRedacted(); });
-$("goModelButton").addEventListener("click", () => switchView("model"));
-$("clearAllButton").addEventListener("click", clearAll);
-elements.exportVaultButton.addEventListener("click", () => elements.exportDialog.showModal());
-$("confirmExportButton").addEventListener("click", exportVault);
-$("importVaultButton").addEventListener("click", importVault);
-elements.installModelButton.addEventListener("click", installModel);
+if (elements.sourceText) elements.sourceText.addEventListener("input", () => setCounter(elements.sourceText, elements.sourceCounter));
+if (elements.replyText) elements.replyText.addEventListener("input", () => setCounter(elements.replyText, elements.replyCounter));
+if (elements.detectButton) elements.detectButton.addEventListener("click", detect);
+if (elements.restoreButton) elements.restoreButton.addEventListener("click", restoreText);
+if (elements.copyRedactedButton && elements.copyRedactedButton.addEventListener) {
+  elements.copyRedactedButton.addEventListener("click", () => copyText(elements.redactedText.value, "脱敏文本已复制"));
+}
+if (elements.copyPromptButton && elements.copyPromptButton.addEventListener) {
+  elements.copyPromptButton.addEventListener("click", () => copyText(
+    `请保留所有形如 ⟦类型_序号_校验码⟧ 的占位符原样，不要翻译、改写、删除或合并。\n\n${elements.redactedText.value}`,
+    "带占位符说明的文本已复制",
+  ));
+}
+if (elements.copyRestoredButton && elements.copyRestoredButton.addEventListener) {
+  elements.copyRestoredButton.addEventListener("click", () => copyText(elements.restoredText.value, "恢复结果已复制"));
+}
+if ($("selectAllButton")) $("selectAllButton").addEventListener("click", () => { state.entities.forEach((entity) => { entity.enabled = true; }); renderEntities(); generateRedacted(); });
+if ($("selectNoneButton")) $("selectNoneButton").addEventListener("click", () => { state.entities.forEach((entity) => { entity.enabled = false; }); renderEntities(); generateRedacted(); });
+if ($("goModelButton")) $("goModelButton").addEventListener("click", () => switchView("model"));
+if ($("clearAllButton")) $("clearAllButton").addEventListener("click", clearAll);
+if (elements.exportVaultButton) elements.exportVaultButton.addEventListener("click", () => elements.exportDialog.showModal());
+if ($("confirmExportButton")) $("confirmExportButton").addEventListener("click", exportVault);
+if ($("importVaultButton")) $("importVaultButton").addEventListener("click", importVault);
+if (elements.installModelButton) elements.installModelButton.addEventListener("click", installModel);
 
 renderEntities();
 refreshModelStatus();

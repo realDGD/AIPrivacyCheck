@@ -1,9 +1,11 @@
-"""Privacy detection orchestration."""
+"""Privacy detection orchestration uniting deterministic rules, Chinese IE, and deep models."""
 
 from pathlib import Path
 import time
 from typing import Dict, List
 
+from .chinese_ie import ChineseIEDetector
+from .device import DEVICE_MANAGER
 from .merge import merge_entities
 from .model import OpenAIModelDetector
 from .rules import MultilingualRuleDetector, supported_rule_types
@@ -13,11 +15,18 @@ MAX_TEXT_CHARS = 500_000
 
 
 class PrivacyService:
-    """Combine multilingual local rules with the optional OpenAI model."""
+    """Three-tier privacy detection service:
+    1. DeterministicRuleDetector (rules.py)
+    2. ChineseIEDetector (chinese_ie.py)
+    3. OpenAIPrivacyFilterDetector (model.py)
+    -> merge_entities()
+    """
 
     def __init__(self, data_dir: Path) -> None:
+        self.data_dir = Path(data_dir)
         self.rules = MultilingualRuleDetector()
-        self.model = OpenAIModelDetector(data_dir)
+        self.chinese_ie = ChineseIEDetector(self.data_dir)
+        self.model = OpenAIModelDetector(self.data_dir)
 
     def detect(self, text: str, use_model: bool = False) -> Dict[str, object]:
         if not isinstance(text, str):
@@ -32,6 +41,14 @@ class PrivacyService:
         engines = [self.rules.name]
         warnings: List[str] = []
 
+        # 2. Chinese IE semantic detection (zero network, local-first)
+        ie_entities, ie_warnings = self.chinese_ie.detect(text)
+        entities.extend(ie_entities)
+        if self.chinese_ie.name not in engines:
+            engines.append(self.chinese_ie.name)
+        warnings.extend(ie_warnings)
+
+        # 3. Optional deep model enhancement
         if use_model:
             if self.model.status()["ready"]:
                 try:
@@ -40,9 +57,9 @@ class PrivacyService:
                     warnings.extend(model_warnings)
                     engines.append(self.model.name)
                 except Exception as exc:
-                    warnings.append("模型检测失败，已仅使用中文规则：{}".format(exc))
+                    warnings.append(f"OpenAI 模型检测失败，已使用规则与中文语义引擎: {exc}")
             else:
-                warnings.append("OpenAI Privacy Filter 尚未就绪，已仅使用中文规则。")
+                warnings.append("OpenAI Privacy Filter 尚未就绪，已使用规则与中文语义引擎。")
 
         merged = merge_entities(entities)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -59,9 +76,14 @@ class PrivacyService:
             "text_length": len(text),
         }
 
+    def reset_models(self) -> None:
+        self.model.reset()
+        self.chinese_ie = ChineseIEDetector(self.data_dir)
+
     def capabilities(self) -> Dict[str, object]:
         return {
             "rule_types": list(supported_rule_types()),
+            "chinese_ie": self.chinese_ie.status(),
             "model_types": [
                 "ACCOUNT_NUMBER",
                 "PRIVATE_ADDRESS",
@@ -72,5 +94,6 @@ class PrivacyService:
                 "PRIVATE_DATE",
                 "SECRET",
             ],
+            "device": DEVICE_MANAGER.probe_diagnostics(),
             "max_text_chars": MAX_TEXT_CHARS,
         }

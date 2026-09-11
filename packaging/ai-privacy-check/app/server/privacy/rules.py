@@ -48,12 +48,12 @@ EXACT_RULES = (
         validated=True,
     ),
     RegexRule(
-        "SECRET",
+        "DATABASE_URI",
         _compile(
             r"(?<![A-Za-z0-9])(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|mssql)://[^\s<>\"'，。；;]+",
             re.IGNORECASE,
         ),
-        0.995,
+        0.998,
         validated=True,
     ),
     RegexRule(
@@ -70,14 +70,14 @@ EXACT_RULES = (
     ),
     RegexRule(
         "IBAN",
-        _compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Z0-9])", re.IGNORECASE),
+        _compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?:[0-9A-Z]{11,30}|(?: [0-9A-Z]{4}){2,7}(?: [0-9A-Z]{1,4})?)(?![A-Za-z0-9])", re.IGNORECASE),
         0.995,
         validator=iban_valid,
         validated=True,
     ),
     RegexRule(
         "EMAIL",
-        _compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}(?![\w.-])", re.IGNORECASE),
+        _compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}(?![A-Za-z0-9]|\.[A-Za-z])", re.IGNORECASE),
         0.99,
         validated=True,
     ),
@@ -96,8 +96,28 @@ EXACT_RULES = (
         validated=True,
     ),
     RegexRule(
+        "PHONE",
+        _compile(r"(?<![\w+])\+\d{1,4}(?:[ -]?(?:\(\d{1,5}\)|\d{1,5})){1,5}(?!\d)"),
+        0.985,
+        validator=international_phone_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "IPV6_ADDRESS",
+        _compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}(?![0-9A-Fa-f:])"),
+        0.985,
+        validator=ipv6_valid,
+        validated=True,
+    ),
+    RegexRule(
+        "US_SSN",
+        _compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)"),
+        0.98,
+        validated=True,
+    ),
+    RegexRule(
         "CN_PHONE_NUMBER",
-        _compile(r"(?<!\d)(?:(?:\+?86|0086)[ -]?)?1[3-9]\d(?:[ -]?\d){8}(?!\d)"),
+        _compile(r"(?<![\d+])(?:(?:\+?86|0086)[ -]?)?1[3-9]\d(?:[ -]?\d){8}(?!\d)"),
         0.99,
         validator=lambda value: len(re.sub(r"\D", "", value).removeprefix("0086").removeprefix("86")) == 11,
         validated=True,
@@ -135,13 +155,34 @@ CONTEXT_RULES = (
     RegexRule(
         "SECRET",
         _compile(
+            r"(?<![A-Za-z0-9_-])"
             r"(?:SSH\s*私钥标识|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GitHub\s+token|"
             r"OpenAI-style\s+test\s+token|API\s*Token|Temporary\s+password|"
             r"OTP\s+backup\s+code|recovery\s+code|登录密码|密码|口令|passwd|password|secret|"
             r"api[_ -]?key|access[_ -]?token|パスワード|비밀번호|mot\s+de\s+passe|"
             r"Passwort|Contraseña|Пароль|كلمة\s+المرور|รหัสผ่าน)"
-            r"\s*(?:[=:：]|为|是|is|ist|est|es|lautet|هو|คือ|は|는|은)?\s*[\r\n ]*['\"]?"
+            r"[ \t]*[=:：][ \t]*['\"]?"
             r"([A-Za-z0-9][A-Za-z0-9_!@#$%^&*()+\-=/{}\[\]:?]{3,255})",
+            re.IGNORECASE,
+        ),
+        0.96,
+        group=1,
+    ),
+    RegexRule(
+        "SECRET",
+        _compile(
+            r"(?:"
+            r"(?:(?<![“\"'\w])(?:(?:My|The|my|the)\s+)?(?:temporary\s+)?(?:password|passwd|secret|passcode)\s+(?:is|was)\s+(?!not\b|a\b|the\b|an\b|only\b))"
+            r"|(?:(?<![\u4e00-\u9fff])(?:登录密码|临时密码|用户密码|开机密码|支付密码|密码|口令)\s*(?:为|是)\s*)"
+            r"|(?:(?<![A-Za-z0-9_])(?:Passwort|Kennwort)\s+(?:ist|lautet)\s+)"
+            r"|(?:(?<![A-Za-z0-9_])(?:mot\s+de\s+passe)\s+(?:est)\s+)"
+            r"|(?:(?<![A-Za-z0-9_])(?:contraseña)\s+(?:es)\s+)"
+            r"|(?:(?<![\u3040-\u30ff\u3400-\u9fff])(?:パスワード)\s*(?:は)\s*)"
+            r"|(?:(?<![\uac00-\ud7af])(?:비밀번호)\s*(?:는|은)\s*)"
+            r"|(?:كلمة\s+المرور\s+(?:هو|هي)\s+)"
+            r"|(?:รหัสผ่าน\s*(?:คือ)\s*)"
+            r")"
+            r"['\"]?([A-Za-z0-9][A-Za-z0-9_!@#$%^&*()+\-=/{}\[\]:?]{3,255})",
             re.IGNORECASE,
         ),
         0.96,
@@ -193,7 +234,7 @@ CONTEXT_RULES = (
     ),
     RegexRule(
         "IPV6_ADDRESS",
-        _compile(r"(?:IPv6|IPv6\s+address)\s*[：:=]?\s*([0-9A-Fa-f:]{2,45})", re.IGNORECASE),
+        _compile(r"(?:IPv6(?:\s+address)?)\s*(?:[：:=]|为|是|is|est|ist|es|lautet)?\s*([0-9A-Fa-f:]{2,45})", re.IGNORECASE),
         0.97,
         group=1,
         validator=ipv6_valid,
@@ -272,28 +313,94 @@ CONTEXT_RULES = (
     ),
     RegexRule(
         "CN_ACCOUNT",
-        _compile(r"(?:账号|账户|工号|学号|社保号|医保号|订单号|快递单号|客户编号|会员号|设备序列号|VIN)\s*(?:[：:=]|为|是)?\s*([A-Z0-9][A-Z0-9_.-]{4,63})", re.IGNORECASE),
+        _compile(r"(?:账号|账户|工号|学号|社保号|医保号|订单号|快递单号|客户编号|会员号|设备序列号|VIN)(?:[ \t]*[：:=][ \t]*|[ \t]*(?:为|是)[ \t]*)([A-Z0-9][A-Z0-9_.-]{4,63})", re.IGNORECASE),
         0.89,
         group=1,
     ),
     RegexRule(
         "USERNAME",
         _compile(
+            r"(?<![A-Za-z0-9_])"
             r"(?:username|user\s+name|公司账号|登录ID|ログインID|계정\s+이름|identifiant|"
             r"Benutzername|Usuario|Логин|اسم\s+المستخدم|ชื่อผู้ใช้)"
-            r"\s*(?:[：:=]|为|是|is|est|ist|es|は|는|은)?\s*"
-            r"([A-Z0-9][A-Z0-9_.-]{3,63})",
+            r"[ \t]*[=:：][ \t]*['\"]?"
+            r"([A-Za-z0-9][A-Za-z0-9_.-]{1,61}[A-Za-z0-9_]|[A-Za-z0-9]{2,63})",
             re.IGNORECASE,
         ),
         0.91,
         group=1,
     ),
     RegexRule(
+        "USERNAME",
+        _compile(
+            r"(?:"
+            r"(?:(?<![A-Za-z0-9_])(?:(?:My|The|my|the)\s+)?(?:username|user\s+name)\s+(?:is|was)\s+(?!not\b|a\b|the\b|an\b|only\b))"
+            r"|(?:(?<![\u4e00-\u9fff])(?:用户名|公司账号|登录账号|登录ID)\s*(?:为|是)\s*)"
+            r"|(?:(?<![A-Za-z0-9_])(?:Benutzername)\s+(?:ist|lautet)\s+)"
+            r"|(?:(?<![A-Za-z0-9_])(?:Usuario)\s+(?:es)\s+)"
+            r"|(?:(?<![A-Za-z0-9_])(?:identifiant)\s+(?:est)\s+)"
+            r"|(?:(?<![\u3040-\u30ff\u3400-\u9fff])(?:ログインID)\s*(?:は)\s*)"
+            r"|(?:(?<![\uac00-\ud7af])(?:계정\s*이름)\s*(?:은|는)\s*)"
+            r"|(?:اسم\s+المستخدم\s+(?:هو)\s+)"
+            r"|(?:ชื่อผู้ใช้\s*(?:คือ)\s*)"
+            r")"
+            r"['\"]?([A-Za-z0-9][A-Za-z0-9_.-]{1,61}[A-Za-z0-9_]|[A-Za-z0-9]{2,63})",
+            re.IGNORECASE,
+        ),
+        0.91,
+        group=1,
+    ),
+    RegexRule(
+        "MEDICAL_RECORD_ID",
+        _compile(
+            r"(?:medical\s+record(?:\s+test)?\s+(?:ID|number)|MRN|病历号|住院号|门诊号)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"([A-Z0-9][A-Z0-9_.-]{3,63})",
+            re.IGNORECASE,
+        ),
+        0.95,
+        group=1,
+    ),
+    RegexRule(
+        "INSURANCE_ID",
+        _compile(
+            r"(?:insurance\s+policy(?:\s+test)?\s+(?:ID|number)|医保号|社保卡号|保险号)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"([A-Z0-9][A-Z0-9_.-]{3,63})",
+            re.IGNORECASE,
+        ),
+        0.95,
+        group=1,
+    ),
+    RegexRule(
+        "EMPLOYEE_ID",
+        _compile(
+            r"(?:employee\s+(?:number|ID)|员工编号|员工工号|工号)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"([A-Z0-9][A-Z0-9_.-]{3,63})",
+            re.IGNORECASE,
+        ),
+        0.95,
+        group=1,
+    ),
+    RegexRule(
+        "STUDENT_ID",
+        _compile(
+            r"(?:student\s+(?:number|ID)|学号|学生证号)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"([A-Z0-9][A-Z0-9_.-]{3,63})",
+            re.IGNORECASE,
+        ),
+        0.95,
+        group=1,
+    ),
+    RegexRule(
         "RECORD_ID",
         _compile(
             r"(?:employee\s+(?:number|ID)|student\s+ID|medical\s+record(?:\s+test)?\s+ID|"
-            r"insurance\s+policy(?:\s+test)?\s+ID|Account\s+ID|员工编号|Database)"
-            r"\s*(?:[：:=]|为|是|is)?\s*([A-Z0-9][A-Z0-9_.-]{3,63})",
+            r"insurance\s+policy(?:\s+test)?\s+ID|Account\s+ID|员工编号)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"([A-Z0-9][A-Z0-9_.-]{3,63})",
             re.IGNORECASE,
         ),
         0.93,
@@ -306,14 +413,21 @@ COMMON_SURNAMES = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许�
 COMPOUND_SURNAMES = "欧阳|太史|端木|上官|司马|东方|独孤|南宫|万俟|闻人|夏侯|诸葛|尉迟|公羊|赫连|澹台|皇甫|宗政|濮阳|公冶|太叔|申屠|公孙|慕容|仲孙|钟离|长孙|宇文|司徒|鲜于|司空|闾丘|子车|亓官|司寇|巫马|公西|颛孙|壤驷|公良|漆雕|乐正|宰父|谷梁|拓跋|夹谷|轩辕|令狐|段干|百里|呼延|东郭|南门|羊舌|微生"
 NAME_VALUE = rf"(?:(?:{COMPOUND_SURNAMES})[\u4e00-\u9fff]{{1,2}}|[{COMMON_SURNAMES}][\u4e00-\u9fff]{{1,2}}|[\u4e00-\u9fff]{{2,4}}·[A-Za-z\u4e00-\u9fff·]{{1,12}})"
 NAME_PATTERNS = (
-    _compile(rf"(?:姓名|联系人|收件人|患者|客户|员工|申请人|负责人|法定代表人|法人|户主|开户名|我叫)\s*[：:=为]?\s*({NAME_VALUE})"),
+    _compile(rf"(?:姓名|联系人|收件人|患者|客户|员工|申请人|负责人|法定代表人|法人|户主|开户名|经办人)\s*[：:=]\s*({NAME_VALUE})"),
+    _compile(rf"(?:负责人|联系人|法定代表人|法人|户主|开户名|经办人|姓名)\s*(?:为|是)\s*({NAME_VALUE})"),
+    _compile(rf"(?:我叫|我是|本人)\s*({NAME_VALUE})"),
     _compile(rf"(?<![\u4e00-\u9fff])({NAME_VALUE})(?:先生|女士|医生|老师|经理|主任)(?![\u4e00-\u9fff])"),
 )
 
-LATIN_NAME_WORD = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’.-]{1,30}"
-LATIN_NAME_VALUE = rf"{LATIN_NAME_WORD}(?:\s+{LATIN_NAME_WORD}){{1,4}}"
-CYRILLIC_NAME_WORD = r"[А-ЯЁ][А-Яа-яЁё'’-]{1,30}"
-CYRILLIC_NAME_VALUE = rf"{CYRILLIC_NAME_WORD}(?:\s+{CYRILLIC_NAME_WORD}){{1,4}}"
+LATIN_LETTER = r"[A-Za-zÀ-ÖØ-öø-ÿ]"
+LATIN_UPPER = r"[A-ZÀ-ÖØ-Þ]"
+LATIN_NAME_WORD = rf"(?:{LATIN_UPPER}\.|{LATIN_UPPER}(?:[A-Za-zÀ-ÖØ-öø-ÿ\'’-]*{LATIN_LETTER})?)"
+LATIN_NAME_VALUE = rf"{LATIN_NAME_WORD}(?:[ \t]+{LATIN_NAME_WORD}){{1,4}}"
+
+CYRILLIC_LETTER = r"[А-Яа-яЁё]"
+CYRILLIC_UPPER = r"[А-ЯЁ]"
+CYRILLIC_NAME_WORD = rf"(?:{CYRILLIC_UPPER}\.|{CYRILLIC_UPPER}(?:[А-Яа-яЁё'’-]*{CYRILLIC_LETTER})?)"
+CYRILLIC_NAME_VALUE = rf"{CYRILLIC_NAME_WORD}(?:[ \t]+{CYRILLIC_NAME_WORD}){{1,4}}"
 
 MULTILINGUAL_NAME_PATTERNS = (
     _compile(rf"(?:My\s+name\s+is|Customer\s+Name\s*:|Name\s*:)\s*({LATIN_NAME_VALUE})", re.IGNORECASE),
@@ -321,7 +435,7 @@ MULTILINGUAL_NAME_PATTERNS = (
     _compile(rf"Mein\s+Name\s+ist\s+({LATIN_NAME_VALUE})", re.IGNORECASE),
     _compile(rf"Me\s+llamo\s+({LATIN_NAME_VALUE})", re.IGNORECASE),
     _compile(rf"Меня\s+зовут\s+({CYRILLIC_NAME_VALUE})", re.IGNORECASE),
-    _compile(r"(?:私の名前は|Customer\s+Name\s*:)\s*([\u3040-\u30ff\u3400-\u9fff]{2,12})(?=です|[。\n]|$)", re.IGNORECASE),
+    _compile(r"(?:私の名前は|(?:お客様の)?(?:姓名|氏名|お名前)\s*[：:]|Customer\s+Name\s*:)\s*([\u3040-\u30ff\u3400-\u9fff]{2,12})(?=[、，。\n\s]|です|$)", re.IGNORECASE),
     _compile(r"(?:제\s+이름은|负责人\s*)\s*([가-힣]{2,8})(?=입니다|\s+can|\s|[.\n]|$)", re.IGNORECASE),
     _compile(r"اسمي\s+([\u0600-\u06ff]+(?:\s+[\u0600-\u06ff]+){1,4})(?=[.\n]|$)"),
     _compile(r"ฉันชื่อ\s+([\u0e00-\u0e7f]+(?:\s+[\u0e00-\u0e7f]+){1,3})(?=\s+ที่อยู่|[.\n]|$)"),
@@ -371,8 +485,12 @@ def _entity_from_match(text: str, rule: RegexRule, match: Match[str]) -> Optiona
     if not value or (rule.validator is not None and not rule.validator(value)):
         return None
     if rule.entity_type == "CN_PHONE_NUMBER" and not value.lstrip().startswith(("+86", "0086")):
-        prefix = text[max(0, start - 10) : start]
-        if re.search(r"(?:\+\d{1,3}|00\d{1,3})[ ()-]*$", prefix):
+        prefix = text[max(0, start - 15) : start]
+        if re.search(r"(?:\+\d{1,4}|00\d{1,4})[ ()-]*$", prefix):
+            return None
+    if rule.entity_type == "EMAIL":
+        prefix = text[max(0, start - 30) : start]
+        if "://" in prefix and not any(c in prefix[prefix.rfind("://") :] for c in (" ", "\n", "\t", "/")):
             return None
     return Entity(
         entity_type=rule.entity_type,
@@ -380,7 +498,7 @@ def _entity_from_match(text: str, rule: RegexRule, match: Match[str]) -> Optiona
         end=end,
         text=value,
         confidence=rule.confidence,
-        sources=("chinese_rules",),
+        sources=("rules",),
         validated=rule.validated,
     )
 

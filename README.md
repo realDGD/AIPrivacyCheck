@@ -2,56 +2,69 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.2.0`（fnOS Native 可安装预览版）
+# 隐私净化器（AI Privacy Check）
 
-## 已实现
+面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-- 中文优先规则：身份证号、手机号、固定电话、银行卡、护照、统一社会信用代码、车牌、姓名、地址、邮箱、账号/单号、出生日期、社交账号、IP、私有网址和常见密钥。
-- 校验器：身份证日期与校验位、银行卡 Luhn、统一社会信用代码校验位、IPv4 合法性。
-- 可选模型增强：在 fnOS 本地安装并调用 [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter) 的公开 `opf.OPF` API。
-- 人工复核：每个命中项都能启用、禁用，或编辑稳定占位符。
-- 可逆恢复：同一原值在一轮处理里使用同一占位符，AI 回复后精确替换回来。
-- 加密保险箱：映射可在浏览器端使用 PBKDF2-SHA256 + AES-256-GCM 加密导出；服务器不接收保险箱密码。
-- fnOS 统一网关：应用入口复用 NAS 登录态，不暴露额外宿主机端口。
-- fnOS Native 运行：由 fnOS 官方 `python312` 运行时直接启动 package 用户进程，不使用 Docker。
-- 无文本数据库：服务不保存原文、AI 回复或映射，不记录请求正文。
+当前版本：`0.3.0`（fnOS Native 原生应用）
+
+## 已实现功能
+
+- **三级级联检测引擎**：
+  1. **确定性多语言与中文规则（Tier 1）**：身份证号、手机号、国际电话（E.164）、固定电话、银行卡、护照、统一社会信用代码、车牌、姓名、地址、邮箱、账号/单号、出生日期、社交账号、IPv4、完整 IPv6、MAC、BIC/SWIFT、IBAN、US SSN、数据库连接串（`DATABASE_URI`）、私钥与各类 API Token/凭证。
+  2. **独立中文信息抽取引擎（Tier 2，`ChineseIEDetector`）**：针对中文姓名、复杂行政区划拓扑与建筑地址进行基于语言学特征和游标防重定位的抽取（`safe_sequential_span_alignment`，彻底杜绝同名多次出现时的偏移碰撞）；内置零依赖启发式抽取，支持可选适配 PaddleNLP Taskflow UIE。
+  3. **可选神经网络模型（Tier 3，`OpenAIModelDetector`）**：本地按需加载并调用 [`openai/privacy-filter`](https://huggingface.co/openai/privacy-filter) 的 Token Classification 模型。
+- **设备加速与智能回退**：支持 `NVIDIA CUDA` / `CPU` / `Auto` 多推理设备管理。采用惰性探测机制（仅在模型推理时探测，纯规则扫描零 PyTorch 开销）；CUDA 不可用时自动、平滑降级至 CPU，并向界面报告明确诊断原因。
+- **模型全生命周期管理**：
+  - **在线下载**：一键安装模型权重与推理依赖，支持 CUDA wheel 镜像回退。
+  - **本地授权目录导入**：支持从 fnOS 用户授权目录（如预下载的共享文件夹）手动导入模型，经过完整性校验与暂存区原子替换（`os.replace`），断电或异常不破坏已有模型。
+  - **动态卸载与热重载**：管理员可一键卸载释放存储与显存空间，即时刷新引擎状态。
+- **严格校验器矩阵**：中国身份证 18 位校验码与出生日期、银行卡 Luhn 算法、统一社会信用代码 GB 32100 校验码、IBAN Mod-97 校验、IPv4/IPv6 合法性、MAC 地址格式。
+- **确定性冲突与优先级仲裁**：通过实体等级制度（高危密钥凭证 125 > 证件校验 110 > 手机/邮箱 105 > 语义抽取 90 > 通用模型 50），确保强规则永不被模糊模型覆盖。
+- **稳定可逆占位符**：中文类型前缀 + 序号 + SHA-256 局部指纹（如 `⟦姓名_01_B94F⟧`），同一原值全局一致，AI 回复后精确放回。
+- **端到端隐私边界**：文本检测与还原全在本地或浏览器完成；无数据库、不记日志正文；加密保险箱在浏览器端使用 PBKDF2-SHA256 + AES-256-GCM 本地加解密导出。
+- **原生 fnOS 体验**：
+  - 由 fnOS 官方 `python312` 运行时启动 package 用户无特权守护进程，通过 Unix Stream Socket 直连 fnOS 统一网关。
+  - `privilege` 加入 `video` 和 `render` 用户组以访问 GPU 设备节点。
+  - 顶部导航栏集成“在新标签页打开 ↗”（桌面小窗与全屏工作流自由切换）。
+- **多语言跨语种基准测试**：内置涵盖 11 种语言（中文、英语、德语、法语、西班牙语、俄语、日语、韩语、阿拉伯语、泰语、混合文本）与 20+ PII 类型的精确字符跨度基准测试套件。
 
 ## 工作流
 
 ```text
 原始文本
-  └─> fnOS 本地中文规则 + 可选 OpenAI Privacy Filter
-        └─> 人工复核
-              └─> ⟦姓名_01_B94F⟧ 等稳定占位符
-                    └─> 外部 AI（只看到脱敏文本）
-                          └─> 浏览器内按保险箱映射恢复原值
+  └─> 三级检测：多语言强规则 + 中文语义信息抽取 + 可选 OpenAI Privacy Filter
+        └─> 优先级仲裁与冲突合并
+              └─> 人工复核面板（启用/禁用/修改）
+                    └─> ⟦姓名_01_B94F⟧ 等稳定占位符脱敏文本
+                          └─> 外部 AI / 云端模型（只看到脱敏文本）
+                                └─> 浏览器内按保险箱映射无损精确还原
 ```
 
-## 为什么首选 Privacy Filter
+## 本地开发与测试
 
-[`openai/privacy-filter`](https://github.com/openai/privacy-filter) 是面向 PII span detection/redaction 的双向 token-classification 模型，有明确的结构化片段输出和 Apache-2.0 许可证，适合本工具的“找出片段并替换”任务。它主要针对英文，模型卡也提示非英文和非拉丁文字性能可能下降，所以本项目始终先运行中文规则与校验器，再把模型结果作为补充。
-
-[`MemPrivacy`](https://huggingface.co/collections/IAAR-Shanghai/memprivacy) 更偏向边云 Agent 的个性化记忆隐私管理，并非专门的文本 PII span classifier，因此暂不放进首版在线路径。后续可作为“哪些记忆可上云”的独立策略模块评估。
-
-中文规则思路参考了 [`cn_pii_anonymization`](https://github.com/neednlab/cn_pii_anonymization) 公布的实体范围；本地复核和数据边界参考了 [`local-privacy-workbench`](https://github.com/shoujikes-eng/local-privacy-workbench) 的产品原则。本仓库为独立实现，没有复制两个项目的代码。
-
-## 本地开发
-
-要求：Python 3.9+。规则模式无第三方 Python 依赖。
+要求：Python 3.9+，已安装 `uv`（作为标准包管理和环境工具）。
 
 ```bash
+# 启动本地开发服务
 ./scripts/run_dev.sh
 ```
 
 打开 `http://127.0.0.1:8976`。
 
-运行测试：
+运行完整测试矩阵（含单元测试、多语言基准测试、语法检查与 fnOS 配置验证）：
 
 ```bash
 ./scripts/test.sh
 ```
 
-模拟 fnOS 原生进程的启动、Socket 请求、状态检查和停止：
+运行独立多语言精确跨度基准测试：
+
+```bash
+uv run python scripts/benchmark.py
+```
+
+模拟 fnOS Native 原生进程的生命周期（Unix Socket 启停、健康检查、PID 管理与资源清理）：
 
 ```bash
 ./scripts/test_native_lifecycle.sh
@@ -59,54 +72,32 @@
 
 ## 构建 fnOS 安装包
 
-仓库按官方 [Native 应用案例](https://developer.fnnas.com/docs/examples/native/)、[运行时环境](https://developer.fnnas.com/docs/core-concepts/runtime/) 和 [统一网关](https://developer.fnnas.com/docs/core-concepts/gateway-registration/) 规范组织。默认使用用户提供的 `fnpack 1.2.3`：
+仓库遵循官方 [Native 应用案例](https://developer.fnnas.com/docs/examples/native/)、[运行时环境](https://developer.fnnas.com/docs/core-concepts/runtime/) 和 [统一网关](https://developer.fnnas.com/docs/core-concepts/gateway-registration/) 规范组织：
 
 ```bash
 ./scripts/build_fpk.sh
 ```
 
-产物位于 `dist/ai-privacy-check_0.2.0_all.fpk`。包内只含 Python 源码和静态页面，`platform=all` 可同时安装于 x86_64 和 ARM64 fnOS。也可以覆盖打包器路径：
+构建产物位于 `dist/ai-privacy-check_0.3.0_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
-```bash
-FNPACK_BIN=/path/to/fnpack ./scripts/build_fpk.sh
-```
+在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 
-在 fnOS 应用中心选择手动安装 `.fpk`。安装时 fnOS 会根据 `install_dep_apps=python312` 安装官方 Python 3.12 运行时；应用启动后中文规则模式立即可用，无需容器镜像。
+## 模型管理与硬件加速
 
-## 安装可选模型
+在 fnOS 桌面应用中，使用管理员账号打开“模型与硬件”面板：
 
-使用 fnOS 管理员账号打开“模型与隐私”，点击“安装模型增强”。应用会：
+1. **选择推理设备**：可在 `Auto`（优先 CUDA）、`CPU`、`NVIDIA CUDA` 之间切换。服务将安全探测显卡可用性，未就绪时自动提示。
+2. **在线安装模型**：点击“在线下载模型”，系统将从 Hugging Face 镜像获取固定版本的模型权重。
+3. **本地手动导入**：若 NAS 无法直接连通外网，可将下载好的模型目录存放于 NAS 共享文件夹中，在页面填入绝对路径（如 `/vol1/1000/models/privacy-filter`），系统将执行完整性校验并原子替换生效。
+4. **模型卸载与重载**：随时一键卸载模型，释放磁盘与显存。
 
-1. 从固定的 OpenAI Privacy Filter Git 提交安装 `opf`、PyTorch 等运行依赖。
-2. 从 Hugging Face 固定模型提交下载 `original/` 权重（约 2.8 GB）。
-3. 将依赖和权重保存在 fnOS 管理的应用数据目录。
+## 隐私与安全承诺
 
-建议预留 4–8 GB 磁盘与至少 4 GB 可用内存。下载是唯一需要外网的阶段；检测文本不会发送给 GitHub、Hugging Face 或 OpenAI API。模型安装兼容性仍需分别在目标 x86_64/ARM fnOS 设备上实测。
-
-## 隐私与安全边界
-
-- 浏览器到服务：通过 fnOS 统一网关和当前 NAS 会话访问。
-- 服务端：仅在内存中处理请求；日志只包含 HTTP 方法和无查询参数的路径。
-- 映射：默认只在当前浏览器页面内存；刷新页面即丢失。
-- 导出：保险箱在浏览器端加密，密码无法恢复。
-- 进程权限：服务以 fnOS 为应用创建的 package 用户运行，仅在 `${TRIM_PKGVAR}` 和应用 Socket 路径写入运行数据。
-- 局限：任何自动识别都会漏检或误检。本工具是数据最小化辅助工具，不是匿名化、合规或安全保证；高敏内容外发前必须人工复核。
-
-更多细节见 [架构说明](docs/architecture.md) 和 [安全说明](docs/security.md)。
-
-## 项目结构
-
-```text
-packaging/ai-privacy-check/        fnOS FPK 源目录
-  app/server/                     Python 原生服务、检测引擎与静态前端
-  app/ui/config                   fnOS 桌面/统一网关入口
-  cmd/                            fnOS 生命周期脚本
-  config/                         package 用户最小权限与资源声明
-tests/                            中文规则与合并策略测试
-scripts/                          本地启动、测试和打包脚本
-assets/                           可重新生成的 SVG 图标源文件
-```
+- **零数据外流**：待处理的任何用户原始文本、脱敏映射或还原结果均不离开当前设备，不向任何第三方或云端发送请求。
+- **无日志泄露**：Web 服务日志仅记录请求方法与静态路由，强制剔除 Query 参数与 Request Body，严禁记录任何 PII 明文。
+- **最小特权**：应用以 fnOS 独立的受限 package 用户运行，禁止 root 权限；授权目录访问受 fnOS 安全沙盒约束。
+- **内存安全**：会话映射默认仅存在于浏览器运行内存中，关闭或刷新页面后即刻焚毁。
 
 ## 许可证
 
-本项目代码使用 Apache License 2.0。OpenAI Privacy Filter 运行库与模型由其各自许可证约束，安装时从上游获取，不包含在 `.fpk` 中。
+本项目代码使用 Apache License 2.0 开源。相关依赖与可选神经网络模型遵循各自原始开源许可证。

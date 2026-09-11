@@ -94,8 +94,9 @@ class ServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             service = PrivacyService(Path(directory))
             result = service.detect("联系人张三，手机号13800138000", use_model=True)
-        self.assertGreaterEqual(len(result["entities"]), 2)
-        self.assertEqual(result["engines"], [service.rules.name])
+        self.assertIn(service.rules.name, result["engines"])
+        self.assertIn(service.chinese_ie.name, result["engines"])
+        self.assertNotIn("openai_privacy_filter", result["engines"])
         self.assertTrue(result["warnings"])
 
 

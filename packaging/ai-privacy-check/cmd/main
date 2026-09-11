@@ -55,7 +55,8 @@ start_app() {
     GATEWAY_SOCKET="$SOCKET_PATH" \
     HF_HOME="${DATA_DIR}/huggingface" \
     PIP_CACHE_DIR="${DATA_DIR}/pip-cache" \
-    OPF_DEVICE="cpu" \
+    AI_PRIVACY_DEVICE="${AI_PRIVACY_DEVICE:-auto}" \
+    OPF_DEVICE="${AI_PRIVACY_DEVICE:-auto}" \
     PYTHONDONTWRITEBYTECODE="1" \
     PYTHONUNBUFFERED="1" \
     "$PYTHON_BIN" "$APP_DIR/server.py" >> "$LOG_FILE" 2>&1 &
