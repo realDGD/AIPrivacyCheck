@@ -72,7 +72,7 @@ def run_benchmark(fixture_path: Path):
                     samples.append(json.loads(line))
 
         print("=" * 80)
-        print("  AI Privacy Check - Multilingual Exact-Span Benchmark Suite (v0.3.0)")
+        print("  AI Privacy Check - Multilingual Exact-Span Benchmark Suite (v0.3.1)")
         print("=" * 80)
         print(f"Loaded {len(samples)} synthetic test cases from {fixture_path.relative_to(PROJECT_DIR)}")
         print("Scoring Criteria: Exact Character Span [start, end) + Compatible Semantic Type\n")
