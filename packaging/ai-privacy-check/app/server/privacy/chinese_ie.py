@@ -67,34 +67,80 @@ class BuiltinChineseIE:
             re.IGNORECASE,
         )
 
-        self.person_context_pattern = re.compile(
-            r"(?:(?:联系人|收件人|发件人|姓名|用户|负责人|经办人|候选人|当事人|作者|客户|先生|女士|老师|同学|医生|教授|经理|主任)\s*[：:=为是]?\s*)"
-            r"([\u4e00-\u9fa5]{2,4})(?=[^\u4e00-\u9fa5]|$)"
+        # 1. 字段模式：必须包含显式冒号/等号分隔符，前置限定高置信字段词（排除宽泛的"用户"）
+        self.person_field_pattern = re.compile(
+            r"(?<![\u4e00-\u9fa5])"
+            r"(?:姓名|联系人|收件人|发件人|负责人|经办人|候选人|当事人|作者|客户)"
+            r"\s*[：:=]\s*"
+            r"([\u4e00-\u9fa5]{2,4}?)"
+            r"(?:先生|女士|老师|同学|医生|教授|经理|主任)?"
+            r"(?=[^\u4e00-\u9fa5]|$)"
+        )
+        self.person_context_pattern = self.person_field_pattern
+
+        # 2. 自然语言谓词模式：连接词（是/为）必须显式存在，排除可选匹配
+        self.person_predicate_pattern = re.compile(
+            r"(?<![\u4e00-\u9fa5])"
+            r"(?:负责人|联系人|作者|经办人|当事人|候选人)"
+            r"\s*(?:是|为)\s*"
+            r"([\u4e00-\u9fa5]{2,4}?)"
+            r"(?:先生|女士|老师|同学|医生|教授|经理|主任)?"
+            r"(?=[^\u4e00-\u9fa5]|$)"
+        )
+
+        # 3. 自我介绍模式
+        self.person_self_intro_pattern = re.compile(
+            r"(?<![\u4e00-\u9fa5])"
+            r"(?:我叫|我是)\s*"
+            r"([\u4e00-\u9fa5]{2,4})"
+            r"(?=[^\u4e00-\u9fa5]|$)"
+        )
+
+        # 4. 后置称谓模式：将先生/女士/老师/医生/教授/经理/主任作为后置称谓，而非前置 anchor
+        self.person_post_title_pattern = re.compile(
+            r"(?<![\u4e00-\u9fa5])"
+            r"([\u4e00-\u9fa5]{2,3})"
+            r"(?:先生|女士|老师|同学|医生|教授|经理|主任)"
+            r"(?![\u4e00-\u9fa5])"
+        )
+
+        # 5. 由 X 负责/经办/承办 专有人行动作短语
+        self.person_action_by_pattern = re.compile(
+            r"(?<![\u4e00-\u9fa5])"
+            r"由\s*([\u4e00-\u9fa5]{2,3})(?:先生|女士|老师|同学|医生|教授|经理|主任)?\s*"
+            r"(?:负责|经办|承办)"
+        )
+
+        # 6. 高置信人行动作对象短语（移除和/同/与/跟及裸"给"等宽泛介词/连词）
+        self.person_action_target_pattern = re.compile(
+            r"(?<![\u4e00-\u9fa5])"
+            r"(?:请?通知|请?联系|找|转交给|拜访|采访|陪同)\s*"
+            r"([\u4e00-\u9fa5]{2,3})(?:先生|女士|老师|同学|医生|教授|经理|主任)?"
+            r"(?=[，。；;！？\s、\n]|$)"
         )
 
     def extract_names(self, text: str) -> List[Tuple[int, int, str, float]]:
         results: List[Tuple[int, int, str, float]] = []
 
-        # 1. Contextual matches
-        for match in self.person_context_pattern.finditer(text):
-            name = match.group(1)
-            start, end = match.span(1)
-            if self._is_valid_chinese_name(name):
-                results.append((start, end, name, 0.92))
+        patterns: List[Tuple[re.Pattern, float]] = [
+            (self.person_field_pattern, 0.92),
+            (self.person_predicate_pattern, 0.92),
+            (self.person_self_intro_pattern, 0.92),
+            (self.person_post_title_pattern, 0.90),
+            (self.person_action_by_pattern, 0.88),
+            (self.person_action_target_pattern, 0.85),
+        ]
 
-        # 2. Free-text semantic identification with verb/preposition anchor
-        # e.g., "由张伟负责", "交给李明", "通知王晓丽", "请寄给张三"
-        free_pattern = re.compile(
-            r"(?:由|给|通知|找|转交|联系|和|同|与|跟|致|拜访|采访|陪同)\s*([\u4e00-\u9fa5]{2,3})(?=[，。；;！？\s、\n]|$)"
-        )
-        for match in free_pattern.finditer(text):
-            name = match.group(1)
-            start, end = match.span(1)
-            if self._is_valid_chinese_name(name):
-                # Ensure no overlap with existing
-                if not any(r[0] <= start < r[1] or r[0] < end <= r[1] for r in results):
-                    results.append((start, end, name, 0.85))
+        for pattern, conf in patterns:
+            for match in pattern.finditer(text):
+                name = match.group(1)
+                start, end = match.span(1)
+                if self._is_valid_chinese_name(name):
+                    # Ensure no overlap with existing
+                    if not any(r[0] <= start < r[1] or r[0] < end <= r[1] for r in results):
+                        results.append((start, end, name, conf))
 
+        results.sort(key=lambda x: x[0])
         return results
 
     def extract_addresses(self, text: str) -> List[Tuple[int, int, str, float]]:

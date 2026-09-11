@@ -8,6 +8,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 SERVER_DIR = PROJECT_DIR / "packaging" / "ai-privacy-check" / "app" / "server"
 sys.path.insert(0, str(SERVER_DIR))
 
+from privacy.chinese_ie import BuiltinChineseIE
 from privacy.rules import MultilingualRuleDetector
 from privacy.service import PrivacyService
 
@@ -18,6 +19,7 @@ class FalsePositiveRegressionTests(unittest.TestCase):
     def setUp(self):
         self.detector = MultilingualRuleDetector()
         self.service = PrivacyService(Path("/tmp/test_privacy_fp"))
+        self.chinese_ie = BuiltinChineseIE()
 
     def test_negative_secret_sentences(self):
         cases = [
@@ -75,16 +77,43 @@ class FalsePositiveRegressionTests(unittest.TestCase):
 
     def test_negative_chinese_name_sentences(self):
         cases = [
-            "两处姓名应该分别识别。",
+            "系统和周边，均运行正常。",
+            "产品与王者，都只是项目名称。",
+            "给周边设备供电。",
+            "给王者客户端分配资源。",
+            "用户王者，表示的是游戏用户标签。",
+            "用户周边功能尚未完成。",
+            "客户王者荣耀，是一个项目代号。",
+            "客户资料已经归档。",
+            "联系我们的客服团队。",
+            "通知管理员，系统需要升级。",
+            "与李子树相关的研究已经完成。",
+            "和周边设备建立连接。",
+            "同王者版本相比，本版本性能更高。",
+            "跟周边系统保持兼容。",
+            "经理高大并不是人员信息，而是测试短语。",
+            "老师周边资源将在下周更新。",
+            "作者王道并不是一个作者姓名，而是文档中的普通短语。",
             "姓名字段目前为空。",
+            "联系人列表已经更新。",
+            "负责人字段尚未填写。",
+            # Additional context checks
+            "两处姓名应该分别识别。",
             "姓名识别功能已经开启。",
             "姓名检测需要人工复核。",
             "“姓名”只是字段标签。",
             "联系人字段为空。",
-            "负责人字段尚未填写。",
         ]
         for sentence in cases:
             with self.subTest(sentence=sentence):
+                # 1. Chinese IE extractor level
+                ie_names = self.chinese_ie.extract_names(sentence)
+                self.assertEqual(
+                    ie_names,
+                    [],
+                    f"False positive in BuiltinChineseIE: {sentence!r} -> {ie_names}",
+                )
+                # 2. Service level integration
                 result = self.service.detect(sentence, use_model=False)
                 name_entities = [e for e in result["entities"] if e["type"] in ("CN_NAME", "PRIVATE_PERSON", "PERSON")]
                 self.assertEqual(
@@ -99,6 +128,8 @@ class TruePositiveRegressionTests(unittest.TestCase):
 
     def setUp(self):
         self.detector = MultilingualRuleDetector()
+        self.service = PrivacyService(Path("/tmp/test_privacy_tp"))
+        self.chinese_ie = BuiltinChineseIE()
 
     def test_positive_secrets(self):
         cases = [
@@ -134,18 +165,46 @@ class TruePositiveRegressionTests(unittest.TestCase):
     def test_positive_chinese_names(self):
         cases = [
             ("姓名：陈思远", "陈思远"),
-            ("联系人：陈思远", "陈思远"),
+            ("联系人：李明", "李明"),
             ("负责人：周子涵", "周子涵"),
+            ("作者：林雨辰", "林雨辰"),
+            ("客户：王晓丽", "王晓丽"),
             ("负责人是周子涵", "周子涵"),
             ("负责人为周子涵", "周子涵"),
+            ("联系人是陈思远", "陈思远"),
+            ("联系人为陈思远", "陈思远"),
             ("我叫林雨辰", "林雨辰"),
+            ("我是林雨辰", "林雨辰"),
+            ("由张伟负责。", "张伟"),
+            ("通知李明。", "李明"),
+            ("请通知李明。", "李明"),
+            ("联系王晓丽。", "王晓丽"),
+            ("请联系王晓丽。", "王晓丽"),
+            ("找陈思远。", "陈思远"),
+            ("转交给陈思远。", "陈思远"),
+            ("拜访周子涵。", "周子涵"),
+            ("采访林雨辰。", "林雨辰"),
+            ("陪同张伟。", "张伟"),
+            ("张伟先生", "张伟"),
+            ("李明老师", "李明"),
+            ("王晓丽医生", "王晓丽"),
+            ("陈思远教授", "陈思远"),
         ]
         for text, expected_name in cases:
             with self.subTest(text=text):
-                entities = [e for e in self.detector.detect(text) if e.entity_type in ("CN_NAME", "PRIVATE_PERSON")]
+                # 1. Chinese IE extractor verification
+                ie_names = self.chinese_ie.extract_names(text)
+                self.assertTrue(len(ie_names) >= 1, f"BuiltinChineseIE missed name in: {text!r}")
+                self.assertEqual(ie_names[0][2], expected_name)
+                self.assertEqual(text[ie_names[0][0]:ie_names[0][1]], expected_name)
+
+                # 2. Service level integration
+                result = self.service.detect(text, use_model=False)
+                entities = [e for e in result["entities"] if e["type"] in ("CN_NAME", "PRIVATE_PERSON", "PERSON")]
                 self.assertTrue(len(entities) >= 1, f"Expected name not found in: {text!r}")
-                self.assertEqual(entities[0].text, expected_name)
-                self.assertEqual(text[entities[0].start:entities[0].end], expected_name)
+                matched = entities[0]
+                self.assertEqual(matched["text"], expected_name)
+                self.assertEqual(text[matched["start"]:matched["end"]], expected_name)
 
     def test_latin_name_span_no_multiline_leak(self):
         text = "Name: Olivia Mercer\nPhone: +1 (202) 555-0186\nEmail: olivia.mercer@example.com"
