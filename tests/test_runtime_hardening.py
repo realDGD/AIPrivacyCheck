@@ -2249,6 +2249,355 @@ class MemPrivacyRuntimeHardeningV063Tests(unittest.TestCase):
                 mock_client.stop_worker_for_model.assert_called_with("memprivacy-1.7b-rl")
 
 
+class ConcurrencyAndLifecycleHardeningV064Tests(unittest.TestCase):
+    """Comprehensive test suite for v0.6.4: Concurrency Hardening, Deadlines, and Lifecycle Safety."""
+
+    def _create_mock_memprivacy_model(self, data_dir: Path) -> Path:
+        model_dir = data_dir / "models" / "memprivacy-1.7b-rl"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text('{"architectures": ["Qwen2ForCausalLM"]}')
+        (model_dir / "tokenizer.json").write_text('{}')
+        (model_dir / "model.safetensors").write_text('MOCK_WEIGHTS')
+        return model_dir
+
+    def test_retired_worker_cannot_resurrect(self):
+        """1. Calling start or query on a retired worker raises WorkerRetiredError and cannot restart."""
+        from privacy.worker_client import RuntimeWorkerProcess, WorkerRetiredError
+
+        worker = RuntimeWorkerProcess(
+            python_bin=Path(sys.executable),
+            worker_script=Path("/tmp/fake_worker.py"),
+            model_id="memprivacy-1.7b-rl",
+            profile="torch-cuda",
+            device="cuda",
+        )
+        self.assertFalse(worker.is_retired())
+        worker.retire()
+        self.assertTrue(worker.is_retired())
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(worker.is_ready())
+
+        with self.assertRaises(WorkerRetiredError):
+            worker.start()
+
+        with self.assertRaises(WorkerRetiredError):
+            worker.query({"action": "ping"})
+
+    def test_registry_invariant_after_eviction(self):
+        """2. Evicted workers are removed from WorkerClient and marked retired, preventing resurrection."""
+        from privacy.worker_client import WorkerClient, RuntimeWorkerProcess, WorkerRetiredError
+
+        client = WorkerClient(Path("/tmp"))
+        w1 = RuntimeWorkerProcess(
+            python_bin=Path(sys.executable),
+            worker_script=Path("/tmp/fake_worker.py"),
+            model_id="gliner-pii-edge",
+            profile="torch-cuda",
+            device="cuda",
+        )
+        key = "gliner-pii-edge:torch-cuda:cuda"
+        client._workers[key] = w1
+
+        evicted = client.stop_other_cuda_workers(keep_model_id="memprivacy-1.7b-rl")
+        self.assertIn(key, evicted)
+        self.assertNotIn(key, client._workers)
+        self.assertTrue(w1.is_retired())
+
+        with self.assertRaises(WorkerRetiredError):
+            w1.query({"action": "ping"})
+
+    def test_concurrent_memprivacy_serialized(self):
+        """3. Concurrent MemPrivacy requests are serialized via _inference_lock to protect system resources."""
+        from privacy.detectors import MemPrivacyDetector
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            order = []
+            start_barrier = threading.Barrier(2)
+
+            def mock_detect_session(text, model_dir, profile, dev, deadline):
+                order.append(f"start-{text}")
+                time.sleep(0.05)
+                order.append(f"end-{text}")
+                return [], []
+
+            with patch.object(det, "_detect_session_locked", side_effect=mock_detect_session), \
+                 patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model", return_value={"ready": True, "actual_device": "cpu", "runtime_profile": "torch-cpu"}):
+                def worker_thread(name):
+                    start_barrier.wait()
+                    det.detect(name)
+
+                t1 = threading.Thread(target=worker_thread, args=("req1",))
+                t2 = threading.Thread(target=worker_thread, args=("req2",))
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
+
+            self.assertEqual(len(order), 4)
+            is_1_then_2 = (order[0] == "start-req1" and order[1] == "end-req1" and order[2] == "start-req2" and order[3] == "end-req2")
+            is_2_then_1 = (order[0] == "start-req2" and order[1] == "end-req2" and order[2] == "start-req1" and order[3] == "end-req1")
+            self.assertTrue(is_1_then_2 or is_2_then_1, f"Execution was not serialized: {order}")
+
+    def test_cuda_coordinator_blocks_concurrent_gliner(self):
+        """4. CUDA coordinator ensures GLiNER cannot run on GPU concurrently with MemPrivacy session."""
+        from privacy.worker_client import WorkerClient
+
+        client = WorkerClient(Path("/tmp"))
+        events = []
+
+        def memprivacy_session():
+            with client.cuda_execution_session(device="cuda", timeout=5.0):
+                events.append("mem_start")
+                time.sleep(0.1)
+                events.append("mem_end")
+
+        def gliner_session():
+            time.sleep(0.02)
+            with client.cuda_execution_session(device="cuda", timeout=5.0):
+                events.append("gliner_start")
+                events.append("gliner_end")
+
+        t_mem = threading.Thread(target=memprivacy_session)
+        t_gli = threading.Thread(target=gliner_session)
+        t_mem.start()
+        t_gli.start()
+        t_mem.join()
+        t_gli.join()
+
+        self.assertEqual(events, ["mem_start", "mem_end", "gliner_start", "gliner_end"])
+
+    def test_cuda_coordinator_leases_released_on_exception(self):
+        """5. CUDA coordinator releases lock immediately if exception occurs inside session."""
+        from privacy.worker_client import WorkerClient
+
+        client = WorkerClient(Path("/tmp"))
+        with self.assertRaises(RuntimeError):
+            with client.cuda_execution_session(device="cuda", timeout=1.0):
+                raise RuntimeError("Inference crash")
+
+        # Must be immediately re-acquireable
+        acquired = False
+        with client.cuda_execution_session(device="cuda", timeout=0.5):
+            acquired = True
+        self.assertTrue(acquired)
+
+    def test_lock_free_termination(self):
+        """6. stop_other_cuda_workers must pop victims inside _lock and terminate them outside _lock."""
+        from privacy.worker_client import WorkerClient
+
+        client = WorkerClient(Path("/tmp"))
+        mock_worker = MagicMock(device="cuda", model_id="gliner-pii-edge")
+        lock_state_during_retire = []
+
+        def mock_retire():
+            acquired = client._lock.acquire(blocking=False)
+            if acquired:
+                lock_state_during_retire.append("unlocked")
+                client._lock.release()
+            else:
+                lock_state_during_retire.append("locked")
+
+        mock_worker.retire.side_effect = mock_retire
+        client._workers["gliner:cuda"] = mock_worker
+
+        client.stop_other_cuda_workers(keep_model_id="memprivacy-1.7b-rl")
+        self.assertEqual(lock_state_during_retire, ["unlocked"])
+
+    def test_whole_request_deadline_limits_chunks(self):
+        """7. Request budget limits multi-chunk execution; stops when deadline is exhausted."""
+        from privacy.detectors import MemPrivacyDetector
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            text = "这是测试段落，包含重要内容。\n\n" * 400
+
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model", return_value={"ready": True, "actual_device": "cuda", "runtime_profile": "torch-cuda"}), \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+                chunk_call_count = [0]
+
+                def mock_query(req, timeout):
+                    chunk_call_count[0] += 1
+                    return {
+                        "ok": True,
+                        "entities": [{"original_text": "重要内容", "privacy_type": "SECRET"}],
+                    }
+
+                mock_worker.query.side_effect = mock_query
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (120, 180)
+                mock_gwc.return_value = mock_client
+
+                base_time = 1000.0
+                # Call 1: started_at, Call 2: acquire_timeout, Call 3: cuda_timeout, Call 4: chunk 0 remaining, Call 5: chunk 1 remaining (expired)
+                times = [base_time, base_time + 1.0, base_time + 2.0, base_time + 3.0, base_time + 300.0]
+                with patch("time.monotonic", side_effect=lambda: times.pop(0) if times else 2000.0):
+                    entities, warnings = det.detect(text)
+
+                self.assertEqual(chunk_call_count[0], 1)
+                self.assertTrue(any("仅完成" in w for w in warnings))
+
+    def test_deadline_lock_wait_accounting(self):
+        """8. If waiting for lock times out, immediately return busy message."""
+        from privacy.detectors import MemPrivacyDetector
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+            det._inference_lock = MagicMock()
+            det._inference_lock.acquire.return_value = False
+
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model", return_value={"ready": True, "actual_device": "cuda", "runtime_profile": "torch-cuda"}):
+                entities, warnings = det.detect("测试繁忙锁等待")
+                self.assertEqual(len(entities), 0)
+                self.assertIn("MemPrivacy 语义推理繁忙，本次未在时间预算内执行。", warnings)
+
+    def test_partial_results_preserved(self):
+        """9. When chunk 1 succeeds but chunk 2 fails, chunk 1 entities are preserved and partial warning is emitted."""
+        from privacy.detectors import MemPrivacyDetector
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            text = "这是第一个测试段落，包含秘密密钥ABC123。\n\n" * 150 + "这是第二个测试段落，包含密码DEF456。\n\n" * 150
+
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model", return_value={"ready": True, "actual_device": "cuda", "runtime_profile": "torch-cuda"}), \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+                call_idx = [0]
+
+                def mock_query(req, timeout):
+                    call_idx[0] += 1
+                    if call_idx[0] == 1:
+                        return {
+                            "ok": True,
+                            "entities": [{"original_text": "ABC123", "privacy_type": "API_TOKEN"}],
+                        }
+                    else:
+                        raise TimeoutError("Chunk 2 timed out")
+
+                mock_worker.query.side_effect = mock_query
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (120, 180)
+                mock_gwc.return_value = mock_client
+
+                entities, warnings = det.detect(text)
+                self.assertTrue(len(entities) > 0)
+                self.assertEqual(entities[0].text, "ABC123")
+                self.assertTrue(any("仅完成" in w for w in warnings))
+
+    def test_deduplicated_truncation_warning(self):
+        """10. When multiple chunks are truncated, exactly one summary warning is produced."""
+        from privacy.detectors import MemPrivacyDetector
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            text = "分块内容段落一。\n\n" * 150 + "分块内容段落二。\n\n" * 150
+
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model", return_value={"ready": True, "actual_device": "cuda", "runtime_profile": "torch-cuda"}), \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+                mock_worker.query.return_value = {
+                    "ok": True,
+                    "truncated": True,
+                    "entities": [],
+                }
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (120, 180)
+                mock_gwc.return_value = mock_client
+
+                entities, warnings = det.detect(text)
+                trunc_warns = [w for w in warnings if "达到生成上限" in w]
+                self.assertEqual(len(trunc_warns), 1)
+                self.assertIn("个分块达到生成上限", trunc_warns[0])
+
+    def test_cpu_oom_vs_cuda_vram_classification(self):
+        """11. Differentiates CPU MemoryError vs CUDA VRAM Out-of-memory."""
+        from privacy.detectors import MemPrivacyDetector
+        from privacy.worker_client import is_cuda_oom_exception, is_cpu_oom_exception
+
+        self.assertTrue(is_cuda_oom_exception(RuntimeError("CUDA out of memory"), device="cuda"))
+        self.assertFalse(is_cuda_oom_exception(RuntimeError("CUDA out of memory"), device="cpu"))
+        self.assertTrue(is_cpu_oom_exception(MemoryError(), device="cpu"))
+        self.assertTrue(is_cpu_oom_exception(RuntimeError("std::bad_alloc"), device="cpu"))
+        self.assertFalse(is_cpu_oom_exception(MemoryError(), device="cuda"))
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model", return_value={"ready": True, "actual_device": "cpu", "runtime_profile": "torch-cpu"}), \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+                mock_worker.query.side_effect = MemoryError("Host memory allocation failed")
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (150, 360)
+                mock_gwc.return_value = mock_client
+
+                entities, warnings = det.detect("测试 CPU 内存溢出")
+                self.assertEqual(len(entities), 0)
+                self.assertTrue(any("MemPrivacy 内存不足，已安全回退。" in w for w in warnings))
+                self.assertFalse(any("显存不足" in w for w in warnings))
+
+    def test_real_multichunk_long_text(self):
+        """12. Real >8000 char long text splits into valid chunks with correct offsets."""
+        from privacy.detectors import chunk_memprivacy_text
+
+        text = "".join(f"第{i}章：这是用于验证超长文本分块切分正确性的内容句段。\n" for i in range(300))
+        self.assertGreater(len(text), 8000)
+        chunks = chunk_memprivacy_text(text)
+        self.assertGreaterEqual(len(chunks), 3)
+
+        self.assertEqual(chunks[0][0], 0)
+        self.assertEqual(chunks[-1][1], len(text))
+        for s, e, ctext in chunks:
+            self.assertEqual(text[s:e], ctext)
+            self.assertLessEqual(len(ctext), 3200)
+
+    def test_budget_helper_bound(self):
+        """13. Budget helper returns appropriate tokens and upper bounds <= 512."""
+        from privacy.detectors import choose_memprivacy_generation_budget
+        self.assertEqual(choose_memprivacy_generation_budget("short"), 256)
+        self.assertEqual(choose_memprivacy_generation_budget("x" * 1000), 256)
+        self.assertEqual(choose_memprivacy_generation_budget("x" * 1001), 384)
+        self.assertEqual(choose_memprivacy_generation_budget("x" * 4000), 384)
+        self.assertEqual(choose_memprivacy_generation_budget("x" * 4001), 512)
+        self.assertLessEqual(choose_memprivacy_generation_budget("x" * 10000), 512)
+
+    def test_version_consistency(self):
+        """14. Version numbers across server.py, manifest, benchmark, lifecycle are consistent at 0.6.4."""
+        server_py = SERVER_DIR / "server.py"
+        content = server_py.read_text(encoding="utf-8")
+        self.assertIn('"AIPrivacyCheck/0.6.4"', content)
+        self.assertIn('"version": "0.6.4"', content)
+
+        manifest = PROJECT_DIR / "packaging" / "ai-privacy-check" / "manifest"
+        m_content = manifest.read_text(encoding="utf-8")
+        self.assertIn("version               = 0.6.4", m_content)
+        self.assertIn("0.6.4:", m_content)
+
+        bench_py = PROJECT_DIR / "scripts" / "benchmark.py"
+        b_content = bench_py.read_text(encoding="utf-8")
+        self.assertIn("v0.6.4", b_content)
+
+        life_sh = PROJECT_DIR / "scripts" / "test_native_lifecycle.sh"
+        l_content = life_sh.read_text(encoding="utf-8")
+        self.assertIn('"0.6.4"', l_content)
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 

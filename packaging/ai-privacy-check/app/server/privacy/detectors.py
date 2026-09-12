@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .device import DEVICE_MANAGER
@@ -29,7 +30,14 @@ from .model_catalog import (
 from .rules import MultilingualRuleDetector
 from .span_resolver import resolve_semantic_spans
 from .taxonomy import PL2, PL3, PL4, resolve_privacy_level
-from .worker_client import get_worker_client, is_cuda_oom_response
+from .worker_client import (
+    WorkerRetiredError,
+    get_worker_client,
+    is_cpu_oom_exception,
+    is_cpu_oom_response,
+    is_cuda_oom_exception,
+    is_cuda_oom_response,
+)
 
 logger = logging.getLogger("ai_privacy.detectors")
 
@@ -292,22 +300,22 @@ class GLiNERDetector(Detector):
 
         try:
             worker_client = get_worker_client(self.data_dir)
-            worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
             _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=dev)
+            with worker_client.cuda_execution_session(device=dev, timeout=float(infer_timeout)):
+                worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
+                labels = list(set(self.GLINER_LABEL_MAP.keys()))
+                res = worker.query({
+                    "action": "detect",
+                    "model_path": str(model_dir),
+                    "text": text,
+                    "labels": labels,
+                    "threshold": 0.40,
+                }, timeout=infer_timeout)
 
-            labels = list(set(self.GLINER_LABEL_MAP.keys()))
-            res = worker.query({
-                "action": "detect",
-                "model_path": str(model_dir),
-                "text": text,
-                "labels": labels,
-                "threshold": 0.40,
-            }, timeout=infer_timeout)
-
-            if not res.get("ok"):
-                err_msg = res.get("error") or "Worker returned ok=False"
-                warnings.append(f"GLiNER 推理未完成: {err_msg}")
-                return entities, warnings
+                if not res.get("ok"):
+                    err_msg = res.get("error") or "Worker returned ok=False"
+                    warnings.append(f"GLiNER 推理未完成: {err_msg}")
+                    return entities, warnings
 
             for pred in res.get("entities", []):
                 label_raw = str(pred.get("label", "")).lower().strip()
@@ -568,6 +576,7 @@ class MemPrivacyDetector(Detector):
         self.data_dir = data_dir
         self.active_model_id = active_model_id
         self._lock = threading.Lock()
+        self._inference_lock = threading.Lock()
 
     def set_active_model(self, model_id: str) -> None:
         with self._lock:
@@ -624,26 +633,54 @@ class MemPrivacyDetector(Detector):
             get_worker_client(self.data_dir).stop_worker_for_model(self.active_model_id)
 
     def detect(self, text: str) -> Tuple[List[Entity], List[str]]:
-        entities: List[Entity] = []
-        warnings: List[str] = []
-
         if not text:
-            return entities, warnings
+            return [], []
 
         model_dir = self._get_model_dir()
         installed, _ = check_model_integrity(self.active_model_id, model_dir)
         if not installed:
-            return entities, warnings
+            return [], []
 
         model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
         if not model_res.get("ready"):
-            return entities, warnings
+            return [], []
 
         profile = model_res.get("runtime_profile")
         dev = model_res.get("actual_device", "cpu")
         if not profile:
-            return entities, warnings
+            return [], []
 
+        is_cuda = (dev == "cuda")
+        started_at = time.monotonic()
+        total_budget = 240.0 if is_cuda else 480.0
+        deadline = started_at + total_budget
+
+        acquire_timeout = max(0.1, deadline - time.monotonic())
+        acquired_lock = self._inference_lock.acquire(blocking=True, timeout=acquire_timeout)
+        if not acquired_lock:
+            return [], ["MemPrivacy 语义推理繁忙，本次未在时间预算内执行。"]
+
+        try:
+            worker_client = get_worker_client(self.data_dir)
+            cuda_timeout = max(0.1, deadline - time.monotonic())
+            try:
+                with worker_client.cuda_execution_session(device=dev, timeout=cuda_timeout):
+                    return self._detect_session_locked(text, model_dir, profile, dev, deadline)
+            except TimeoutError:
+                return [], ["MemPrivacy 语义推理繁忙，本次未在时间预算内执行。"]
+        finally:
+            self._inference_lock.release()
+
+    def _detect_session_locked(
+        self,
+        text: str,
+        model_dir: Path,
+        profile: str,
+        dev: str,
+        deadline: float,
+    ) -> Tuple[List[Entity], List[str]]:
+        entities: List[Entity] = []
+        warnings: List[str] = []
         worker_client = get_worker_client(self.data_dir)
         is_cuda = (dev == "cuda")
 
@@ -655,33 +692,85 @@ class MemPrivacyDetector(Detector):
             _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=dev)
 
             chunks = chunk_memprivacy_text(text)
+            total_chunks = len(chunks)
+            completed_chunks = 0
             seen_keys = set()
+            truncated_chunk_count = 0
+            timed_out_budget = False
 
             for chunk_start, chunk_end, chunk_text in chunks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out_budget = True
+                    break
+
+                chunk_timeout = max(1.0, min(float(infer_timeout), remaining))
                 chunk_budget = choose_memprivacy_generation_budget(chunk_text)
+                req_payload = {
+                    "action": "detect",
+                    "model_path": str(model_dir),
+                    "text": chunk_text,
+                    "real_name": "unknown",
+                    "max_new_tokens": chunk_budget,
+                }
+
                 try:
-                    res = worker.query({
-                        "action": "detect",
-                        "model_path": str(model_dir),
-                        "text": chunk_text,
-                        "real_name": "unknown",
-                        "max_new_tokens": chunk_budget,
-                    }, timeout=infer_timeout)
+                    res = worker.query(req_payload, timeout=int(chunk_timeout))
+                except WorkerRetiredError:
+                    try:
+                        worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
+                        remaining_retry = deadline - time.monotonic()
+                        if remaining_retry <= 0:
+                            timed_out_budget = True
+                            break
+                        retry_timeout = max(1.0, min(float(infer_timeout), remaining_retry))
+                        res = worker.query(req_payload, timeout=int(retry_timeout))
+                    except Exception as retry_exc:
+                        if is_cuda_oom_exception(retry_exc, device=dev):
+                            warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
+                            try:
+                                worker_client.stop_worker_for_model(self.active_model_id)
+                            except Exception:
+                                pass
+                        elif is_cpu_oom_exception(retry_exc, device=dev):
+                            warnings.append("MemPrivacy 内存不足，已安全回退。")
+                            try:
+                                worker_client.stop_worker_for_model(self.active_model_id)
+                            except Exception:
+                                pass
+                        elif "timed out" in str(retry_exc).lower():
+                            warnings.append(f"MemPrivacy 语义推理单块超时，已保留已完成结果: {retry_exc}")
+                        else:
+                            warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {retry_exc}")
+                        break
                 except Exception as query_exc:
-                    err_str = str(query_exc)
-                    if "cuda out of memory" in err_str.lower() or "out of memory" in err_str.lower():
+                    if is_cuda_oom_exception(query_exc, device=dev):
                         warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
                         try:
                             worker_client.stop_worker_for_model(self.active_model_id)
                         except Exception:
                             pass
-                        break
+                    elif is_cpu_oom_exception(query_exc, device=dev):
+                        warnings.append("MemPrivacy 内存不足，已安全回退。")
+                        try:
+                            worker_client.stop_worker_for_model(self.active_model_id)
+                        except Exception:
+                            pass
+                    elif "timed out" in str(query_exc).lower():
+                        warnings.append(f"MemPrivacy 语义推理单块超时，已保留已完成结果: {query_exc}")
                     else:
                         warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {query_exc}")
-                        break
+                    break
 
-                if is_cuda_oom_response(res):
+                if is_cuda and is_cuda_oom_response(res):
                     warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
+                    try:
+                        worker_client.stop_worker_for_model(self.active_model_id)
+                    except Exception:
+                        pass
+                    break
+                elif not is_cuda and is_cpu_oom_response(res):
+                    warnings.append("MemPrivacy 内存不足，已安全回退。")
                     try:
                         worker_client.stop_worker_for_model(self.active_model_id)
                     except Exception:
@@ -690,11 +779,14 @@ class MemPrivacyDetector(Detector):
 
                 if not res.get("ok"):
                     err_msg = res.get("error") or "Worker returned ok=False"
-                    warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {err_msg}")
+                    if is_cuda and is_cuda_oom_response(res):
+                        warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
+                    else:
+                        warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {err_msg}")
                     break
 
                 if res.get("truncated"):
-                    warnings.append("MemPrivacy 达到最大生成长度上限，长文本可能存在截断。")
+                    truncated_chunk_count += 1
 
                 extracted_items = []
                 for item in res.get("entities", []):
@@ -737,6 +829,17 @@ class MemPrivacyDetector(Detector):
                             semantic_type=cent.semantic_type,
                         )
                     )
+                completed_chunks += 1
+
+            if timed_out_budget and completed_chunks == 0:
+                warnings.append("MemPrivacy 语义推理时间预算耗尽，未完成分块处理。")
+
+            if truncated_chunk_count > 0:
+                warnings.append(f"MemPrivacy 有 {truncated_chunk_count} 个分块达到生成上限，部分超长上下文可能存在截断。")
+
+            if 0 < completed_chunks < total_chunks:
+                warnings.append(f"MemPrivacy 仅完成 {completed_chunks}/{total_chunks} 个语义分块，结果可能不完整。")
+
         except Exception as exc:
             warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {exc}")
         finally:
