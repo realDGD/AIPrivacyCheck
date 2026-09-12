@@ -18,6 +18,7 @@ from .validators import (
     international_phone_valid,
     ipv4_valid,
     ipv6_valid,
+    jwt_header_valid,
     luhn_valid,
     mac_valid,
 )
@@ -50,16 +51,65 @@ EXACT_RULES = (
     RegexRule(
         "DATABASE_URI",
         _compile(
-            r"(?<![A-Za-z0-9])(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|mssql)://[^\s<>\"'，。；;]+",
+            r"(?<![A-Za-z0-9])(?<!jdbc:)(?<!JDBC:)(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|mssql)://[^\s<>\"'，。；;]+",
             re.IGNORECASE,
         ),
         0.998,
+        validated=True,
+    ),
+    # JDBC connection URLs (MySQL Connector/J, PostgreSQL JDBC, Oracle JDBC thin,
+    # Microsoft JDBC Driver for SQL Server, MariaDB Connector/J all document the
+    # `jdbc:<subscheme>:` prefix as the constant URL head). The inner scheme
+    # qualifier (e.g. `jdbc:mysql:loadbalance:`) is optional per official docs.
+    RegexRule(
+        "DATABASE_URI",
+        _compile(
+            r"(?<![A-Za-z0-9])jdbc:(?:mysql\+srv|mysql|mariadb|postgresql|oracle|sqlserver)(?::[A-Za-z0-9_-]+)?:[^\s<>\"'，。；;]+",
+            re.IGNORECASE,
+        ),
+        0.995,
         validated=True,
     ),
     RegexRule(
         "SECRET",
         _compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"),
         0.99,
+        validator=jwt_header_valid,
+        validated=True,
+    ),
+    # GitHub fine-grained personal access tokens: official docs structure
+    # `github_pat_` + 22 chars + `_` + 59 chars. Classic/ OAuth / app tokens
+    # (ghp_ / gho_ / ghu_ / ghs_ / ghr_) are covered by the gh[pousr]_ rule below.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_])github_pat_[0-9A-Za-z]{22}_[0-9A-Za-z]{59}(?![A-Za-z0-9_])"),
+        0.99,
+        validated=True,
+    ),
+    # Aliyun AccessKey ID: `LTAI` prefix is the official anchor (help.aliyun.com
+    # AccessKey examples); no checksum is published, so charset/length stay tight.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9])LTAI[0-9A-Za-z]{12,20}(?![A-Za-z0-9])"),
+        0.97,
+        validated=True,
+    ),
+    # Tencent Cloud SecretId: official prefix `AKID` (China site) / `IKID`
+    # (international site), 36 chars total per official masked examples.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9])(?:AKID|IKID)[0-9A-Za-z]{32}(?![A-Za-z0-9])"),
+        0.97,
+        validated=True,
+    ),
+    # Slack tokens officially documented by docs.slack.dev/authentication/tokens:
+    # bot `xoxb-`, user `xoxp-`, app-level `xapp-`, workflow `xwfp-`, sections
+    # separated by `-`. Legacy xoxa/xoxr/xoxs/xoxc prefixes are no longer in the
+    # official docs and are deliberately NOT matched as hard rules.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9])(?:xox[bp]|xapp|xwfp)-[0-9A-Za-z-]{20,}(?![A-Za-z0-9])"),
+        0.98,
         validated=True,
     ),
     RegexRule(
@@ -173,7 +223,7 @@ CONTEXT_RULES = (
         _compile(
             r"(?:"
             r"(?:(?<![“\"'\w])(?:(?:My|The|my|the)\s+)?(?:temporary\s+)?(?:password|passwd|secret|passcode)\s+(?:is|was)\s+(?!not\b|a\b|the\b|an\b|only\b))"
-            r"|(?:(?<![\u4e00-\u9fff])(?:登录密码|临时密码|用户密码|开机密码|支付密码|密码|口令)\s*(?:为|是)\s*)"
+            r"|(?:(?:登录密码|临时密码|用户密码|开机密码|支付密码|密码|口令)\s*(?:为|是)\s*)"
             r"|(?:(?<![A-Za-z0-9_])(?:Passwort|Kennwort)\s+(?:ist|lautet)\s+)"
             r"|(?:(?<![A-Za-z0-9_])(?:mot\s+de\s+passe)\s+(?:est)\s+)"
             r"|(?:(?<![A-Za-z0-9_])(?:contraseña)\s+(?:es)\s+)"
@@ -190,7 +240,7 @@ CONTEXT_RULES = (
     ),
     RegexRule(
         "CARD_SECURITY_CODE",
-        _compile(r"(?:CVV2?|CVC2?|card\s+security\s+code)\s*(?:[=:：]|为|是|is)?\s*(\d{3,4})(?!\d)", re.IGNORECASE),
+        _compile(r"(?:CVV2?|CVC2?|card\s+security\s+code|安全代码|安全码)\s*(?:[=:：]|为|是)?\s*(\d{3,4})(?!\d)", re.IGNORECASE),
         0.99,
         group=1,
         validated=True,
@@ -321,10 +371,10 @@ CONTEXT_RULES = (
         "USERNAME",
         _compile(
             r"(?<![A-Za-z0-9_])"
-            r"(?:username|user\s+name|公司账号|登录ID|ログインID|계정\s+이름|identifiant|"
+            r"(?:username|user|user\s+name|用户名|公司账号|登录ID|ログインID|계정\s+이름|identifiant|"
             r"Benutzername|Usuario|Логин|اسم\s+المستخدم|ชื่อผู้ใช้)"
             r"[ \t]*[=:：][ \t]*['\"]?"
-            r"([A-Za-z0-9][A-Za-z0-9_.-]{1,61}[A-Za-z0-9_]|[A-Za-z0-9]{2,63})",
+            r"([\u4e00-\u9fff]{2,12}|[A-Za-z0-9][A-Za-z0-9_.-]{1,61}[A-Za-z0-9_]|[A-Za-z0-9]{2,63})",
             re.IGNORECASE,
         ),
         0.91,
@@ -335,7 +385,7 @@ CONTEXT_RULES = (
         _compile(
             r"(?:"
             r"(?:(?<![A-Za-z0-9_])(?:(?:My|The|my|the)\s+)?(?:username|user\s+name)\s+(?:is|was)\s+(?!not\b|a\b|the\b|an\b|only\b))"
-            r"|(?:(?<![\u4e00-\u9fff])(?:用户名|公司账号|登录账号|登录ID)\s*(?:为|是)\s*)"
+            r"|(?:(?:用户名|公司账号|登录账号|登录ID)\s*(?:为|是)\s*)"
             r"|(?:(?<![A-Za-z0-9_])(?:Benutzername)\s+(?:ist|lautet)\s+)"
             r"|(?:(?<![A-Za-z0-9_])(?:Usuario)\s+(?:es)\s+)"
             r"|(?:(?<![A-Za-z0-9_])(?:identifiant)\s+(?:est)\s+)"
@@ -344,7 +394,7 @@ CONTEXT_RULES = (
             r"|(?:اسم\s+المستخدم\s+(?:هو)\s+)"
             r"|(?:ชื่อผู้ใช้\s*(?:คือ)\s*)"
             r")"
-            r"['\"]?([A-Za-z0-9][A-Za-z0-9_.-]{1,61}[A-Za-z0-9_]|[A-Za-z0-9]{2,63})",
+            r"['\"]?([\u4e00-\u9fff]{2,12}|[A-Za-z0-9][A-Za-z0-9_.-]{1,61}[A-Za-z0-9_]|[A-Za-z0-9]{2,63})",
             re.IGNORECASE,
         ),
         0.91,
@@ -354,7 +404,7 @@ CONTEXT_RULES = (
         "MEDICAL_RECORD_ID",
         _compile(
             r"(?:medical\s+record(?:\s+test)?\s+(?:ID|number)|MRN|病历号|住院号|门诊号)"
-            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*|[ \t]+)"
             r"([A-Z0-9][A-Z0-9_.-]{3,63})",
             re.IGNORECASE,
         ),
@@ -365,7 +415,7 @@ CONTEXT_RULES = (
         "INSURANCE_ID",
         _compile(
             r"(?:insurance\s+policy(?:\s+test)?\s+(?:ID|number)|医保号|社保卡号|保险号)"
-            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*|[ \t]+)"
             r"([A-Z0-9][A-Z0-9_.-]{3,63})",
             re.IGNORECASE,
         ),
@@ -376,7 +426,7 @@ CONTEXT_RULES = (
         "EMPLOYEE_ID",
         _compile(
             r"(?:employee\s+(?:number|ID)|员工编号|员工工号|工号)"
-            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*|[ \t]+)"
             r"([A-Z0-9][A-Z0-9_.-]{3,63})",
             re.IGNORECASE,
         ),
@@ -387,7 +437,7 @@ CONTEXT_RULES = (
         "STUDENT_ID",
         _compile(
             r"(?:student\s+(?:number|ID)|学号|学生证号)"
-            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*|[ \t]+)"
             r"([A-Z0-9][A-Z0-9_.-]{3,63})",
             re.IGNORECASE,
         ),
@@ -399,7 +449,7 @@ CONTEXT_RULES = (
         _compile(
             r"(?:employee\s+(?:number|ID)|student\s+ID|medical\s+record(?:\s+test)?\s+ID|"
             r"insurance\s+policy(?:\s+test)?\s+ID|Account\s+ID|员工编号)"
-            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*)"
+            r"(?:[ \t]*[：:=][ \t]*|[ \t]+(?:is)[ \t]+|[ \t]*(?:为|是)[ \t]*|[ \t]+)"
             r"([A-Z0-9][A-Z0-9_.-]{3,63})",
             re.IGNORECASE,
         ),
@@ -437,7 +487,7 @@ MULTILINGUAL_NAME_PATTERNS = (
     _compile(rf"Меня\s+зовут\s+({CYRILLIC_NAME_VALUE})", re.IGNORECASE),
     _compile(r"(?:私の名前は|(?:お客様の)?(?:姓名|氏名|お名前)\s*[：:]|Customer\s+Name\s*:)\s*([\u3040-\u30ff\u3400-\u9fff]{2,12})(?=[、，。\n\s]|です|$)", re.IGNORECASE),
     _compile(r"(?:제\s+이름은|负责人\s*)\s*([가-힣]{2,8})(?=입니다|\s+can|\s|[.\n]|$)", re.IGNORECASE),
-    _compile(r"اسمي\s+([\u0600-\u06ff]+(?:\s+[\u0600-\u06ff]+){1,4})(?=[.\n]|$)"),
+    _compile(r"اسمي\s+([\u0600-\u06ff]+(?:\s+[\u0600-\u06ff]+){0,4})(?=[.\n،,;؛]|$)"),
     _compile(r"ฉันชื่อ\s+([\u0e00-\u0e7f]+(?:\s+[\u0e00-\u0e7f]+){1,3})(?=\s+ที่อยู่|[.\n]|$)"),
     _compile(rf"Please\s+contact\s+({NAME_VALUE})(?=\s+at)", re.IGNORECASE),
 )

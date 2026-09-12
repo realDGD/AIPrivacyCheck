@@ -1,7 +1,9 @@
 """Checksum and format validators for common privacy identifiers."""
 
+import base64
 from datetime import datetime
 import ipaddress
+import json
 import re
 
 
@@ -83,6 +85,33 @@ def international_phone_valid(value: str) -> bool:
 
 def card_expiry_valid(value: str) -> bool:
     return re.fullmatch(r"\s*(0?[1-9]|1[0-2])\s*[/.-]\s*(\d{2}|\d{4})\s*", value) is not None
+
+
+def jwt_header_valid(value: str) -> bool:
+    """Structurally validates a three-segment JWT via its Base64URL header.
+
+    The header must decode to a JSON object carrying a non-empty string `alg`;
+    `typ` stays optional (string when present). No signature verification is
+    attempted - no secret or public key is available at detection time.
+    """
+    segments = value.strip().split(".")
+    if len(segments) != 3 or not all(segments):
+        return False
+    header_b64 = segments[0]
+    padded = header_b64 + "=" * (-len(header_b64) % 4)
+    try:
+        header = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except Exception:
+        return False
+    if not isinstance(header, dict):
+        return False
+    alg = header.get("alg")
+    if not isinstance(alg, str) or not alg:
+        return False
+    typ = header.get("typ")
+    if typ is not None and not isinstance(typ, str):
+        return False
+    return True
 
 
 def iban_valid(value: str) -> bool:
