@@ -91,6 +91,11 @@ class ModelLifecycleController:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 return False
+            try:
+                with model_installer.model_operation_lock(self.data_dir, model_name, non_blocking=True):
+                    pass
+            except RuntimeError:
+                return False
             status_dir = self.data_dir / "status"
             status_dir.mkdir(parents=True, exist_ok=True)
             log_handle = self.log_file.open("ab", buffering=0)
@@ -146,7 +151,7 @@ INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.5.1"
+    server_version = "AIPrivacyCheck/0.5.2"
 
     def log_message(self, fmt: str, *args) -> None:
         safe_path = urlsplit(self.path).path
@@ -227,7 +232,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.5.1",
+                    "version": "0.5.2",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },
@@ -302,6 +307,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 ok, message = INSTALLER.import_model(model_name, source_path)
                 status = HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST
                 self._json(status, {"ok": ok, "message": message, "status": INSTALLER.status()})
+            except RuntimeError as exc:
+                self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
             except ValueError as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
@@ -321,6 +328,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 ok, message = INSTALLER.import_model(model_name, source_path)
                 status = HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST
                 self._json(status, {"ok": ok, "message": message, "status": INSTALLER.status()})
+            except RuntimeError as exc:
+                self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
             except ValueError as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
@@ -336,6 +345,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 model_name = str(payload.get("model", "gliner-pii-edge"))
                 ok, message = INSTALLER.uninstall_model(model_name)
                 self._json(HTTPStatus.OK, {"ok": ok, "message": message, "status": INSTALLER.status()})
+            except RuntimeError as exc:
+                self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"卸载失败: {exc}"})
             return

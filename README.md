@@ -2,7 +2,7 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.5.1`（fnOS Native 原生应用）
+当前版本：`0.5.2`（fnOS Native 原生应用）
 
 ## 已实现功能
 
@@ -10,7 +10,7 @@
   1. **确定性多语言与中文规则（Tier 1，`BuiltInRuleDetector`）**：身份证号、手机号、国际电话（E.164）、固定电话、银行卡、护照、统一社会信用代码、车牌、姓名、地址、邮箱、账号/单号、出生日期、社交账号、IPv4、完整 IPv6、MAC、BIC/SWIFT、IBAN、US SSN、数据库连接串（`DATABASE_URI`）、私钥与各类 API Token/凭证。内置严格静态敏感度等级（PL4/PL3/PL2），不可被模型随意降级。
   2. **中文信息抽取引擎（Tier 2，`ChineseIEDetector`）**：针对中文姓名、复杂行政区划拓扑与建筑地址进行基于语言学特征和安全跨度对齐的抽取（`safe_sequential_span_alignment`，彻底杜绝同名多次出现时的偏移碰撞）；内置零依赖启发式抽取，支持可选适配 ModelScope 社区模型 `siamese-uie`（PyTorch 架构）。
   3. **通用 PII 实体抽取（Tier 3，`GLiNERDetector`）**：支持 ModelScope 社区模型 `gliner-pii-edge`（轻量 edge 版，~310MB）与 `gliner-pii-base`（高精度版，~850MB），利用模型原生字符偏移实现零偏移漂移的跨语言 PII 抽取。
-  4. **深度语义隐私推理（Tier 4，`MemPrivacyDetector`）**：支持 ModelScope 社区模型 `memprivacy-1.7b-rl`（约 3.4GB）与 `memprivacy-4b-rl`（约 7.8GB），结合上下文对深层隐性隐私（健康状况、人际隐私、资产交易）进行逻辑判定，使用官方真实系统 Prompt 与容错结构化抽取。
+  4. **深度语义隐私推理（Tier 4，`MemPrivacyDetector`）**：支持 ModelScope 社区模型 `memprivacy-1.7b-rl`（约 3.4GB）与 `memprivacy-4b-rl`（约 7.8GB），结合上下文对深层隐性隐私（健康状况、人际隐私、资产交易）进行逻辑判定，使用全自主编写的 Apache-2.0 规范系统 Prompt 与容错结构化抽取。
 - **PL1 - PL4 隐私分级策略与仲裁**：
   - **PL4（核心密码凭据）**：数据库连接串、私钥、API 令牌、系统密码。
   - **PL3（高敏合规凭证）**：身份证、护照、银行卡、医疗病历、财务资产、精确轨迹。
@@ -19,8 +19,8 @@
   - **层级仲裁机制**：校验位强规则 > 严格规则 > 专用实体抽取模型 > 生成式推理模型，高置信法定凭据永不被模型覆盖。
 - **控制面与执行面彻底隔离架构（Zero ML Control Plane）**：
   - **主控进程零 ML 依赖**：fnOS Native 主进程（Python 3.12）严格不 import 任何重量级 ML 库（`torch`, `transformers`, `gliner`, `modelscope`, `paddle`），保证控制面极速响应与低内存占用。
-  - **JSONL IPC 隔离 Worker 与高可靠生命周期**：所有神经网络模型均由独立 Python Worker 子进程通过标准输入输出行式 JSONL 通信（`privacy/workers/`）。v0.5.1 引入基于队列的真实超时中断、后台守护式 stderr 消耗（彻底杜绝 OS 管道死锁）、细粒度锁层次与状态机就绪握手，并支持故障单次自动崩溃重启。
-  - **HardwareProbe 与 RuntimeManager**：直接通过 `nvidia-smi` 独立子进程探测主机 GPU，运行时环境统一至 PyTorch 体系（`torch-cpu` / `torch-cuda`），支持 Auto 模式平滑降级与显式 CUDA 失败报错。
+  - **JSONL IPC 隔离 Worker 与高可靠生命周期**：所有神经网络模型均由独立 Python Worker 子进程通过标准输入输出行式 JSONL 通信（`privacy/workers/`）。v0.5.2 引入换代竞争隔离机制（彻底杜绝孤儿 EOF 误杀新建 Worker 进程）、基于队列的真实超时中断、后台守护式 stderr 消耗（彻底杜绝 OS 管道死锁）、跨进程单模型互斥锁（`fcntl.flock`）与状态机就绪握手，并支持故障单次自动崩溃重启。
+  - **HardwareProbe 与 RuntimeManager**：直接通过 `nvidia-smi` 独立子进程探测主机 GPU，运行时环境统一至 PyTorch 体系（`torch-cpu` / `torch-cuda`），支持 Auto 模式平滑降级与显式 CUDA 缺失规范语义（`actual_device="none"`、`ready=False`，无静默回退伪警告）。
   - **配置持久化与设备切换清理**：通过 `settings.json` 原子事务持久化计算设备偏好，设备切换或模型切换时主动终止旧 Worker 释放内存/显存。
 - **模型共享目录与生命周期管理（ModelScope 社区源）**：
   - **fnOS 共享模型源**：支持通过 fnOS `data-share` 共享目录（`AI 脱敏器/models`）放置离线模型，应用自动扫描并一键导入。
@@ -85,7 +85,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.5.1_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.5.2_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 

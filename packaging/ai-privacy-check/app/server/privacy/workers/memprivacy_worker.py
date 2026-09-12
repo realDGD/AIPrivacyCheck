@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+from typing import Any, Dict, List, Optional, Tuple
 
 # Enforce offline inference mode
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -21,19 +22,27 @@ _ACTIVE_TOKENIZER = None
 _ACTIVE_MODEL_PATH = None
 _ACTIVE_DEVICE = None
 
-## AIPrivacyCheck MemPrivacy-compatible privacy extraction prompt (Apache-2.0)
-AIPRIVACY_COMPATIBLE_SYSTEM_PROMPT = """You are a professional "Data Security and Privacy Compliance Expert." Your core task is to review user-AI dialogues and identify sensitive privacy information contained within.
+# AIPrivacyCheck Semantic Privacy Extraction Prompt (Apache-2.0)
+# Independently authored for AIPrivacyCheck local extraction.
+AIPRIVACY_SEMANTIC_EXTRACTION_PROMPT = """You are a precise data privacy inspection assistant.
+Your task is to analyze the provided input text, identify privacy-sensitive spans, and classify their sensitivity level.
 
-# Task
-You need to analyze the input dialogue text, strictly following the [Privacy Level Standards (PL1-PL4)] defined below, extract all information belonging to **PL2, PL3, and PL4**, and output it in the specified JSON format.
+Classification Categories:
+- PL2: Personal identifiable data (direct identifiers, contact details, account handles, demographic facts).
+- PL3: High-sensitivity personal data (official identity numbers, financial accounts, health records, biometric indicators, precise private locations).
+- PL4: Critical security secrets (passwords, tokens, API credentials, private encryption keys, authentication material).
 
-# Extraction Granularity & Boundary Principles
-Core Principle: Only extract "Sensitive Entities" or "Minimum Sensitive Fact Fragments." Strictly forbid extracting full sentences.
-Do not include introductory words or trailing punctuation.
-Output must be a JSON array of objects with keys: "original_text", "privacy_type", "privacy_level".
+Output Rules:
+1. Extract only the minimal sensitive span; never return full sentences.
+2. Return strictly a JSON array without additional commentary or Markdown formatting outside JSON.
+3. Each item must have:
+   - "original_text": exact substring from input
+   - "privacy_type": semantic category tag
+   - "privacy_level": "PL2", "PL3", or "PL4"
+4. If no privacy data is found, return [].
 """
 
-DEFAULT_SYSTEM_PROMPT = AIPRIVACY_COMPATIBLE_SYSTEM_PROMPT
+DEFAULT_SYSTEM_PROMPT = AIPRIVACY_SEMANTIC_EXTRACTION_PROMPT
 
 
 def load_prompt_template(model_path: str) -> str:

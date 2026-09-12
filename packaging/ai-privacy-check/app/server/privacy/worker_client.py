@@ -59,6 +59,7 @@ class RuntimeWorkerProcess:
         self._alive: bool = False
         self._last_error: Optional[str] = None
 
+        self._generation: int = 0
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stderr_buffer: Deque[str] = collections.deque(maxlen=100)
         self._stop_event = threading.Event()
@@ -71,33 +72,45 @@ class RuntimeWorkerProcess:
     def _is_ready_locked(self) -> bool:
         return self.state in (STATE_READY, STATE_BUSY) and self._is_alive_locked()
 
-    def _stdout_reader(self, proc: subprocess.Popen) -> None:
-        while not self._stop_event.is_set():
+    def _stdout_reader(
+        self,
+        proc: subprocess.Popen,
+        stdout_queue: queue.Queue[str],
+        stop_event: threading.Event,
+        generation: int,
+    ) -> None:
+        while not stop_event.is_set():
             try:
                 if not proc.stdout:
                     break
                 line = proc.stdout.readline()
                 if not line:
                     # EOF: process terminated or closed stdout
-                    self._stdout_queue.put("")
+                    stdout_queue.put("")
                     break
-                self._stdout_queue.put(line)
+                stdout_queue.put(line)
             except Exception:
-                self._stdout_queue.put("")
+                stdout_queue.put("")
                 break
 
-    def _stderr_drainer(self, proc: subprocess.Popen) -> None:
-        while not self._stop_event.is_set():
+    def _stderr_drainer(
+        self,
+        proc: subprocess.Popen,
+        stop_event: threading.Event,
+        generation: int,
+    ) -> None:
+        while not stop_event.is_set():
             try:
                 if not proc.stderr:
                     break
                 line = proc.stderr.readline()
                 if not line:
                     break
-                # Truncate each line to 500 chars to avoid memory bloat, strip sensitive data
                 clean_line = line.strip()[:500]
                 if clean_line:
-                    self._stderr_buffer.append(clean_line)
+                    with self._lock:
+                        if generation == self._generation:
+                            self._stderr_buffer.append(clean_line)
             except Exception:
                 break
 
@@ -146,14 +159,14 @@ class RuntimeWorkerProcess:
             self._last_error = f"Worker script not found: {self.worker_script}"
             raise FileNotFoundError(self._last_error)
 
+        self._generation += 1
+        generation = self._generation
+
         self.state = STATE_STARTING
-        self._stop_event.clear()
-        # Empty queues/buffers
-        while not self._stdout_queue.empty():
-            try:
-                self._stdout_queue.get_nowait()
-            except queue.Empty:
-                break
+        stdout_queue: queue.Queue[str] = queue.Queue()
+        self._stdout_queue = stdout_queue
+        stop_event = threading.Event()
+        self._stop_event = stop_event
         self._stderr_buffer.clear()
 
         env = os.environ.copy()
@@ -187,19 +200,19 @@ class RuntimeWorkerProcess:
             logger.error(f"启动模型 worker [{self.model_id}] 失败: {exc}")
             raise
 
-        # Spawn background reader and drainer threads
+        # Spawn background reader and drainer threads with generation isolation
         self._stdout_thread = threading.Thread(
             target=self._stdout_reader,
-            args=(self._process,),
-            name=f"WorkerStdout-{self.model_id}-{self._pid}",
+            args=(self._process, stdout_queue, stop_event, generation),
+            name=f"WorkerStdout-{self.model_id}-gen{generation}-{self._pid}",
             daemon=True,
         )
         self._stdout_thread.start()
 
         self._stderr_thread = threading.Thread(
             target=self._stderr_drainer,
-            args=(self._process,),
-            name=f"WorkerStderr-{self.model_id}-{self._pid}",
+            args=(self._process, stop_event, generation),
+            name=f"WorkerStderr-{self.model_id}-gen{generation}-{self._pid}",
             daemon=True,
         )
         self._stderr_thread.start()
@@ -221,7 +234,8 @@ class RuntimeWorkerProcess:
             self._start_locked()
 
     def _terminate_locked(self) -> None:
-        self._stop_event.set()
+        if self._stop_event:
+            self._stop_event.set()
         proc = self._process
         self._process = None
         self._pid = None
@@ -252,6 +266,23 @@ class RuntimeWorkerProcess:
             try:
                 if proc.stderr:
                     proc.stderr.close()
+            except Exception:
+                pass
+
+        # Join reader threads with bounded timeout to avoid leaking threads across generations
+        t_out = self._stdout_thread
+        self._stdout_thread = None
+        if t_out and t_out.is_alive():
+            try:
+                t_out.join(timeout=1.5)
+            except Exception:
+                pass
+
+        t_err = self._stderr_thread
+        self._stderr_thread = None
+        if t_err and t_err.is_alive():
+            try:
+                t_err.join(timeout=1.5)
             except Exception:
                 pass
 

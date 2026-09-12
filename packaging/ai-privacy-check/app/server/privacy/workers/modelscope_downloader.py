@@ -15,61 +15,25 @@ import sys
 import traceback
 
 
-MEMPRIVACY_COMPATIBLE_PROMPT = """You are a professional "Data Security and Privacy Compliance Expert." Your core task is to review user-AI dialogues and identify sensitive privacy information contained within.
+# AIPrivacyCheck Semantic Privacy Extraction Prompt (Apache-2.0)
+# Independently authored for AIPrivacyCheck local extraction.
+AIPRIVACY_SEMANTIC_EXTRACTION_PROMPT = """You are a precise data privacy inspection assistant.
+Your task is to analyze the provided input text, identify privacy-sensitive spans, and classify their sensitivity level.
 
-# Task
-You need to analyze the input dialogue text, strictly following the [Privacy Level Standards (PL1-PL4)] defined below, extract all information belonging to **PL2, PL3, and PL4**, and output it in the specified JSON format.
+Classification Categories:
+- PL2: Personal identifiable data (direct identifiers, contact details, account handles, demographic facts).
+- PL3: High-sensitivity personal data (official identity numbers, financial accounts, health records, biometric indicators, precise private locations).
+- PL4: Critical security secrets (passwords, tokens, API credentials, private encryption keys, authentication material).
 
-# Privacy Level Standards (PL1-PL4)
-
-### 【PL4: Critical Secrets & System Security】 (Critical Risk)
-  - Definition: Core secrets that, once compromised, directly lead to system takeover, core data exfiltration, or immediate, irrecoverable asset loss.
-  - Core Standard: Irrecoverable / High asset loss / System takeover.
-  - Classification Rules:
-    1. Credentials/Authenticators: Cleartext Passwords, PINs, Passcodes, Gestures, 2FA/MFA/OTP SMS Verification Codes, Payment Passwords/CVV2/CVC2 Security Codes, etc.
-    2. Keys/Signatures: API Keys, AccessKeys, Secret Keys, Private Keys, Mnemonics, Seed Phrases, Database Connection Strings (containing credentials), Certificate Private Keys, Signing Keys, Encryption Keys, etc.
-    3. System/Attack: Database strings, Admin portal URLs, Reproducible vulnerability details, Intranet entry points/Internal network segments, Bastion host info, CI keys, Cloud keys, Production configurations, etc.
-    4. Undisclosed Business Info: Undisclosed financials, M&A materials, Core roadmaps, Internal pricing, Client lists, Contract originals, Core implementations, Exploit details, Vulnerability PoCs, etc.
-  - Standard Type Tags: Password, Verification Code, Token, Key, Private Key, Payment Security Code, Database Connection String, Vulnerability Details, Business Secret.
-
-### 【PL3: Highly Sensitive PII】 (High Risk)
-  - Definition: Information that, if leaked or illegally used, is expected to cause significant harm to personal safety/property, physical/mental health, reputation, or fair opportunity; or data belonging to generally sensitive categories.
-  - Core Standard: **High damage consequences**. Even if it may not uniquely identify an identity on its own, it should be classified as PL3.
-  - Classification Rules:
-    1. Documents: ID Card Number, Passport Number, Social Security/Insurance Number, Document Photos/Scans, Driver's License Number, License Plate Number, etc.
-    2. Financial: Bank/Payment Card Number, Basic Card Info (Opening Bank/Card Org/Type/Validity or Expiry Date, etc.), Account Info, Transaction Records/Bill Details, Salary/Income (Annual/Monthly income), Credit Reports (Credit Score/Points), Debt/Loan Info, Assets/Net Worth.
-    3. Health: Medical Records/History/Hospital Visits/Surgery & Clinical Procedures, Diagnosis Results, Prescriptions, Specific Physiological Metrics, Specific Body Metrics, Reproductive Health, Mental Illness/Therapy or Counseling Records.
-    4. Trajectory: Precise Location (Latitude/Longitude/Real-time positioning), Accommodation Records (Hotel Room Number, Check-in Time, etc.), Detailed Trajectory (Travel Itinerary, Train/Plane Ticket Info), Commute Routes, etc.
-    5. Biometrics: Face, Fingerprint, Voiceprint, Iris features, etc.
-    6. Communication Content: Raw Chat Logs, SMS/Email Content, Call Detail Records, etc.
-    7. Sensitive Attributes: Ethnicity/Race/Tribe, Religious Beliefs, Political Views/Stance.
-    8. Others: Minor Information (Under 14, Guardian info), Litigation/Arbitration/Penalty Records/Police Reports, etc.
-  - Standard Type Tags: ID Number, Financial Account, Transaction Record, Assets/Income, Medical Health, Precise Location, Itinerary/Trajectory, Biometrics, Communication Content, Sensitive Identity, Judicial Record.
-
-### 【PL2: Identifiable PII】 (Basic Identification)
-  - Definition: Information that, alone or combined with reasonably available information, can identify, locate, or stably trace a specific natural person.
-  - Core Standard: Identifiable / Linkable / Traceable.
-  - Classification Rules:
-    1. Direct Identifier: Real Name (Full Name), Specific Age, Specific Date of Birth, Gender, Mobile Number, Landline, Email Address, Detailed Address, Zip Code, Work Address.
-    2. Network Identifier: Account Username/Account ID/Platform UID/Device Account Name, Personal Homepage Link, Device Identifier, IP Address, Device ID, UserAgent, Reusable Cookies/Session Identifiers.
-    3. Strong Combination: Combinations that can lock onto a person like "Company + Job Title + Name", "School + Class + Name". Employer/Company Name, Job Title/Rank, School, and Class information appearing alone also need to be classified due to the potential for collection and combination.
-    4. Third-Party Identifiable Info: Personal information of Emergency Contacts/Relatives/Friends (Name, Phone, Email, Address, Relationship to the subject, etc.).
-  - Standard Type Tags: Real Name, Phone Number, Email, Detailed Address, Account ID/Username, Network Identifier, Identity Background, Relationship Info.
-
-### 【PL1: Public/Low Sensitivity】 (Negative Examples - DO NOT EXTRACT)
-  - Definition: Unable to identify a specific individual; merely style, preferences, or habits.
-  - Core Standard: Unidentifiable + Low Harm + Not High Sensitivity.
-  - Classification Rules: Expression and interaction preferences, personality and emotional self-descriptions (non-diagnostic level), life rhythm and habit preferences, interest and content preferences, aesthetic and style preferences, motivation and goal preferences.
-
-# Extraction Granularity & Boundary Principles
-Core Principle: Only extract "Sensitive Entities" or "Minimum Sensitive Fact Fragments." Strictly forbid extracting full sentences.
-1. Remove Unnecessary Context: Do not include introductory words or punctuation marks.
-2. Maintain Semantic Integrity (For Descriptive Privacy): Extract minimum phrase containing core elements.
-3. Values Must Combine with Unit/Object: Standalone numbers are not extracted unless matching PL2-PL4.
-4. Real Name Must Be the User's Own Full Name: Use provided User's Real Name field as reference.
+Output Rules:
+1. Extract only the minimal sensitive span; never return full sentences.
+2. Return strictly a JSON array without additional commentary or Markdown formatting outside JSON.
+3. Each item must have:
+   - "original_text": exact substring from input
+   - "privacy_type": semantic category tag
+   - "privacy_level": "PL2", "PL3", or "PL4"
+4. If no privacy data is found, return [].
 """
-
-MEMPRIVACY_OFFICIAL_PROMPT = MEMPRIVACY_COMPATIBLE_PROMPT
 
 
 def download_model(repo_id: str, revision: str, target_dir: str, model_id: str) -> dict:
@@ -84,18 +48,19 @@ def download_model(repo_id: str, revision: str, target_dir: str, model_id: str) 
         local_dir=target_dir,
     )
 
-    # For MemPrivacy models, ensure prompt asset is saved as compatible prompt resource with metadata
+    # For MemPrivacy models, ensure prompt asset is saved as AIPrivacyCheck extraction prompt
     if "memprivacy" in model_id.lower():
         prompt_path = os.path.join(target_dir, "privacy_prompt.txt")
         meta_path = os.path.join(target_dir, "privacy_prompt.meta.json")
         if not os.path.isfile(prompt_path):
             with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(MEMPRIVACY_COMPATIBLE_PROMPT)
+                f.write(AIPRIVACY_SEMANTIC_EXTRACTION_PROMPT)
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({
-                    "name": "AIPrivacyCheck MemPrivacy-compatible privacy extraction prompt",
+                    "name": "AIPrivacyCheck semantic privacy extraction prompt",
                     "license": "Apache-2.0",
-                    "license_note": "AIPrivacyCheck MemPrivacy-compatible privacy extraction prompt",
+                    "source": "AIPrivacyCheck",
+                    "note": "Independently authored local extraction prompt for AIPrivacyCheck",
                     "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 }, f, indent=2)
 

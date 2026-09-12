@@ -111,7 +111,7 @@ class KeyRegressionTests(unittest.TestCase):
         manager = DeviceManager()
         manager.set_requested_device("cuda")
         actual, warnings = manager.resolve()
-        self.assertIn(actual, ("cpu", "cuda"))
+        self.assertIn(actual, ("none", "cuda"))
         diag = manager.probe_diagnostics()
         self.assertEqual(diag["requested_device"], "cuda")
         self.assertIn("actual_device", diag)

@@ -623,6 +623,177 @@ while True:
             self.assertIn("NVIDIA driver failure", status["detail"])
 
 
+class StabilizationHardeningTests(unittest.TestCase):
+    """Rigorous tests for v0.5.2 stabilization hardening fixes (P0-1, P1-1, P1-2, P1-3, P1-4)."""
+
+    def test_all_worker_modules_import(self):
+        """P0-1: Worker modules must import cleanly without NameError or missing type hints."""
+        import importlib
+        modules = [
+            "privacy.workers.gliner_worker",
+            "privacy.workers.siamese_uie_worker",
+            "privacy.workers.memprivacy_worker",
+            "privacy.workers.modelscope_downloader",
+        ]
+        for mod_name in modules:
+            mod = importlib.import_module(mod_name)
+            self.assertIsNotNone(mod)
+        from privacy.workers import memprivacy_worker
+        self.assertTrue(callable(memprivacy_worker.strip_think_tags))
+        self.assertTrue(callable(memprivacy_worker.parse_extracted_json))
+        self.assertTrue(callable(memprivacy_worker.handle_request))
+
+    def test_old_generation_eof_cannot_poison_new_worker(self):
+        """P1-1: Stale EOF from terminating worker of previous generation must not poison new worker queue."""
+        import queue
+        import threading
+        from privacy.worker_client import RuntimeWorkerProcess
+        with tempfile.TemporaryDirectory() as td:
+            worker = RuntimeWorkerProcess(
+                python_bin=Path("/bin/dummy"),
+                worker_script=Path("/bin/dummy"),
+                model_id="test-model",
+                profile="torch-cpu",
+            )
+            self.assertEqual(worker._generation, 0)
+
+            q1 = queue.Queue()
+            stop1 = threading.Event()
+            worker._generation = 1
+            worker._stdout_queue = q1
+
+            q2 = queue.Queue()
+            stop2 = threading.Event()
+            worker._generation = 2
+            worker._stdout_queue = q2
+
+            # Simulate EOF from terminating generation 1 process
+            mock_proc = MagicMock()
+            mock_proc.stdout.readline.return_value = ""
+            mock_proc.poll.return_value = 0
+
+            worker._stdout_reader(mock_proc, q1, stop1, 1)
+
+            # Gen 1 queue received the EOF empty string sentinel
+            self.assertEqual(q1.get(timeout=1), "")
+
+            # Gen 2 queue was completely untouched
+            self.assertTrue(q2.empty())
+
+            # Stderr drainer from gen 1 must discard output for gen 2
+            mock_proc.stderr.readline.side_effect = ["stale error line\n", ""]
+            worker._stderr_buffer.clear()
+            worker._stderr_drainer(mock_proc, stop1, 1)
+            self.assertEqual(len(worker._stderr_buffer), 0)
+
+    def test_explicit_cuda_unavailable_reports_none_not_cpu(self):
+        """P1-2: Explicit CUDA with no available CUDA runtime must report actual_device='none' and ready=False."""
+        from privacy.device import DeviceManager
+        with tempfile.TemporaryDirectory() as td:
+            dm = DeviceManager(Path(td))
+            dm.set_requested_device("cuda")
+
+            with patch.object(dm._hw_probe, "probe_nvidia", return_value={"nvidia_available": False}):
+                diag = dm.probe_diagnostics(force_refresh=True)
+                self.assertEqual(diag["requested_device"], "cuda")
+                self.assertEqual(diag["actual_device"], "none")
+                self.assertFalse(diag["cuda_available"])
+
+                # Warnings should not claim fallback or downgrade to CPU
+                for w in diag["warnings"]:
+                    self.assertNotIn("回退", w)
+                    self.assertNotIn("降级", w)
+                    self.assertNotIn("fallback", w.lower())
+
+                torch_dev = diag["model_devices"]["torch"]
+                self.assertEqual(torch_dev["device"], "none")
+                self.assertFalse(torch_dev["ready"])
+                self.assertIsNone(torch_dev["profile"])
+
+                # resolve_for_framework must return "none"
+                res_dev, res_prof, _ = dm.resolve_for_framework("torch")
+                self.assertEqual(res_dev, "none")
+                self.assertIsNone(res_prof)
+
+    def test_same_model_operation_lock_blocks_second_process(self):
+        """P1-3: Concurrent operation on the same model must be mutually exclusive."""
+        import threading
+        import model_installer
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            model_id = "test-model-lock"
+
+            with model_installer.model_operation_lock(data_dir, model_id):
+                second_result = []
+                def try_lock():
+                    try:
+                        with model_installer.model_operation_lock(data_dir, model_id, non_blocking=True):
+                            second_result.append("acquired")
+                    except RuntimeError as e:
+                        second_result.append(e)
+
+                t = threading.Thread(target=try_lock)
+                t.start()
+                t.join()
+
+                self.assertEqual(len(second_result), 1)
+                self.assertIsInstance(second_result[0], RuntimeError)
+                self.assertIn("正在执行安装、导入或卸载操作", str(second_result[0]))
+
+    def test_different_model_operations_do_not_block_each_other(self):
+        """P1-3: Operations on distinct models can proceed concurrently."""
+        import model_installer
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            acquired_both = []
+
+            with model_installer.model_operation_lock(data_dir, "model-a"):
+                with model_installer.model_operation_lock(data_dir, "model-b"):
+                    acquired_both.append(True)
+
+            self.assertTrue(acquired_both[0])
+
+    def test_lock_released_after_exception(self):
+        """P1-3: Lock must be cleanly released when an exception occurs."""
+        import model_installer
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            model_id = "failing-model"
+
+            try:
+                with model_installer.model_operation_lock(data_dir, model_id):
+                    raise ValueError("Simulated failure")
+            except ValueError:
+                pass
+
+            # Should be able to acquire immediately afterwards
+            acquired = False
+            with model_installer.model_operation_lock(data_dir, model_id):
+                acquired = True
+            self.assertTrue(acquired)
+
+    def test_prompt_license_regression(self):
+        """P1-4: Verify absence of unlicensed prompts and presence of Apache-2.0 semantic prompt and THIRD_PARTY_LICENSES.md."""
+        from privacy.workers import memprivacy_worker, modelscope_downloader
+
+        # Verify no MEMPRIVACY_OFFICIAL_PROMPT remains
+        self.assertFalse(hasattr(memprivacy_worker, "MEMPRIVACY_OFFICIAL_PROMPT"))
+        self.assertFalse(hasattr(modelscope_downloader, "MEMPRIVACY_OFFICIAL_PROMPT"))
+
+        # Verify AIPRIVACY_SEMANTIC_EXTRACTION_PROMPT is present
+        self.assertTrue(hasattr(memprivacy_worker, "AIPRIVACY_SEMANTIC_EXTRACTION_PROMPT"))
+        self.assertTrue(hasattr(modelscope_downloader, "AIPRIVACY_SEMANTIC_EXTRACTION_PROMPT"))
+
+        # Verify THIRD_PARTY_LICENSES.md exists and documents licenses
+        root_dir = Path(__file__).resolve().parent.parent
+        license_file = root_dir / "THIRD_PARTY_LICENSES.md"
+        self.assertTrue(license_file.is_file(), "THIRD_PARTY_LICENSES.md must exist in repo root")
+        content = license_file.read_text(encoding="utf-8")
+        self.assertIn("CC BY-NC-ND 4.0", content)
+        self.assertIn("Apache-2.0", content)
+        self.assertIn("AIPrivacyCheck", content)
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 

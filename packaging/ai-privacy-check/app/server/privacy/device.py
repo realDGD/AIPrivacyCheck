@@ -92,32 +92,39 @@ class DeviceManager:
         )
 
         if requested == "cuda" and not any_cuda_ready:
-            if has_nvidia:
-                warnings.append("用户显式配置使用 NVIDIA CUDA，但 PyTorch CUDA 隔离环境未安装或驱动未就绪，已安全回退到 CPU。")
-            else:
-                warnings.append("用户显式配置使用 NVIDIA CUDA，但主机未检测到可用 NVIDIA GPU 或驱动，已安全回退到 CPU。")
+            warnings.append("已显式选择 NVIDIA CUDA，但当前 CUDA 运行环境不可用。相关模型将保持未就绪状态，请安装/修复 CUDA Runtime，或切换至 Auto/CPU。")
 
         # Top-level actual device compatibility field
         if requested == "cuda":
-            actual_device = "cuda" if any_cuda_ready else "cpu"
+            actual_device = "cuda" if any_cuda_ready else "none"
         elif requested == "auto":
             actual_device = "cuda" if (has_nvidia and any_cuda_ready) else "cpu"
         else:
             actual_device = "cpu"
 
         # Model / framework specific device decisions
-        chosen_profile = self._rt_manager.best_runtime_for_framework(
-            "torch",
-            prefer_cuda=(requested in ("auto", "cuda")),
-            hardware_nvidia_available=has_nvidia,
-        )
-        model_devices: Dict[str, Dict[str, Any]] = {
-            "torch": {
-                "profile": chosen_profile,
-                "device": "cuda" if (chosen_profile and chosen_profile.endswith("-cuda")) else "cpu",
-                "ready": chosen_profile is not None,
+        if requested == "cuda":
+            chosen_profile = PROFILE_TORCH_CUDA if any_cuda_ready else None
+            model_devices: Dict[str, Dict[str, Any]] = {
+                "torch": {
+                    "profile": chosen_profile,
+                    "device": "cuda" if chosen_profile else "none",
+                    "ready": chosen_profile is not None,
+                }
             }
-        }
+        else:
+            chosen_profile = self._rt_manager.best_runtime_for_framework(
+                "torch",
+                prefer_cuda=(requested == "auto"),
+                hardware_nvidia_available=has_nvidia,
+            )
+            model_devices = {
+                "torch": {
+                    "profile": chosen_profile,
+                    "device": "cuda" if (chosen_profile and chosen_profile.endswith("-cuda")) else "cpu",
+                    "ready": chosen_profile is not None,
+                }
+            }
 
         diag = {
             "requested_device": requested,
@@ -166,11 +173,13 @@ class DeviceManager:
         if requested == "cuda":
             if profile == PROFILE_TORCH_CUDA:
                 return "cuda", profile, warnings
-            warnings.append("CUDA 运行时未就绪，自动降级至 CPU 运行。")
-            return "cpu", profile, warnings
+            warnings.append("已显式选择 NVIDIA CUDA，但当前 CUDA 运行环境不可用。相关模型保持未就绪。")
+            return "none", None, warnings
         elif requested == "auto":
             if has_nvidia and profile == PROFILE_TORCH_CUDA:
                 return "cuda", profile, warnings
+            return "cpu", profile, warnings
+        else:
             return "cpu", profile, warnings
     def resolve(self, requested: Optional[str] = None) -> Tuple[str, List[str]]:
         """Generic resolve method for backward compatibility."""
