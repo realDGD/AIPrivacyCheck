@@ -159,7 +159,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         runtime="torch",
         supports_cpu=True,
         supports_cuda=True,
-        recommended=True,
+        recommended=False,
         description="可选的深度语义隐私模型（深度扫描模式，用户主动开启）。Benchmark v2 证实其为唯一具备语义级召回的候选（语义切片跨度覆盖召回 90%，小参数 Qwen 挑战者要么高误报要么漏检），但 3.4GB 权重 + CPU 约 9GB RAM / 数百秒延迟 + 受限显存设备 CUDA OOM 压力 + CC BY-NC-ND 非商业许可，不适合作为 NAS 默认推荐；生产默认检测由内置规则与 NER 承担。支持 CUDA（建议显存 >=6GB）或 CPU 模式（CPU 推理耗时较长且内存占用约 8-10GB，单请求有时间预算限制）。",
     ),
     "memprivacy-4b-rl": ModelDescriptor(
