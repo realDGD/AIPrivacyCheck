@@ -2,10 +2,17 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.1`（fnOS Native 原生应用）
+当前版本：`0.6.2`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **GLiNER 中文误报抑制与前端交互布局加固 (v0.6.2)**：
+  - **降低 GLiNER 中文 USERNAME 误报**：增加严格的用户名形态学与上下文环境过滤（`_is_plausible_username`），针对中文自然语言叙述默认拒绝提取为 USERNAME，杜绝整句自然语言与标点被错误遮盖；仅允许标准 ASCII token 或具有显式账号上下文的合规 span（reduce GLiNER username false positives in Chinese narrative text）。
+  - **修复 marker 右键菜单生命周期**：在脱敏预览 `mouseup` 事件中严格限定仅左键生效（`event.button === 0`），彻底修复安全副本 marker 右键点击弹出菜单后、松开按键菜单立即误关闭的交互缺陷（fix marker context-menu lifecycle）。
+  - **长文本检测工作区三栏等高与内部滚动**：桌面端 `#maskView` 三栏采用 640px 严格等高模型，输入框与脱敏预览区高度受控内部纵向滚动，杜绝因文本变长导致各栏失衡或向外无节制拉伸；Restore 恢复视图保持原生自适应弹性（stabilize long-text detection workspace）。
+  - **双向联动容器级定位**：彻底废除引发外层 `document` 突兀跳动的 `scrollIntoView`，封装容器级相对滚动 `scrollElementIntoContainer`，并结合 `focus({ preventScroll: true })`，确保 marker 与卡片联动时平滑仅在内部容器滚动，页面整体垂直滚动位置保持不动（keep linked-entity navigation inside panel scroll containers）。
+  - **审查卡片高亮横向溢出消除**：重构 `@keyframes entity-link-pulse` 移除所有 `translateX` 几何平移，配合 `.entity-list` 显式声明 `overflow-x: hidden`，彻底解决动画期间瞬间横向滚动条闪烁问题（remove highlight-induced horizontal overflow）。
+  - **范围重选视觉降噪**：去除误导性的虚线拖拽边框（dashed outline），改用高亮黄色背景与轻量内嵌投影，消除用户“可拖拉拉伸”的误解（simplify range reselection highlight）。
 - **Unicode 字符契约加固与安全副本保障 (v0.6.1)**：
   - **统一 Unicode / UTF-16 契约**：后端实体序列化直接输出精确的 `start_utf16` 与 `end_utf16`，前端统一使用 UTF-16 code units 字符切片，彻底根除包含 Emoji、生僻字、合字及复杂多语言文本时的占位符偏移错位与尾部字符残留缺陷。
   - **占位符统一分配与同值复用**：自动检测与手动划词标注统一使用 `allocateReplacementToken`，相同文本与实体类型严格复用同一个脱敏占位符与保险箱映射，彻底消除同值多 token 冲突。
