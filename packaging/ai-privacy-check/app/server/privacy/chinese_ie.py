@@ -1,7 +1,7 @@
 """Chinese Information Extraction (IE) detector for semantic entities (Name, Address).
 
 Combines built-in high-precision deterministic linguistic segmentation with
-optional PaddleNLP UIE deep-learning model enhancement.
+optional SiameseUIE deep-learning model enhancement.
 Ensures zero-network, local-first inference with exact half-open character offsets.
 """
 

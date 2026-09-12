@@ -1068,6 +1068,288 @@ class WritableHomeAndStorageHotfixV054Tests(unittest.TestCase):
                 worker.terminate()
 
 
+
+class RuntimeReadinessAndStateSeparationV055Tests(unittest.TestCase):
+    """Regression tests for v0.5.5 separating model installation from runtime readiness."""
+
+    def test_runtime_ux_state_matrix_cases(self):
+        """Case 1 - Case 5 state derivation matrix verification via app.js deriveModelRuntimeState."""
+        app_js_path = SERVER_DIR / "web" / "app.js"
+        node_script = f"""
+        const fs = require('fs');
+        const content = fs.readFileSync('{app_js_path}', 'utf8');
+        const fnMatch = content.match(/function deriveModelRuntimeState[\\s\\S]*?\\n\\}}/);
+        if (!fnMatch) throw new Error("deriveModelRuntimeState not found in app.js");
+        eval(fnMatch[0]);
+
+        const cases = [
+          // Case 1: model=false, CPU runtime=false
+          deriveModelRuntimeState({{ detector: {{ installed: false, ready: false }} }}, {{ requested_device: 'auto', runtimes: {{ torch_cpu: {{ installed: false }} }} }}),
+          // Case 2: model=true, CUDA=true, requested=cuda
+          deriveModelRuntimeState({{ detector: {{ installed: true, ready: true }} }}, {{ requested_device: 'cuda', runtimes: {{ torch_cuda: {{ installed: true, verified: true, cuda_available: true }} }} }}),
+          // Case 3: model=true, CUDA=true, CPU=false, requested=cpu
+          deriveModelRuntimeState({{ detector: {{ installed: true, ready: false }} }}, {{ requested_device: 'cpu', runtimes: {{ torch_cpu: {{ installed: false }}, torch_cuda: {{ installed: true, verified: true, cuda_available: true }} }} }}),
+          // Case 4: model=true, CUDA=false, CPU=true, requested=cpu
+          deriveModelRuntimeState({{ detector: {{ installed: true, ready: true }} }}, {{ requested_device: 'cpu', runtimes: {{ torch_cpu: {{ installed: true, verified: true }} }} }}),
+          // Case 5: model=true, CUDA=false, CPU=false, requested=auto
+          deriveModelRuntimeState({{ detector: {{ installed: true, ready: false }} }}, {{ requested_device: 'auto', hardware: {{ nvidia_available: false }}, runtimes: {{ torch_cpu: {{ installed: false }} }} }})
+        ];
+        console.log(JSON.stringify(cases));
+        """
+        proc = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, check=True)
+        results = json.loads(proc.stdout)
+
+        # Case 1: model=false, CPU runtime=false -> install model button
+        c1 = results[0]
+        self.assertFalse(c1["isInstalled"])
+        self.assertFalse(c1["isReady"])
+        self.assertEqual(c1["installButtonText"], "从魔搭下载安装")
+        self.assertFalse(c1["showUninstall"])
+
+        # Case 2: model=true, CUDA=true, requested=cuda -> ready, no runtime button, show uninstall
+        c2 = results[1]
+        self.assertTrue(c2["isInstalled"])
+        self.assertTrue(c2["isReady"])
+        self.assertIsNone(c2["installButtonText"])
+        self.assertTrue(c2["showUninstall"])
+
+        # Case 3: model=true, CUDA=true, CPU=false, requested=cpu -> runtime missing -> install CPU runtime button & uninstall
+        c3 = results[2]
+        self.assertTrue(c3["isInstalled"])
+        self.assertFalse(c3["isReady"])
+        self.assertTrue(c3["runtimeMissing"])
+        self.assertEqual(c3["installButtonText"], "安装 CPU 运行时")
+        self.assertTrue(c3["showUninstall"])
+
+        # Case 4: model=true, CUDA=false, CPU=true, requested=cpu -> ready, show uninstall
+        c4 = results[3]
+        self.assertTrue(c4["isInstalled"])
+        self.assertTrue(c4["isReady"])
+        self.assertIsNone(c4["installButtonText"])
+        self.assertTrue(c4["showUninstall"])
+
+        # Case 5: model=true, CUDA=false, CPU=false, requested=auto -> install recommended runtime
+        c5 = results[4]
+        self.assertTrue(c5["isInstalled"])
+        self.assertFalse(c5["isReady"])
+        self.assertTrue(c5["runtimeMissing"])
+        self.assertEqual(c5["installButtonText"], "安装推荐运行时")
+        self.assertTrue(c5["showUninstall"])
+
+    def test_ui_inline_status_text_regression(self):
+        """When model is installed but runtime is missing, UI must never state '未安装增强模型'."""
+        app_js_path = SERVER_DIR / "web" / "app.js"
+        node_script = f"""
+        const fs = require('fs');
+        const content = fs.readFileSync('{app_js_path}', 'utf8');
+
+        function evaluateStatus(data) {{
+          const slots = (data.registry && data.registry.slots) || {{}};
+          const dev = data.device || {{}};
+          const glinerSlot = slots.general_pii || {{}};
+          const memSlot = slots.semantic_privacy || {{}};
+          const glinerInstalled = Boolean(glinerSlot.detector && glinerSlot.detector.installed);
+          const memInstalled = Boolean(memSlot.detector && memSlot.detector.installed);
+          const anyModelInstalled = glinerInstalled || memInstalled;
+
+          const glinerReady = Boolean(glinerSlot.detector && glinerSlot.detector.ready);
+          const memReady = Boolean(memSlot.detector && memSlot.detector.ready);
+          const anyModelReady = glinerReady || memReady;
+
+          if (data.installing) {{
+            return "正在后台安装模型或运行环境…";
+          }} else if (anyModelReady) {{
+            return "增强模型已就绪 (GLiNER / MemPrivacy)";
+          }} else if (anyModelInstalled) {{
+            const req = (dev.requested_device || "auto").toLowerCase();
+            if (req === "cpu") {{
+              return "增强模型已安装，但 CPU 运行时未就绪。";
+            }} else if (req === "cuda") {{
+              return "增强模型已安装，但 CUDA 运行时未就绪。";
+            }} else {{
+              return "增强模型已安装，但计算运行时未就绪。";
+            }}
+          }} else {{
+            return "未安装增强模型（基础规则与中文语义始终可用）";
+          }}
+        }}
+
+        const tests = {{
+          installedCpuMissing: evaluateStatus({{
+            registry: {{ slots: {{ general_pii: {{ detector: {{ installed: true, ready: false }} }} }} }},
+            device: {{ requested_device: "cpu" }}
+          }}),
+          installedCudaMissing: evaluateStatus({{
+            registry: {{ slots: {{ general_pii: {{ detector: {{ installed: true, ready: false }} }} }} }},
+            device: {{ requested_device: "cuda" }}
+          }}),
+          installedAutoMissing: evaluateStatus({{
+            registry: {{ slots: {{ general_pii: {{ detector: {{ installed: true, ready: false }} }} }} }},
+            device: {{ requested_device: "auto" }}
+          }}),
+          neitherInstalled: evaluateStatus({{
+            registry: {{ slots: {{ general_pii: {{ detector: {{ installed: false, ready: false }} }} }} }},
+            device: {{ requested_device: "auto" }}
+          }}),
+          modelReady: evaluateStatus({{
+            registry: {{ slots: {{ general_pii: {{ detector: {{ installed: true, ready: true }} }} }} }},
+            device: {{ requested_device: "cuda" }}
+          }})
+        }};
+        console.log(JSON.stringify(tests));
+        """
+        proc = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout)
+
+        self.assertEqual(res["installedCpuMissing"], "增强模型已安装，但 CPU 运行时未就绪。")
+        self.assertNotIn("未安装增强模型", res["installedCpuMissing"])
+
+        self.assertEqual(res["installedCudaMissing"], "增强模型已安装，但 CUDA 运行时未就绪。")
+        self.assertNotIn("未安装增强模型", res["installedCudaMissing"])
+
+        self.assertEqual(res["installedAutoMissing"], "增强模型已安装，但计算运行时未就绪。")
+        self.assertNotIn("未安装增强模型", res["installedAutoMissing"])
+
+        self.assertEqual(res["neitherInstalled"], "未安装增强模型（基础规则与中文语义始终可用）")
+        self.assertEqual(res["modelReady"], "增强模型已就绪 (GLiNER / MemPrivacy)")
+
+    def test_install_missing_runtime_skips_model_download(self):
+        """Installing missing runtime for existing model weights must skip model re-download and test with runtime."""
+        import model_installer
+        from privacy.device import DEVICE_MANAGER
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            model_id = "gliner-pii-edge"
+
+            # Create existing model files
+            m_dir = data_dir / "models" / model_id
+            m_dir.mkdir(parents=True, exist_ok=True)
+            (m_dir / "gliner_config.json").write_text("{}", encoding="utf-8")
+            (m_dir / "model.safetensors").write_text("fake-weights", encoding="utf-8")
+            (m_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (m_dir / ".metadata.json").write_text(json.dumps({"model_id": model_id}), encoding="utf-8")
+
+            # Verify integrity passes before install
+            ok, _ = model_installer.verify_model_integrity(m_dir, model_id)
+            self.assertTrue(ok)
+
+            installed_runtimes = []
+            def fake_install_isolated_runtime(d_dir, profile):
+                installed_runtimes.append(profile)
+                rt_dir = d_dir / "runtimes" / profile
+                rt_dir.mkdir(parents=True, exist_ok=True)
+                (rt_dir / ".installed.json").write_text("{}", encoding="utf-8")
+                return rt_dir / "venv"
+
+            smoke_test_calls = []
+            def fake_smoke_test(model_id, model_path, profile, device):
+                smoke_test_calls.append({
+                    "model_id": model_id,
+                    "model_path": model_path,
+                    "profile": profile,
+                    "device": device,
+                })
+                return True, None
+
+            fake_client = MagicMock()
+            fake_client.run_smoke_test.side_effect = fake_smoke_test
+
+            env_patch = {"APP_DATA_DIR": str(data_dir)}
+            with patch.dict(os.environ, env_patch), \
+                 patch.object(DEVICE_MANAGER, "get_requested_device", return_value="cpu"), \
+                 patch.object(DEVICE_MANAGER, "probe_diagnostics", return_value={"hardware": {"nvidia_available": False}}), \
+                 patch("model_installer.install_isolated_runtime", side_effect=fake_install_isolated_runtime), \
+                 patch("model_installer.get_worker_client", return_value=fake_client), \
+                 patch("sys.argv", ["model_installer.py", "install", model_id]):
+
+                code = model_installer.main()
+                self.assertEqual(code, 0)
+
+            # Assert torch-cpu was installed
+            self.assertIn("torch-cpu", installed_runtimes)
+
+            # Assert smoke test executed with torch-cpu and cpu
+            self.assertEqual(len(smoke_test_calls), 1)
+            self.assertEqual(smoke_test_calls[0]["profile"], "torch-cpu")
+            self.assertEqual(smoke_test_calls[0]["device"], "cpu")
+
+            # Assert final state written is 'ready'
+            status_file = data_dir / "status" / f"{model_id}-install.json"
+            self.assertTrue(status_file.is_file())
+            status_data = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status_data["state"], "ready")
+
+    def test_uninstall_model_preserves_runtimes(self):
+        """Uninstalling model weights must preserve torch-cpu and torch-cuda runtimes."""
+        import model_installer
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            model_id = "gliner-pii-edge"
+
+            # Setup model
+            m_dir = data_dir / "models" / model_id
+            m_dir.mkdir(parents=True, exist_ok=True)
+            (m_dir / "gliner_config.json").write_text("{}", encoding="utf-8")
+
+            # Setup runtimes
+            r_cpu = data_dir / "runtimes" / "torch-cpu"
+            r_cpu.mkdir(parents=True, exist_ok=True)
+            (r_cpu / ".installed.json").write_text(json.dumps({"profile": "torch-cpu"}), encoding="utf-8")
+
+            r_cuda = data_dir / "runtimes" / "torch-cuda"
+            r_cuda.mkdir(parents=True, exist_ok=True)
+            (r_cuda / ".installed.json").write_text(json.dumps({"profile": "torch-cuda"}), encoding="utf-8")
+
+            # Execute uninstall
+            ok, msg = model_installer.uninstall_model(data_dir, model_id)
+            self.assertTrue(ok)
+
+            # Model is deleted
+            self.assertFalse(m_dir.exists())
+
+            # Runtimes are strictly preserved
+            self.assertTrue((r_cpu / ".installed.json").is_file())
+            self.assertTrue((r_cuda / ".installed.json").is_file())
+
+    def test_device_switch_preserves_model_installed(self):
+        """Switching requested device from CUDA to CPU must preserve installed=True even when runtime is not ready."""
+        from privacy.detectors import GLiNERDetector
+        from privacy.device import DeviceManager
+        import privacy.detectors as detectors_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            model_id = "gliner-pii-edge"
+
+            # Create model files
+            m_dir = data_dir / "models" / model_id
+            m_dir.mkdir(parents=True, exist_ok=True)
+            (m_dir / "gliner_config.json").write_text("{}", encoding="utf-8")
+            (m_dir / "model.safetensors").write_text("fake-weights", encoding="utf-8")
+            (m_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+            detector = GLiNERDetector(data_dir, active_model_id=model_id)
+
+            # 1. Simulate CUDA ready
+            cuda_res = {"ready": True, "actual_device": "cuda", "runtime_profile": "torch-cuda"}
+            with patch.object(detectors_mod.DEVICE_MANAGER, "resolve_for_model", return_value=cuda_res):
+                st_cuda = detector.status()
+                self.assertTrue(st_cuda["installed"])
+                self.assertTrue(st_cuda["ready"])
+                self.assertEqual(st_cuda["device"], "cuda")
+
+            # 2. Simulate switch to CPU where CPU runtime is missing
+            cpu_missing_res = {"ready": False, "actual_device": "none", "runtime_profile": None}
+            with patch.object(detectors_mod.DEVICE_MANAGER, "resolve_for_model", return_value=cpu_missing_res):
+                st_cpu = detector.status()
+                # installed must strictly stay True!
+                self.assertTrue(st_cpu["installed"])
+                self.assertFalse(st_cpu["ready"])
+                self.assertEqual(st_cpu["device"], "none")
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 

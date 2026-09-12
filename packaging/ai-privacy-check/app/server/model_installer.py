@@ -7,7 +7,7 @@ Supports:
    with strict authorization boundary validation, symlink escape protection,
    and atomic replacement without mutating user source files.
 3. Scanning user-visible fnOS data-share models folder (AI 脱敏器/models).
-4. Isolated runtime virtual environments (torch-cpu, torch-cuda, paddle-cpu, paddle-cuda)
+4. Isolated runtime virtual environments (torch-cpu, torch-cuda)
    with real subprocess framework verification.
 5. Model uninstallation, status reporting, and safe hot-reload.
 """
@@ -692,11 +692,15 @@ def main() -> int:
                         write_state(data_dir, "installing", f"正在准备 [{PROFILE_TORCH_CPU}] 隔离运行环境...", model_id)
                         install_isolated_runtime(data_dir, PROFILE_TORCH_CPU)
 
-                write_state(data_dir, "downloading", "正在从 ModelScope 下载模型权重...", model_id)
+                target_dir = get_model_dir(data_dir, model_id)
+                weights_ok, _ = verify_model_integrity(target_dir, model_id)
+                if not weights_ok:
+                    write_state(data_dir, "downloading", "正在从 ModelScope 下载模型权重...", model_id)
                 checkpoint_dir = download_modelscope_model(data_dir, model_id)
 
                 # Strict Synthetic smoke test
                 write_state(data_dir, "testing", "正在执行端到端合成冒烟推理验证...", model_id)
+                emit(f"正在通过隔离运行时 [{target_profile}] 执行冒烟推理验证...")
                 client = get_worker_client(data_dir)
                 smoke_ok, smoke_err = client.run_smoke_test(
                     model_id=model_id,

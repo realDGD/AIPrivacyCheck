@@ -416,16 +416,81 @@ async function importVault() {
   }
 }
 
+function deriveModelRuntimeState(slot, deviceData = {}, catalogModel = null) {
+  const det = (slot && slot.detector) || {};
+  const isInstalled = Boolean(det.installed);
+  const isReady = Boolean(det.ready);
+  const reqDevice = (deviceData.requested_device || "auto").toLowerCase();
+  const hw = deviceData.hardware || {};
+  const hasNvidia = Boolean(hw.nvidia_available);
+  const runtimes = deviceData.runtimes || {};
+  const tCpu = runtimes.torch_cpu || {};
+  const tCuda = runtimes.torch_cuda || {};
+  const cpuReady = Boolean(tCpu.installed && tCpu.verified);
+  const cudaReady = Boolean(tCuda.installed && tCuda.verified && tCuda.cuda_available);
+
+  const supportsCpu = catalogModel ? catalogModel.supports_cpu !== false : true;
+  const supportsCuda = catalogModel ? catalogModel.supports_cuda !== false : true;
+
+  let installButtonText = null;
+  let runtimeMissing = false;
+  let missingRuntimeName = null;
+
+  if (!isInstalled) {
+    installButtonText = "从魔搭下载安装";
+  } else if (!isReady) {
+    runtimeMissing = true;
+    if (reqDevice === "cpu") {
+      missingRuntimeName = "CPU";
+      installButtonText = "安装 CPU 运行时";
+    } else if (reqDevice === "cuda") {
+      missingRuntimeName = "CUDA";
+      installButtonText = "安装 CUDA 运行时";
+    } else {
+      // auto
+      if (hasNvidia && supportsCuda && !cudaReady) {
+        missingRuntimeName = "CUDA (推荐)";
+        installButtonText = "安装推荐运行时";
+      } else if (!cpuReady) {
+        missingRuntimeName = "CPU";
+        installButtonText = "安装推荐运行时";
+      } else {
+        missingRuntimeName = "隔离";
+        installButtonText = "安装推荐运行时";
+      }
+    }
+  }
+
+  return {
+    isInstalled,
+    isReady,
+    runtimeMissing,
+    missingRuntimeName,
+    installButtonText,
+    showUninstall: isInstalled,
+  };
+}
+
 function updateModelUI(data) {
   state.model = data;
   const reg = data.registry || {};
   const slots = reg.slots || {};
 
-  // Check overall model readiness for optional enhanced detectors
+  // Device & Runtime Telemetry
+  const dev = data.device || {};
+  const hw = dev.hardware || {};
+  const runtimes = dev.runtimes || {};
+  const modelDevices = dev.model_devices || {};
+
+  // Check overall model readiness and installation for optional enhanced detectors
   const glinerSlot = slots.general_pii || {};
   const memSlot = slots.semantic_privacy || {};
-  const glinerReady = glinerSlot.detector && glinerSlot.detector.ready;
-  const memReady = memSlot.detector && memSlot.detector.ready;
+  const glinerInstalled = Boolean(glinerSlot.detector && glinerSlot.detector.installed);
+  const memInstalled = Boolean(memSlot.detector && memSlot.detector.installed);
+  const anyModelInstalled = glinerInstalled || memInstalled;
+
+  const glinerReady = Boolean(glinerSlot.detector && glinerSlot.detector.ready);
+  const memReady = Boolean(memSlot.detector && memSlot.detector.ready);
   const anyModelReady = glinerReady || memReady;
 
   if (elements.useModelToggle) {
@@ -434,19 +499,30 @@ function updateModelUI(data) {
   }
   if (elements.modelInlineStatus) {
     if (data.installing) {
-      elements.modelInlineStatus.textContent = "正在后台下载/安装模型…";
+      let installMsg = "正在后台安装模型或运行环境…";
+      const states = data.install_states || {};
+      for (const mId in states) {
+        if (states[mId] && states[mId].detail) {
+          installMsg = states[mId].detail;
+          break;
+        }
+      }
+      elements.modelInlineStatus.textContent = installMsg;
     } else if (anyModelReady) {
       elements.modelInlineStatus.textContent = "增强模型已就绪 (GLiNER / MemPrivacy)";
+    } else if (anyModelInstalled) {
+      const req = (dev.requested_device || "auto").toLowerCase();
+      if (req === "cpu") {
+        elements.modelInlineStatus.textContent = "增强模型已安装，但 CPU 运行时未就绪。";
+      } else if (req === "cuda") {
+        elements.modelInlineStatus.textContent = "增强模型已安装，但 CUDA 运行时未就绪。";
+      } else {
+        elements.modelInlineStatus.textContent = "增强模型已安装，但计算运行时未就绪。";
+      }
     } else {
       elements.modelInlineStatus.textContent = "未安装增强模型（基础规则与中文语义始终可用）";
     }
   }
-
-  // Device & Runtime Telemetry
-  const dev = data.device || {};
-  const hw = dev.hardware || {};
-  const runtimes = dev.runtimes || {};
-  const modelDevices = dev.model_devices || {};
 
   if (elements.deviceStatusBadge) {
     elements.deviceStatusBadge.textContent = dev.actual_device === "cuda" ? "NVIDIA CUDA 加速" : "CPU 运行模式";
@@ -490,7 +566,7 @@ function updateModelUI(data) {
       hwCard.append(hwTitle, hwDesc);
     }
 
-    // 2. PyTorch Runtime section
+    // 2. PyTorch Runtime section (GLiNER, SiameseUIE, MemPrivacy)
     const torchCard = document.createElement("div");
     torchCard.style.padding = "8px 12px";
     torchCard.style.borderRadius = "6px";
@@ -503,54 +579,30 @@ function updateModelUI(data) {
 
     const tCuda = runtimes.torch_cuda || {};
     const tCpu = runtimes.torch_cpu || {};
-    if (tCuda.installed && tCuda.verified && tCuda.cuda_available) {
-      torchTitle.textContent = "✅ PyTorch CUDA 运行时: 已就绪";
+    const cudaOk = tCuda.installed && tCuda.verified && tCuda.cuda_available;
+    const cpuOk = tCpu.installed && tCpu.verified;
+
+    if (cudaOk && cpuOk) {
+      torchTitle.textContent = "✅ PyTorch 运行时: CUDA 与 CPU 均已就绪";
       torchTitle.style.color = "var(--brand-green, #137333)";
-    } else if (tCpu.installed && tCpu.verified) {
-      torchTitle.textContent = "○ PyTorch CPU 运行时: 已就绪 (CUDA 未安装)";
+    } else if (cudaOk) {
+      torchTitle.textContent = "✅ PyTorch CUDA 运行时: 已就绪 (CPU 运行时未安装)";
+      torchTitle.style.color = "var(--brand-green, #137333)";
+    } else if (cpuOk) {
+      torchTitle.textContent = "○ PyTorch CPU 运行时: 已就绪 (CUDA 未就绪)";
       torchTitle.style.color = "var(--text)";
     } else {
-      torchTitle.textContent = "○ PyTorch 运行时: 未就绪";
+      torchTitle.textContent = "○ PyTorch 运行时: 未就绪 (按需安装)";
       torchTitle.style.color = "var(--text-muted)";
     }
     const torchDesc = document.createElement("div");
     torchDesc.style.color = "var(--text-muted)";
     torchDesc.style.fontSize = "12px";
     const torchDevInfo = modelDevices.torch || {};
-    torchDesc.textContent = `服务模型: GLiNER, MemPrivacy · 当前分配设备: ${torchDevInfo.device ? torchDevInfo.device.toUpperCase() : "CPU"}`;
+    torchDesc.textContent = `服务模型: GLiNER, SiameseUIE, MemPrivacy · 当前分配设备: ${torchDevInfo.device ? torchDevInfo.device.toUpperCase() : "CPU"}`;
     torchCard.append(torchTitle, torchDesc);
 
-    // 3. Paddle Runtime section
-    const paddleCard = document.createElement("div");
-    paddleCard.style.padding = "8px 12px";
-    paddleCard.style.borderRadius = "6px";
-    paddleCard.style.background = "var(--surface)";
-    paddleCard.style.border = "1px solid var(--line)";
-
-    const paddleTitle = document.createElement("div");
-    paddleTitle.style.fontWeight = "600";
-    paddleTitle.style.marginBottom = "4px";
-
-    const pCuda = runtimes.paddle_cuda || {};
-    const pCpu = runtimes.paddle_cpu || {};
-    if (pCuda.installed && pCuda.verified && pCuda.cuda_available) {
-      paddleTitle.textContent = "✅ Paddle CUDA 运行时: 已就绪";
-      paddleTitle.style.color = "var(--brand-green, #137333)";
-    } else if (pCpu.installed && pCpu.verified) {
-      paddleTitle.textContent = "○ Paddle CPU 运行时: 已就绪 (CUDA 未安装)";
-      paddleTitle.style.color = "var(--text)";
-    } else {
-      paddleTitle.textContent = "○ Paddle 运行时: 未就绪（内置语义规则正常工作）";
-      paddleTitle.style.color = "var(--text-muted)";
-    }
-    const paddleDesc = document.createElement("div");
-    paddleDesc.style.color = "var(--text-muted)";
-    paddleDesc.style.fontSize = "12px";
-    const paddleDevInfo = modelDevices.paddle || {};
-    paddleDesc.textContent = `服务模型: SiameseUIE · 当前分配设备: ${paddleDevInfo.device ? paddleDevInfo.device.toUpperCase() : "CPU"}`;
-    paddleCard.append(paddleTitle, paddleDesc);
-
-    elements.deviceTelemetry.append(hwCard, torchCard, paddleCard);
+    elements.deviceTelemetry.append(hwCard, torchCard);
   } else if (elements.deviceDetail) {
     elements.deviceDetail.textContent = hw.nvidia_available
       ? `检测到 GPU: ${hw.driver_version ? "驱动 " + hw.driver_version : "就绪"} (目标: ${dev.requested_device})`
@@ -584,12 +636,15 @@ function updateModelUI(data) {
       const isInstalled = det.installed;
       const installState = data.install_states && data.install_states[slot.active_model];
 
+      const activeDescriptor = (slot.available_models || []).find((m) => m.id === slot.active_model) || null;
+      const runtimeState = deriveModelRuntimeState(slot, dev, activeDescriptor);
+
       if (slotId === "built_in") {
         badge.textContent = "系统内置 (始终运行)";
         badge.className = "status-badge is-ready";
       } else if (slotId === "chinese_ie") {
-        badge.textContent = isInstalled ? "已加载 SiameseUIE" : "系统内置语法 (始终就绪)";
-        badge.className = "status-badge is-ready";
+        badge.textContent = isInstalled ? (isReady ? "已加载 SiameseUIE" : "权重已就绪 (缺少运行时)") : "系统内置语法 (始终就绪)";
+        badge.className = (isInstalled && isReady) || !isInstalled ? "status-badge is-ready" : "status-badge";
       } else if (installState && installState.state === "installing") {
         badge.textContent = "正在安装";
         badge.className = "status-badge";
@@ -597,7 +652,7 @@ function updateModelUI(data) {
         badge.textContent = "已就绪";
         badge.className = "status-badge is-ready";
       } else if (isInstalled) {
-        badge.textContent = "已安装 (待加载)";
+        badge.textContent = "权重已就绪 (缺少运行时)";
         badge.className = "status-badge";
       } else {
         badge.textContent = "未安装";
@@ -648,14 +703,15 @@ function updateModelUI(data) {
       actions.style.alignItems = "center";
 
       if (slotId !== "built_in") {
-        if (!isInstalled && slot.active_model) {
+        if (runtimeState.installButtonText && slot.active_model) {
           const installBtn = document.createElement("button");
           installBtn.className = "button button-primary button-small";
-          installBtn.textContent = "从魔搭下载安装";
+          installBtn.textContent = runtimeState.installButtonText;
           installBtn.disabled = !data.is_admin || data.installing;
-          installBtn.addEventListener("click", () => installModel(slot.active_model));
+          installBtn.addEventListener("click", () => installModel(slot.active_model, isInstalled));
           actions.append(installBtn);
-        } else if (isInstalled && slot.active_model) {
+        }
+        if (runtimeState.showUninstall && slot.active_model) {
           const uninstallBtn = document.createElement("button");
           uninstallBtn.className = "button button-ghost button-small";
           uninstallBtn.textContent = "卸载模型";
@@ -751,14 +807,17 @@ async function refreshModelStatus() {
   }
 }
 
-async function installModel(modelId = "gliner-pii-edge") {
-  const confirmed = window.confirm(`在线安装将从 ModelScope (魔搭社区) 下载运行库与模型权重。继续吗？`);
+async function installModel(modelId = "gliner-pii-edge", isWeightsAlreadyInstalled = false) {
+  const confirmMsg = isWeightsAlreadyInstalled
+    ? `检测到模型权重已就绪，将为您安装并配置当前设备所需的隔离运行环境。继续吗？`
+    : `在线安装将从 ModelScope (魔搭社区) 下载运行库与模型权重。继续吗？`;
+  const confirmed = window.confirm(confirmMsg);
   if (!confirmed) return;
   try {
     const result = await api("/api/model/install", { method: "POST", body: JSON.stringify({ model: modelId }) });
     updateModelUI({ ...result.status, is_admin: true });
     if ($("installLogPanel")) $("installLogPanel").open = true;
-    toast("模型已开始在后台从 ModelScope 下载与安装");
+    toast(isWeightsAlreadyInstalled ? "已开始在后台配置隔离运行环境…" : "模型已开始在后台从 ModelScope 下载与安装");
   } catch (error) {
     toast(error.message);
     await refreshModelStatus();
@@ -912,3 +971,10 @@ if (elements.installModelButton) elements.installModelButton.addEventListener("c
 
 renderEntities();
 refreshModelStatus();
+
+if (typeof window !== "undefined") {
+  window.deriveModelRuntimeState = deriveModelRuntimeState;
+}
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { deriveModelRuntimeState };
+}
