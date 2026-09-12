@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch, MagicMock
@@ -1354,6 +1355,51 @@ class RuntimeReadinessAndStateSeparationV055Tests(unittest.TestCase):
 class RuntimeCacheInvalidationV056Tests(unittest.TestCase):
     """Regression tests for v0.5.6 event-driven runtime probe and device diagnostics cache invalidation."""
 
+    @staticmethod
+    def _probe_output(interpreter: Path) -> str:
+        return json.dumps({
+            "ok": True,
+            "framework": "torch",
+            "framework_version": "2.4.0+cpu",
+            "device_target": "cpu",
+            "cuda_available": False,
+            "device_count": 0,
+            "device_name": None,
+            "cuda_version": None,
+            "interpreter": str(interpreter),
+            "error": None,
+        })
+
+    @staticmethod
+    def _create_mock_cpu_runtime(runtime_manager: RuntimeManager) -> Path:
+        python_bin = runtime_manager.venv_dir("torch-cpu") / "bin" / "python3"
+        python_bin.parent.mkdir(parents=True, exist_ok=True)
+        python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        python_bin.chmod(0o755)
+        runtime_manager._runner = lambda cmd, **kwargs: (
+            0,
+            RuntimeCacheInvalidationV056Tests._probe_output(python_bin),
+            "",
+        )
+        return python_bin
+
+    @staticmethod
+    def _create_mock_gliner_model(data_dir: Path) -> None:
+        model_dir = data_dir / "models" / "gliner-pii-edge"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "gliner_config.json").write_text("{}", encoding="utf-8")
+        (model_dir / "model.safetensors").write_text("fake", encoding="utf-8")
+        (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    @staticmethod
+    def _wait_until(predicate, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
+
     def test_runtime_probe_cache_invalidation(self):
         """RuntimeManager must invalidate probe cache on demand, allowing updated runtime state to reflect."""
         with tempfile.TemporaryDirectory() as td:
@@ -1405,6 +1451,46 @@ class RuntimeCacheInvalidationV056Tests(unittest.TestCase):
             rm.invalidate_probe_cache()
             self.assertEqual(len(rm._probe_cache), 0)
 
+    def test_inflight_runtime_probe_cannot_overwrite_refreshed_cache(self):
+        """A probe started before invalidation must not publish after a newer refresh."""
+        with tempfile.TemporaryDirectory() as td:
+            rm = RuntimeManager(Path(td))
+            original_interpreter_path = rm.interpreter_path
+            old_probe_started = threading.Event()
+            publish_old_probe = threading.Event()
+            first_call = True
+            call_lock = threading.Lock()
+
+            def delayed_interpreter_path(profile: str):
+                nonlocal first_call
+                with call_lock:
+                    is_old_probe = first_call
+                    first_call = False
+                result = original_interpreter_path(profile)
+                if is_old_probe:
+                    old_probe_started.set()
+                    self.assertTrue(publish_old_probe.wait(timeout=5))
+                return result
+
+            rm.interpreter_path = delayed_interpreter_path
+            old_result = {}
+            old_thread = threading.Thread(
+                target=lambda: old_result.update(rm.probe_profile("torch-cpu")),
+            )
+            old_thread.start()
+            self.assertTrue(old_probe_started.wait(timeout=5))
+
+            self._create_mock_cpu_runtime(rm)
+            rm.invalidate_probe_cache("torch-cpu")
+            fresh_result = rm.probe_profile("torch-cpu", force_refresh=True)
+            publish_old_probe.set()
+            old_thread.join(timeout=5)
+
+            self.assertFalse(old_thread.is_alive())
+            self.assertTrue(fresh_result["verified"])
+            self.assertFalse(old_result["installed"])
+            self.assertTrue(rm.probe_profile("torch-cpu")["installed"])
+
     def test_device_diagnostics_cache_invalidation(self):
         """DeviceManager.invalidate_runtime_state must clear both runtime probe cache and device diagnostics."""
         with tempfile.TemporaryDirectory() as td:
@@ -1452,62 +1538,210 @@ class RuntimeCacheInvalidationV056Tests(unittest.TestCase):
             diag_fresh = dm.probe_diagnostics()
             self.assertTrue(diag_fresh["runtimes"]["torch_cpu"].get("installed", False))
 
+    def test_inflight_device_probe_cannot_overwrite_refreshed_cache(self):
+        """Diagnostics started before invalidation must not replace a newer snapshot."""
+        with tempfile.TemporaryDirectory() as td:
+            old_probe_started = threading.Event()
+            publish_old_probe = threading.Event()
+            call_count = 0
+            call_lock = threading.Lock()
+
+            old_runtime = {
+                "torch-cpu": {"installed": False, "verified": False},
+                "torch-cuda": {"installed": False, "verified": False},
+            }
+            new_runtime = {
+                "torch-cpu": {"installed": True, "verified": True},
+                "torch-cuda": {"installed": False, "verified": False},
+            }
+            runtime_manager = MagicMock()
+
+            def probe_all(force_refresh=False):
+                nonlocal call_count
+                with call_lock:
+                    call_count += 1
+                    is_old_probe = call_count == 1
+                snapshot = old_runtime if is_old_probe else new_runtime
+                if is_old_probe:
+                    old_probe_started.set()
+                    self.assertTrue(publish_old_probe.wait(timeout=5))
+                return snapshot
+
+            runtime_manager.probe_all.side_effect = probe_all
+            runtime_manager.best_runtime_for_framework.return_value = "torch-cpu"
+            hardware_probe = MagicMock()
+            hardware_probe.probe_nvidia.return_value = {
+                "nvidia_available": False,
+                "gpu_count": 0,
+                "gpus": [],
+                "driver_version": None,
+            }
+            dm = DeviceManager(
+                data_dir=Path(td),
+                hardware_probe=hardware_probe,
+                runtime_manager=runtime_manager,
+            )
+            old_result = {}
+            old_thread = threading.Thread(
+                target=lambda: old_result.update(dm.probe_diagnostics()),
+            )
+            old_thread.start()
+            self.assertTrue(old_probe_started.wait(timeout=5))
+
+            dm.invalidate_cache()
+            fresh_result = dm.probe_diagnostics(force_refresh=True)
+            publish_old_probe.set()
+            old_thread.join(timeout=5)
+
+            self.assertFalse(old_thread.is_alive())
+            self.assertFalse(old_result["runtimes"]["torch_cpu"]["installed"])
+            self.assertTrue(fresh_result["runtimes"]["torch_cpu"]["installed"])
+            self.assertTrue(dm.probe_diagnostics()["runtimes"]["torch_cpu"]["installed"])
+
     def test_installer_completion_integration(self):
-        """Installer child process completion must automatically invalidate caches and reflect ready in status()."""
+        """The real start/wait callback must refresh readiness without restarting the server."""
         import server
         from server import ModelLifecycleController
 
         with tempfile.TemporaryDirectory() as td:
             data_dir = Path(td)
-            # Create model weights
-            m_dir = data_dir / "models" / "gliner-pii-edge"
-            m_dir.mkdir(parents=True, exist_ok=True)
-            (m_dir / "gliner_config.json").write_text("{}", encoding="utf-8")
-            (m_dir / "model.safetensors").write_text("fake", encoding="utf-8")
-            (m_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+            self._create_mock_gliner_model(data_dir)
+            previous_data_dir = server.DEVICE_MANAGER.data_dir
+            previous_privacy = server.PRIVACY
+            child_may_exit = threading.Event()
+            finalization_complete = threading.Event()
 
+            try:
+                controller = ModelLifecycleController(data_dir)
+                server.DEVICE_MANAGER.set_data_dir(data_dir)
+                server.DEVICE_MANAGER.set_requested_device("cpu")
+                server.PRIVACY = server.PrivacyService(data_dir)
+                runtime_manager = server.DEVICE_MANAGER._rt_manager
+
+                before = controller.status()
+                self.assertFalse(before["device"]["runtimes"]["torch_cpu"].get("installed", False))
+                self.assertFalse(before["registry"]["slots"]["general_pii"]["detector"]["ready"])
+
+                test_case = self
+
+                class SuccessfulInstallerProcess:
+                    returncode = None
+
+                    def poll(self):
+                        return self.returncode
+
+                    def wait(self, timeout=None):
+                        if not child_may_exit.wait(timeout=timeout or 5):
+                            raise subprocess.TimeoutExpired("installer", timeout)
+                        test_case._create_mock_cpu_runtime(runtime_manager)
+                        self.returncode = 0
+                        return 0
+
+                original_reset = server.PRIVACY.reset_models
+
+                def tracked_reset():
+                    original_reset()
+                    finalization_complete.set()
+
+                with patch("server.subprocess.Popen", return_value=SuccessfulInstallerProcess()), \
+                     patch.object(server.PRIVACY, "reset_models", side_effect=tracked_reset):
+                    self.assertTrue(controller.start_install("gliner-pii-edge"))
+                    self.assertTrue(controller.status()["installing"])
+                    child_may_exit.set()
+                    self.assertTrue(finalization_complete.wait(timeout=5))
+                    self.assertTrue(self._wait_until(lambda: controller._process is None))
+
+                after = controller.status()
+                self.assertFalse(after["installing"])
+                self.assertTrue(after["device"]["runtimes"]["torch_cpu"].get("installed", False))
+                self.assertTrue(after["registry"]["slots"]["general_pii"]["detector"]["ready"])
+            finally:
+                server.DEVICE_MANAGER.set_data_dir(previous_data_dir)
+                server.PRIVACY = previous_privacy
+
+    def test_failed_installer_invalidates_without_refreshing_or_resetting(self):
+        """A failed child must clear caches but must not force readiness or reset workers."""
+        import server
+        from server import ModelLifecycleController
+
+        with tempfile.TemporaryDirectory() as td:
+            controller = ModelLifecycleController(Path(td))
+            child_may_exit = threading.Event()
+
+            class FailedInstallerProcess:
+                returncode = None
+
+                def poll(self):
+                    return self.returncode
+
+                def wait(self, timeout=None):
+                    if not child_may_exit.wait(timeout=timeout or 5):
+                        raise subprocess.TimeoutExpired("installer", timeout)
+                    self.returncode = 1
+                    return 1
+
+            with patch("server.subprocess.Popen", return_value=FailedInstallerProcess()), \
+                 patch.object(server.DEVICE_MANAGER, "invalidate_runtime_state") as invalidate, \
+                 patch.object(server.DEVICE_MANAGER, "probe_diagnostics") as probe, \
+                 patch.object(server.PRIVACY, "reset_models") as reset:
+                self.assertTrue(controller.start_install("gliner-pii-edge"))
+                child_may_exit.set()
+                self.assertTrue(self._wait_until(lambda: controller._process is None))
+
+            invalidate.assert_called_once_with()
+            probe.assert_not_called()
+            reset.assert_not_called()
+
+    def test_installing_remains_true_until_completion_refresh_finishes(self):
+        """The UI polling flag must cover cache refresh, not only child-process lifetime."""
+        import server
+        from server import ModelLifecycleController
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
             controller = ModelLifecycleController(data_dir)
-            server.DEVICE_MANAGER.set_data_dir(data_dir)
-            server.DEVICE_MANAGER.set_requested_device("cpu")
-            server.PRIVACY = server.PrivacyService(data_dir)
+            child_may_exit = threading.Event()
+            refresh_started = threading.Event()
+            allow_refresh = threading.Event()
+            finalization_complete = threading.Event()
 
-            # Before installation: torch-cpu not installed
-            st_before = controller.status()
-            self.assertFalse(st_before["device"]["runtimes"]["torch_cpu"].get("installed", False))
-            self.assertFalse(st_before["registry"]["slots"]["general_pii"]["detector"]["ready"])
+            class SuccessfulInstallerProcess:
+                returncode = None
 
-            # Simulate child process creating runtime
-            rm = server.DEVICE_MANAGER._rt_manager
-            profile_dir = rm.profile_dir("torch-cpu")
-            venv_bin = profile_dir / "venv" / "bin"
-            venv_bin.mkdir(parents=True, exist_ok=True)
-            mock_python = venv_bin / "python3"
-            mock_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            mock_python.chmod(0o755)
+                def poll(self):
+                    return self.returncode
 
-            mock_probe_out = json.dumps({
-                "ok": True,
-                "framework": "torch",
-                "framework_version": "2.4.0+cpu",
-                "device_target": "cpu",
-                "cuda_available": False,
-                "device_count": 0,
-                "device_name": None,
-                "cuda_version": None,
-                "interpreter": str(mock_python),
-                "error": None,
-            })
-            rm._runner = lambda cmd, **kwargs: (0, mock_probe_out, "")
+                def wait(self, timeout=None):
+                    if not child_may_exit.wait(timeout=timeout or 5):
+                        raise subprocess.TimeoutExpired("installer", timeout)
+                    self.returncode = 0
+                    return 0
 
-            # Execute cache invalidation and refresh flow as done in wait_for_install
-            server.DEVICE_MANAGER.invalidate_runtime_state()
-            server.DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
-            server.PRIVACY.reset_models()
+            fake_privacy = MagicMock()
+            fake_privacy.registry.status.return_value = {}
+            fake_privacy.reset_models.side_effect = finalization_complete.set
 
-            # Now status() must immediately reflect ready without server restart
-            st_after = controller.status()
-            self.assertTrue(st_after["device"]["runtimes"]["torch_cpu"].get("installed", False))
-            self.assertTrue(st_after["registry"]["slots"]["general_pii"]["detector"]["ready"])
+            def blocked_invalidation():
+                refresh_started.set()
+                self.assertTrue(allow_refresh.wait(timeout=5))
+
+            with patch("server.subprocess.Popen", return_value=SuccessfulInstallerProcess()), \
+                 patch("server.PRIVACY", fake_privacy), \
+                 patch.object(server.DEVICE_MANAGER, "invalidate_runtime_state", side_effect=blocked_invalidation), \
+                 patch.object(server.DEVICE_MANAGER, "probe_diagnostics", return_value={}), \
+                 patch("server.model_installer.scan_shared_models_directory", return_value=[]), \
+                 patch("server.model_installer.get_shared_models_dirs", return_value=[]):
+                self.assertTrue(controller.start_install("gliner-pii-edge"))
+                child_may_exit.set()
+                self.assertTrue(refresh_started.wait(timeout=5))
+                during_refresh = controller.status()
+                allow_refresh.set()
+                self.assertTrue(finalization_complete.wait(timeout=5))
+                self.assertTrue(self._wait_until(lambda: controller._process is None))
+                after_refresh = controller.status()
+
+            self.assertTrue(during_refresh["installing"])
+            self.assertFalse(after_refresh["installing"])
 
     def test_ready_without_server_restart(self):
         """Model readiness transitions from false to true without needing application/server restart."""

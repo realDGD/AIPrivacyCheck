@@ -57,7 +57,7 @@ class ModelLifecycleController:
                     pass
 
         with self._lock:
-            running = self._process is not None and self._process.poll() is None
+            running = self._process is not None
 
         device_diag = DEVICE_MANAGER.probe_diagnostics()
         catalog_items = [m.to_dict() for m in list_all_models()]
@@ -90,7 +90,7 @@ class ModelLifecycleController:
 
     def start_install(self, model_name: str = "gliner-pii-edge") -> bool:
         with self._lock:
-            if self._process is not None and self._process.poll() is None:
+            if self._process is not None:
                 return False
             try:
                 with model_installer.model_operation_lock(self.data_dir, model_name, non_blocking=True):
@@ -116,12 +116,19 @@ class ModelLifecycleController:
             process = self._process
 
         def wait_for_install() -> None:
-            process.wait()
-            log_handle.close()
-            DEVICE_MANAGER.invalidate_runtime_state()
-            if process.returncode == 0:
-                DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
-                PRIVACY.reset_models()
+            try:
+                process.wait()
+                log_handle.close()
+                DEVICE_MANAGER.invalidate_runtime_state()
+                if process.returncode == 0:
+                    DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
+                    PRIVACY.reset_models()
+            finally:
+                if not log_handle.closed:
+                    log_handle.close()
+                with self._lock:
+                    if self._process is process:
+                        self._process = None
 
         threading.Thread(target=wait_for_install, daemon=True).start()
         return True

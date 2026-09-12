@@ -40,6 +40,7 @@ class DeviceManager:
         self._settings_store = get_settings_store(self.data_dir)
         self._lock = threading.Lock()
         self._diagnostics_cache: Optional[Dict[str, Any]] = None
+        self._diagnostics_generation = 0
 
     def set_data_dir(self, data_dir: Path) -> None:
         with self._lock:
@@ -47,6 +48,7 @@ class DeviceManager:
             self._rt_manager = get_runtime_manager(data_dir)
             self._settings_store = get_settings_store(data_dir)
             self._diagnostics_cache = None
+            self._diagnostics_generation += 1
 
     def get_requested_device(self) -> str:
         env_dev = os.environ.get("AI_PRIVACY_DEVICE")
@@ -64,6 +66,7 @@ class DeviceManager:
         self._settings_store.set_requested_device(device)
         with self._lock:
             self._diagnostics_cache = None
+            self._diagnostics_generation += 1
         from .worker_client import get_worker_client
         get_worker_client(self.data_dir).stop_all()
         return device
@@ -72,18 +75,19 @@ class DeviceManager:
         """Thread-safely invalidates diagnostics cache."""
         with self._lock:
             self._diagnostics_cache = None
+            self._diagnostics_generation += 1
 
     def invalidate_runtime_state(self) -> None:
         """Thread-safely invalidates both underlying runtime probe cache and diagnostics cache."""
         self._rt_manager.invalidate_probe_cache()
-        with self._lock:
-            self._diagnostics_cache = None
+        self.invalidate_cache()
 
     def probe_diagnostics(self, force_refresh: bool = False) -> Dict[str, Any]:
         """Inspects hardware and framework runtimes without importing heavy frameworks into control plane."""
         with self._lock:
             if not force_refresh and self._diagnostics_cache is not None:
                 return dict(self._diagnostics_cache)
+            probe_generation = self._diagnostics_generation
 
         requested = self.get_requested_device()
         hw_info = self._hw_probe.probe_nvidia()
@@ -156,7 +160,8 @@ class DeviceManager:
         }
 
         with self._lock:
-            self._diagnostics_cache = diag
+            if probe_generation == self._diagnostics_generation:
+                self._diagnostics_cache = diag
         return dict(diag)
 
     def resolve_for_model(self, model_id: str) -> Dict[str, Any]:

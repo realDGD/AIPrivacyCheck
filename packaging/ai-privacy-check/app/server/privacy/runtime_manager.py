@@ -77,6 +77,7 @@ class RuntimeManager:
         self._runner = command_runner or self._default_runner
         self._lock = threading.Lock()
         self._probe_cache: Dict[str, Dict[str, Any]] = {}
+        self._probe_generation = 0
 
     @staticmethod
     def _default_runner(
@@ -134,6 +135,7 @@ class RuntimeManager:
     def invalidate_probe_cache(self, profile: Optional[str] = None) -> None:
         """Thread-safely invalidates cached runtime probe results."""
         with self._lock:
+            self._probe_generation += 1
             if profile is None:
                 self._probe_cache.clear()
             else:
@@ -144,6 +146,7 @@ class RuntimeManager:
         with self._lock:
             if not force_refresh and profile in self._probe_cache:
                 return dict(self._probe_cache[profile])
+            probe_generation = self._probe_generation
 
         descriptor = RUNTIME_PROFILES.get(profile)
         if not descriptor:
@@ -167,7 +170,8 @@ class RuntimeManager:
                 "error": "运行时未安装",
             }
             with self._lock:
-                self._probe_cache[profile] = status
+                if probe_generation == self._probe_generation:
+                    self._probe_cache[profile] = status
             return status
 
         # Execute framework-specific verification probe in isolated subprocess
@@ -247,7 +251,8 @@ class RuntimeManager:
                 }
 
         with self._lock:
-            self._probe_cache[profile] = status
+            if probe_generation == self._probe_generation:
+                self._probe_cache[profile] = status
         return status
 
     def probe_all(self, force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
