@@ -39,6 +39,7 @@ from privacy.runtime_manager import (
     PYTORCH_CUDA_INDEX,
     get_runtime_manager,
 )
+from privacy.runtime_env import build_runtime_env, prepare_runtime_dirs
 from privacy.worker_client import get_worker_client
 
 _LOCK_STATE = threading.local()
@@ -365,11 +366,12 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
                 break
 
     if not interp.is_file():
+        env_init = build_runtime_env(data_dir)
         if uv_bin:
             cmd = [uv_bin, "venv", str(venv_dir)]
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, env=env_init)
         else:
-            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, env=env_init)
 
     def run_install(*args: str) -> None:
         if uv_bin:
@@ -377,7 +379,8 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         else:
             pip_bin = str(venv_dir / "bin" / "pip")
             cmd = [pip_bin, "install", "--disable-pip-version-check", "--no-input", "--upgrade", *args]
-        subprocess.run(cmd, check=True)
+        env_pip = build_runtime_env(data_dir)
+        subprocess.run(cmd, check=True, env=env_pip)
 
     emit(f"正在安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
     run_install("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
@@ -448,7 +451,8 @@ def download_modelscope_model(data_dir: Path, model_id: str) -> Path:
         ]
 
         emit(f"正在通过隔离运行时 [{dl_profile}] 执行 ModelScope 快照下载...")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        env = build_runtime_env(data_dir)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200, env=env)
         if proc.returncode != 0:
             err_msg = proc.stderr.strip() or proc.stdout.strip() or f"Downloader exit code {proc.returncode}"
             try:

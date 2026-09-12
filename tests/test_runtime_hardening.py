@@ -907,6 +907,167 @@ class ModelInstallationHotfixV053Tests(unittest.TestCase):
                 self.assertIn("模型已就绪", status["detail"])
 
 
+class WritableHomeAndStorageHotfixV054Tests(unittest.TestCase):
+    """Regression and defense-in-depth tests for v0.5.4 writable HOME / cache hotfix."""
+
+    def test_lifecycle_script_defines_writable_storage_env(self):
+        """P0: Ensure cmd/main defines and exports writable HOME, XDG, and ML SDK cache paths."""
+        main_script = PROJECT_DIR / "packaging" / "ai-privacy-check" / "cmd" / "main"
+        self.assertTrue(main_script.is_file(), "cmd/main must exist")
+        content = main_script.read_text(encoding="utf-8")
+
+        self.assertIn('APP_HOME="${TRIM_PKGVAR}/home"', content)
+        self.assertIn('CACHE_DIR="${DATA_DIR}/cache"', content)
+        self.assertIn('MODELSCOPE_HOME_DIR="${DATA_DIR}/modelscope-home"', content)
+        self.assertIn('MODELSCOPE_CACHE_DIR="${DATA_DIR}/modelscope"', content)
+        self.assertIn('HF_HOME_DIR="${DATA_DIR}/huggingface"', content)
+        self.assertIn('PIP_CACHE_DIR_PATH="${DATA_DIR}/pip-cache"', content)
+
+        # Ensure env passing
+        self.assertIn('HOME="$APP_HOME"', content)
+        self.assertIn('XDG_CACHE_HOME="$CACHE_DIR"', content)
+        self.assertIn('MODELSCOPE_HOME="$MODELSCOPE_HOME_DIR"', content)
+        self.assertIn('MODELSCOPE_CACHE="$MODELSCOPE_CACHE_DIR"', content)
+        self.assertIn('HF_HOME="$HF_HOME_DIR"', content)
+        self.assertIn('PIP_CACHE_DIR="$PIP_CACHE_DIR_PATH"', content)
+
+    def test_downloader_env_override(self):
+        """P0: ModelScope downloader subprocess must receive all 6 storage env variables redirected to app data."""
+        import model_installer
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = (Path(td) / "pkgvar" / "data").resolve()
+            data_dir.mkdir(parents=True)
+            model_id = "gliner-pii-edge"
+
+            captured_envs = []
+
+            def mock_run(cmd, *args, **kwargs):
+                env = kwargs.get("env")
+                if env:
+                    captured_envs.append(env)
+                # Create fake target files in staging dir so integrity check passes
+                staging = model_installer.get_staging_dir(data_dir, model_id)
+                staging.mkdir(parents=True, exist_ok=True)
+                (staging / "config.json").write_text("{}")
+                (staging / "pytorch_model.bin").write_text("weights")
+                (staging / "tokenizer.json").write_text("{}")
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = ""
+                mock_proc.stderr = ""
+                return mock_proc
+
+            with patch("model_installer.install_isolated_runtime") as mock_rt, \
+                 patch("model_installer.get_runtime_manager") as mock_rm, \
+                 patch("subprocess.run", side_effect=mock_run):
+
+                mock_mgr = MagicMock()
+                mock_mgr.get_modelscope_capable_runtime.return_value = "torch-cpu"
+                mock_mgr.get_python_bin.return_value = Path("/fake/python")
+                mock_rm.return_value = mock_mgr
+
+                target = model_installer.download_modelscope_model(data_dir, model_id)
+                self.assertTrue(target.is_dir())
+                self.assertGreater(len(captured_envs), 0)
+
+                env = captured_envs[0]
+                expected_keys = [
+                    "HOME",
+                    "XDG_CACHE_HOME",
+                    "MODELSCOPE_HOME",
+                    "MODELSCOPE_CACHE",
+                    "HF_HOME",
+                    "PIP_CACHE_DIR",
+                ]
+                for k in expected_keys:
+                    self.assertIn(k, env, f"Key {k} must be in downloader environment")
+                    val_path = Path(env[k]).resolve()
+                    # All paths must be within the temp package root (data_dir.parent)
+                    self.assertTrue(
+                        val_path == data_dir.parent or data_dir.parent in val_path.parents,
+                        f"{k}={val_path} must be within app storage root {data_dir.parent}",
+                    )
+
+    def test_modelscope_downloader_never_uses_system_home(self):
+        """P0: Even if process HOME is set to package user /home/ai-privacy-check, runtime env must override it."""
+        from privacy.runtime_env import build_runtime_env
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = (Path(td) / "var" / "data").resolve()
+            data_dir.mkdir(parents=True)
+
+            with patch.dict(os.environ, {"HOME": "/home/ai-privacy-check"}, clear=False):
+                env = build_runtime_env(data_dir)
+                self.assertNotEqual(env["HOME"], "/home/ai-privacy-check")
+                self.assertEqual(env["HOME"], str(data_dir.parent / "home"))
+                self.assertEqual(env["MODELSCOPE_HOME"], str(data_dir / "modelscope-home"))
+                self.assertEqual(env["MODELSCOPE_CACHE"], str(data_dir / "modelscope"))
+                self.assertEqual(env["HF_HOME"], str(data_dir / "huggingface"))
+                self.assertEqual(env["XDG_CACHE_HOME"], str(data_dir / "cache"))
+                self.assertEqual(env["PIP_CACHE_DIR"], str(data_dir / "pip-cache"))
+
+    def test_runtime_dirs_auto_created(self):
+        """P1: Calling prepare_runtime_dirs must physically create all 6 storage directories."""
+        from privacy.runtime_env import prepare_runtime_dirs
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = (Path(td) / "var" / "data").resolve()
+            # Directory does not exist yet
+            self.assertFalse((data_dir.parent / "home").exists())
+            self.assertFalse((data_dir / "modelscope-home").exists())
+
+            dirs = prepare_runtime_dirs(data_dir)
+
+            self.assertTrue((data_dir.parent / "home").is_dir())
+            self.assertTrue((data_dir / "cache").is_dir())
+            self.assertTrue((data_dir / "modelscope-home").is_dir())
+            self.assertTrue((data_dir / "modelscope").is_dir())
+            self.assertTrue((data_dir / "huggingface").is_dir())
+            self.assertTrue((data_dir / "pip-cache").is_dir())
+
+    def test_worker_process_uses_writable_env(self):
+        """P1: RuntimeWorkerProcess must inject build_runtime_env when data_dir is provided."""
+        from privacy.worker_client import RuntimeWorkerProcess
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = (Path(td) / "var" / "data").resolve()
+            fake_py = Path(td) / "venv" / "bin" / "python"
+            fake_script = Path(td) / "worker.py"
+            fake_py.parent.mkdir(parents=True)
+            fake_py.touch(mode=0o755)
+            fake_script.touch()
+
+            worker = RuntimeWorkerProcess(
+                python_bin=fake_py,
+                worker_script=fake_script,
+                model_id="gliner-pii-edge",
+                profile="torch-cpu",
+                data_dir=data_dir,
+            )
+
+            captured_env = {}
+
+            def mock_popen(cmd, *args, **kwargs):
+                nonlocal captured_env
+                captured_env = kwargs.get("env", {})
+                mock_p = MagicMock()
+                mock_p.pid = 12345
+                mock_p.poll.return_value = None
+                mock_p.stdin = MagicMock()
+                mock_p.stdout = MagicMock()
+                mock_p.stderr = MagicMock()
+                mock_p.stdout.readline.return_value = '{"ok": true, "status": "pong"}\n'
+                return mock_p
+
+            with patch("subprocess.Popen", side_effect=mock_popen):
+                worker.start()
+                self.assertEqual(captured_env.get("HOME"), str(data_dir.parent / "home"))
+                self.assertEqual(captured_env.get("MODELSCOPE_HOME"), str(data_dir / "modelscope-home"))
+                self.assertEqual(captured_env.get("MODELSCOPE_CACHE"), str(data_dir / "modelscope"))
+                worker.terminate()
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 

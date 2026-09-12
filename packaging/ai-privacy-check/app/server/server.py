@@ -100,6 +100,8 @@ class ModelLifecycleController:
             status_dir.mkdir(parents=True, exist_ok=True)
             log_handle = self.log_file.open("ab", buffering=0)
             env = os.environ.copy()
+            from privacy.runtime_env import build_runtime_env
+            env = build_runtime_env(self.data_dir, base_env=env)
             env["APP_DATA_DIR"] = str(self.data_dir)
             env["PYTHONUNBUFFERED"] = "1"
             self._process = subprocess.Popen(
@@ -151,7 +153,7 @@ INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.5.3"
+    server_version = "AIPrivacyCheck/0.5.4"
 
     def log_message(self, fmt: str, *args) -> None:
         safe_path = urlsplit(self.path).path
@@ -232,7 +234,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.5.3",
+                    "version": "0.5.4",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },

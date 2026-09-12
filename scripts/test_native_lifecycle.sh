@@ -30,7 +30,15 @@ export AI_PRIVACY_PYTHON_BIN="$(command -v python3)"
 health="$(curl --silent --show-error --fail \
   --unix-socket "$TRIM_APPDEST/ai-privacy-check.sock" \
   http://localhost/app/ai-privacy-check/api/health)"
-printf '%s' "$health" | python3 -c 'import json, sys; data=json.load(sys.stdin); assert data["ok"] is True; assert data["version"] == "0.5.3"'
+printf '%s' "$health" | python3 -c 'import json, sys; data=json.load(sys.stdin); assert data["ok"] is True; assert data["version"] == "0.5.4"'
+
+for d in "$TRIM_PKGVAR/home" "$TRIM_PKGVAR/data/cache" "$TRIM_PKGVAR/data/modelscope-home" "$TRIM_PKGVAR/data/modelscope" "$TRIM_PKGVAR/data/huggingface" "$TRIM_PKGVAR/data/pip-cache"; do
+  if [ ! -d "$d" ]; then
+    echo "原生生命周期测试失败：目录未创建 $d" >&2
+    exit 1
+  fi
+done
+
 "$LIFECYCLE" stop
 
 if [ -e "$TRIM_APPDEST/ai-privacy-check.sock" ]; then

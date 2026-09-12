@@ -44,6 +44,7 @@ class RuntimeWorkerProcess:
         profile: str,
         device: str = "cpu",
         startup_timeout: int = 45,
+        data_dir: Optional[Path] = None,
     ) -> None:
         self.python_bin = python_bin
         self.worker_script = worker_script
@@ -51,6 +52,7 @@ class RuntimeWorkerProcess:
         self.profile = profile
         self.device = device
         self.startup_timeout = startup_timeout
+        self.data_dir = Path(data_dir).resolve() if data_dir is not None else None
 
         self._process: Optional[subprocess.Popen] = None
         self._pid: Optional[int] = None
@@ -170,6 +172,10 @@ class RuntimeWorkerProcess:
         self._stderr_buffer.clear()
 
         env = os.environ.copy()
+        if self.data_dir is not None:
+            from privacy.runtime_env import build_runtime_env
+            env = build_runtime_env(self.data_dir, base_env=env)
+
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
         env["MODELSCOPE_OFFLINE"] = "1"
@@ -450,6 +456,7 @@ class WorkerClient:
                 profile=profile,
                 device=device,
                 startup_timeout=startup_timeout,
+                data_dir=self.data_dir,
             )
             worker.start()
             self._workers[key] = worker

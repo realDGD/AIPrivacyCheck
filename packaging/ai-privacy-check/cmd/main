@@ -45,16 +45,35 @@ start_app() {
     return 1
   fi
 
-  mkdir -p "$DATA_DIR" "${DATA_DIR}/status" "${DATA_DIR}/modelscope" "${DATA_DIR}/pip-cache"
+  APP_HOME="${TRIM_PKGVAR}/home"
+  CACHE_DIR="${DATA_DIR}/cache"
+  MODELSCOPE_HOME_DIR="${DATA_DIR}/modelscope-home"
+  MODELSCOPE_CACHE_DIR="${DATA_DIR}/modelscope"
+  HF_HOME_DIR="${DATA_DIR}/huggingface"
+  PIP_CACHE_DIR_PATH="${DATA_DIR}/pip-cache"
+
+  mkdir -p \
+    "$APP_HOME" \
+    "$DATA_DIR" \
+    "${DATA_DIR}/status" \
+    "$CACHE_DIR" \
+    "$MODELSCOPE_HOME_DIR" \
+    "$MODELSCOPE_CACHE_DIR" \
+    "$HF_HOME_DIR" \
+    "$PIP_CACHE_DIR_PATH"
   rm -f "$SOCKET_PATH"
   log_msg "Starting AI Privacy Check native service..."
   cd "$APP_DIR" || return 1
   env \
+    HOME="$APP_HOME" \
+    XDG_CACHE_HOME="$CACHE_DIR" \
+    MODELSCOPE_HOME="$MODELSCOPE_HOME_DIR" \
+    MODELSCOPE_CACHE="$MODELSCOPE_CACHE_DIR" \
+    HF_HOME="$HF_HOME_DIR" \
+    PIP_CACHE_DIR="$PIP_CACHE_DIR_PATH" \
     APP_DATA_DIR="$DATA_DIR" \
     APP_BASE_PATH="$GATEWAY_PREFIX" \
     GATEWAY_SOCKET="$SOCKET_PATH" \
-    MODELSCOPE_CACHE="${DATA_DIR}/modelscope" \
-    PIP_CACHE_DIR="${DATA_DIR}/pip-cache" \
     PYTHONDONTWRITEBYTECODE="1" \
     PYTHONUNBUFFERED="1" \
     "$PYTHON_BIN" "$APP_DIR/server.py" >> "$LOG_FILE" 2>&1 &
