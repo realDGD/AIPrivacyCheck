@@ -1,4 +1,4 @@
-# 架构说明 (v0.5.6)
+# 架构说明 (v0.6.0)
 
 ## 设计目标
 
@@ -15,6 +15,7 @@
 11. **第三方 ML 工具可写沙盒收口 (v0.5.4)**：针对 fnOS package 用户环境无系统主目录权限（`/home/ai-privacy-check` 不可写）的特性，通过 `runtime_env.py` 和启动环境显式重定向 `HOME`、`XDG_CACHE_HOME`、`MODELSCOPE_HOME`、`MODELSCOPE_CACHE`、`HF_HOME` 和 `PIP_CACHE_DIR` 到 `${TRIM_PKGVAR}` 内部，保证 ModelScope、Hugging Face 与 PyTorch SDK 稳定初始化与缓存。
 12. **模型权重与计算运行时解耦状态机 (v0.5.5)**：严格分离模型权重安装状态（`model_installed`）与运行时计算就绪状态（`runtime_ready` / `detector_ready`）。切换计算设备（如 CUDA ↔ CPU）若缺少对应运行时，系统保持模型权重为已安装状态，前端提供“安装 CPU/CUDA/推荐运行时”入口；补装运行时直接复用已有模型权重并跳过下载，模型卸载时完整保留运行时虚拟环境。
 13. **事件驱动的运行时状态缓存失效 (v0.5.6)**：主服务通过 `RuntimeManager.invalidate_probe_cache()` 与 `DeviceManager.invalidate_runtime_state()` 实现事件驱动的探针缓存失效机制。当后台 installer 子进程部署完成运行时或本地导入模型后，主服务自动清除旧的未安装/未就绪探测缓存，执行即时刷新并重置检测器，彻底消除旧探测缓存导致前端显示“缺少运行时”的缺陷，无需停用启用或重启应用。
+14. **安全副本与审查卡片双向联动 & 手工划词标注状态机 (v0.6.0)**：在前端引入脱敏文本与审查卡片的双向高亮聚焦联动机制。点击脱敏文本中的标签按钮可平滑滚动、置顶并高亮对应审查卡片；审查卡片点击或定位按钮反向聚焦并脉冲高亮脱敏文本标签。支持在脱敏预览中划词选中文本一键标记为隐私条目（支持通用标记与 16 种标准实体类型选择器）以及范围重选交互模式（隔离恢复当前实体原文并高亮展示，支持重新拖选、防重叠防交叉校验与 Esc/取消快照回滚）。在后端，进一步引入 RuntimeManager 与 DeviceManager 的并发纪元屏障（Generation Epoch Barrier），安装进程生命周期覆盖完成终态清理，彻底消除竞态与提前看到安装完成的问题。
 
 ## 系统架构拓扑
 
