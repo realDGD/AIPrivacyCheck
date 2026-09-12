@@ -1519,7 +1519,7 @@ function updateModelUI(data) {
           cpuNotice.style.padding = "6px 10px";
           cpuNotice.style.borderRadius = "6px";
           cpuNotice.style.lineHeight = "1.4";
-          cpuNotice.textContent = "提示：当前处于 CPU 模式，语义模型推理耗时较长（已放宽至 360 秒超时）。如有配备 NVIDIA GPU，推荐在设备设置中选择 CUDA 加速。";
+          cpuNotice.textContent = "提示：当前处于 CPU 模式，语义模型推理耗时较长（常驻内存约 8-10GB，已放宽单块至 360 秒并设置单请求时间预算）。如有配备 NVIDIA GPU，推荐在设备设置中选择 CUDA 加速。";
           item.append(cpuNotice);
         }
       }

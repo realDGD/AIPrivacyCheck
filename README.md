@@ -2,10 +2,18 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.3`（fnOS Native 原生应用）
+当前版本：`0.6.4`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **MemPrivacy / CUDA 并发安全与整请求语义预算加固 (v0.6.4)**：
+  - **Worker 永久退役契约与防复活安全**：在 `RuntimeWorkerProcess` 引入 `self._retired` 与 `retire()` 方法及 `WorkerRetiredError` 契约。当 Worker 因换代、驱逐或主动停止被移除时，严格调用 `retire()` 并永久终止进程；任何已停退役 Worker 绝不允许被后续并发请求重新唤醒，彻底根除高并发下孤儿 Worker 驻留后台窃取 GPU 显存的问题。
+  - **跨模型 CUDA 执行全局协调器**：引入 `WorkerClient.cuda_execution_session` 上下文协调锁，在多模型级联（MemPrivacy、GLiNER、SiameseUIE 及冒烟测试）中统一排他管理物理 GPU 访问；在 MemPrivacy 独占会话期间，阻止并发 GPU 请求拉起 GLiNER，彻底杜绝导致 CUDA OOM 的时序竞态。
+  - **整请求语义推理时间预算体系**：建立整请求语义推理预算与 Deadline 截止时间体系（CUDA 请求总预算 240 秒，CPU 请求总预算 480 秒）。在锁等待阶段自动扣除消耗时间，若系统繁忙超时则快速返回友好状态；在长文本分块处理循环中动态扣减剩余时间配额，彻底根治大文本长达十数小时的同步阻塞。
+  - **单块超时保护与部分结果安全保留**：多分块长文本遇到单块超时或预算耗尽时，已成功推理完成的分块实体被完整保留并返回，并在前端与日志中明确提示完成度（如“MemPrivacy 仅完成 1/2 个语义分块，结果可能不完整”），兼顾用户体验与隐私覆盖率。
+  - **超长生成截断统一去重告警**：对多个分块发生的生成上限截断统一计数汇总，输出单条精简告警，杜绝大量冗余告警刷屏。
+  - **精准故障分类（CPU 内存 vs CUDA 显存）**：严格区分 CPU 宿主机内存耗尽（`MemoryError` / `bad_alloc`）与 GPU 显存不足（`CUDA out of memory`），避免 CPU 内存压力被误报为显存问题。
+  - **消除 Worker 终止过程的锁争用**：Worker 终止过程移至 `WorkerClient._lock` 外部执行，避免子进程退出等待阻塞其他线程的常规状态查询。
 - **MemPrivacy 语义隐私推理加固与显存/超时治理 (v0.6.3)**：
   - **Exclusive CUDA 独占显存调度**：在显存受限的 GPU 设备（如 Tesla P4 8GB）上运行 MemPrivacy 推理前，自动驱逐并终止其他处于常驻状态的 CUDA worker（如 GLiNER），推理完成后即刻通过 `finally` 释放 MemPrivacy 进程及其占用的全部 GPU 显存，彻底根治顺序推理累积导致的 CUDA OOM。
   - **CUDA OOM 优雅降级与自愈释放**：捕获 Worker 进程报告的致命 CUDA OOM（`OutOfMemoryError` / `CUDA error: out of memory`），立即物理终止 worker 释放显存并将状态置为 FAILED，同时以温和 warning 降级提醒用户（“MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响”），绝不阻断基础规则或普通模型的检测结果。
@@ -108,7 +116,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.1_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.4_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 

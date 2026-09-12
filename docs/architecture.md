@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.3)
+# 架构说明 (v0.6.4)
 
 ## 设计目标
 
@@ -19,6 +19,7 @@
 15. **Unicode 字符切片契约与安全脱敏屏障 (v0.6.1)**：在实体序列化中直接输出 `start_utf16` 与 `end_utf16`，解决 Python 码点（code points）与浏览器 JavaScript UTF-16 code units 计数不一致导致的复杂 Unicode / Emoji / 合字文本脱敏漂移；统一自动检测与手动标注的占位符生成分配器（`allocateReplacementToken`），同实体同原文复用同一占位符；在前端脱敏执行层建立多重健全性检查，遇跨越损坏或占位符碰撞时立即失效脱敏态并阻断复制与外发；全面重构标注交互生命周期，防止跨视图与重检测时的悬挂状态残留。
 16. **GLiNER 实体形态过滤与前端交互布局加固 (v0.6.2)**：针对神经网络实体抽取模型（GLiNER）在中文自然语言长句中将普通短语错误识别为 `USERNAME` 的缺陷，在检测生产链路上层增加严格的形态学与上下文校验过滤器（`_is_plausible_username`），针对中文自然语言叙述默认拒绝提取为 USERNAME，杜绝整句自然语言标点被错误遮盖；仅允许标准 ASCII token 或具有显式账号上下文的 span。在前端交互层，将双向联动滚动彻底收口至内部容器（`scrollElementIntoContainer`），杜绝外层 `document` 产生跳顶抖动；重构高亮脉冲动画移除横向几何平移，防止水平溢出滚动条；并固化桌面端 640px 三栏严格等高容器内部滚动模型。
 17. **MemPrivacy 语义隐私推理加固与显存/超时治理 (v0.6.3)**：在多模型级联执行中，由于 MemPrivacy 1.7B 参数量与生成显存占用较大（~3.6GB 模型权重 + KV Cache），在受限显卡（如 Tesla P4 8GB）上与 GLiNER（~3.0GB）顺序常驻必然触发 CUDA OOM。系统实施 exclusive CUDA 独占调度，在 MemPrivacy CUDA 推理前主动驱逐其他常驻 CUDA Worker（完全保留 CPU worker），并在推理完成后立即在 `finally` 中停止 MemPrivacy 释放 GPU 显存。当 Worker 捕获底层致命 CUDA OOM 时，立即物理终止 worker 进程释放显存，向主控返回结构化 OOM 信号并优雅降级为温和 warning，绝不崩溃主流程；将推理超时与运行设备深度绑定，CPU 模式下放宽 MemPrivacy 推理超时至 360 秒；约束模型单次生成 token 预算至 <=512 tokens；对 >3500 字符长文本实施 3000 字符分块与 200 字符自然句边界重叠切分，并进行跨块实体去重与全局精确坐标安全对齐；模型目录明确规范 1.7B 与 4B 推荐硬件规格，并在前端提供 CPU 慢速模式温和 inline 提示。
+18. **MemPrivacy / CUDA 并发安全与整请求语义预算加固 (v0.6.4)**：在多模型高并发与受限 GPU 显存环境中，针对并发请求可能导致的 Worker 进程复活与显存竞争，引入 `RuntimeWorkerProcess` 永久退役机制（`WorkerRetiredError` 与 `retire()` 契约），确保被驱逐或停用的 Worker 物理终止且绝不被并发请求重新拉起成为无法管控的孤儿常驻进程；引入跨模型 `WorkerClient.cuda_execution_session` 上下文协调锁，在物理 GPU 层面实施全会话排他调度，杜绝 MemPrivacy 推理期间并发拉起 GLiNER 导致 CUDA OOM；建立整请求语义时间预算体系（CUDA 240s / CPU 480s）与 Deadline 截止期控制，锁等待超时快速返回繁忙状态，单块超时安全保留并输出已完成实体及 X/Y 进度告警；对超长生成截断统一去重告警；精确区分 CPU 宿主机内存耗尽与 GPU 显存不足；消除子进程退出等待期间的全局锁争用。
 
 ## 系统架构拓扑
 
