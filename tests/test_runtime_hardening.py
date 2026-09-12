@@ -1967,6 +1967,199 @@ class GlinerUsernameHardeningV062Tests(unittest.TestCase):
                         self.assertEqual(len(usernames), 0, "All narrative false positive usernames must be filtered out")
 
 
+class MemPrivacyRuntimeHardeningV063Tests(unittest.TestCase):
+    """Regression test suite for v0.6.3: MemPrivacy Runtime, VRAM, and Timeout Hardening."""
+
+    def _create_mock_memprivacy_model(self, data_dir: Path) -> Path:
+        model_dir = data_dir / "models" / "memprivacy-1.7b-rl"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "config.json").write_text('{"architectures": ["Qwen2ForCausalLM"]}')
+        (model_dir / "tokenizer.json").write_text('{}')
+        (model_dir / "model.safetensors").write_text('MOCK_WEIGHTS')
+        return model_dir
+
+    def test_cuda_oom_response_classification_and_worker_cleanup(self):
+        """Classification of fatal CUDA OOM response and immediate worker termination."""
+        from privacy.worker_client import is_cuda_oom_response, RuntimeWorkerProcess, STATE_FAILED
+
+        self.assertFalse(is_cuda_oom_response({}))
+        self.assertFalse(is_cuda_oom_response({"ok": True}))
+        self.assertFalse(is_cuda_oom_response({"ok": True, "error": "CUDA out of memory"}))
+        self.assertFalse(is_cuda_oom_response({"ok": False, "error": "Timeout expired"}))
+
+        self.assertTrue(is_cuda_oom_response({"ok": False, "error_type": "OutOfMemoryError"}))
+        self.assertTrue(is_cuda_oom_response({"ok": False, "error_type": "CUDAOutOfMemoryError"}))
+        self.assertTrue(is_cuda_oom_response({"ok": False, "error": "CUDA out of memory. Tried to allocate 1.57 GiB"}))
+        self.assertTrue(is_cuda_oom_response({"ok": False, "error": "RuntimeError: CUDA error: out of memory"}))
+
+        # Test worker process behavior upon OOM response
+        worker = RuntimeWorkerProcess(
+            python_bin=Path(sys.executable),
+            worker_script=Path("/tmp/fake_worker.py"),
+            model_id="memprivacy-1.7b-rl",
+            profile="torch-cuda",
+            device="cuda",
+        )
+        worker._process = MagicMock()
+        worker._process.poll.return_value = None
+        worker._process.stdin = MagicMock()
+        worker._alive = True
+        worker._reader = MagicMock()
+        worker._writer = MagicMock()
+        worker._terminated = False
+        worker.state = "ready"
+
+        oom_resp_json = json.dumps({"ok": False, "error": "CUDA out of memory"})
+        worker._stdout_queue.put(oom_resp_json)
+        with patch.object(worker, "_terminate_locked") as mock_term:
+            with patch("privacy.worker_client.logger"):
+                resp = worker._query_raw_locked({"action": "detect"}, timeout=10)
+                self.assertFalse(resp["ok"])
+                mock_term.assert_called_once()
+                self.assertEqual(worker.state, STATE_FAILED)
+                self.assertIn("CUDA out of memory", worker._last_error)
+
+    def test_stop_other_cuda_workers_eviction(self):
+        """stop_other_cuda_workers must terminate other CUDA workers while preserving CPU and target."""
+        from privacy.worker_client import WorkerClient
+
+        client = WorkerClient(MagicMock())
+        w_gliner_cuda = MagicMock(device="cuda", model_id="gliner-pii-edge")
+        w_siamese_cuda = MagicMock(device="cuda", model_id="siamese-uie")
+        w_gliner_cpu = MagicMock(device="cpu", model_id="gliner-pii-edge")
+        w_mem_cuda = MagicMock(device="cuda", model_id="memprivacy-1.7b-rl")
+
+        client._workers = {
+            "gliner-pii-edge:torch-cuda:cuda": w_gliner_cuda,
+            "siamese-uie:torch-cuda:cuda": w_siamese_cuda,
+            "gliner-pii-edge:torch-cpu:cpu": w_gliner_cpu,
+            "memprivacy-1.7b-rl:torch-cuda:cuda": w_mem_cuda,
+        }
+
+        evicted = client.stop_other_cuda_workers(keep_model_id="memprivacy-1.7b-rl")
+        self.assertIn("gliner-pii-edge:torch-cuda:cuda", evicted)
+        self.assertIn("siamese-uie:torch-cuda:cuda", evicted)
+        self.assertEqual(len(evicted), 2)
+
+        w_gliner_cuda.terminate.assert_called_once()
+        w_siamese_cuda.terminate.assert_called_once()
+        w_gliner_cpu.terminate.assert_not_called()
+        w_mem_cuda.terminate.assert_not_called()
+
+        self.assertIn("gliner-pii-edge:torch-cpu:cpu", client._workers)
+        self.assertIn("memprivacy-1.7b-rl:torch-cuda:cuda", client._workers)
+        self.assertNotIn("gliner-pii-edge:torch-cuda:cuda", client._workers)
+        self.assertNotIn("siamese-uie:torch-cuda:cuda", client._workers)
+
+    def test_no_external_pid_manipulation(self):
+        """WorkerClient must never inspect, signal, or kill any external OS PIDs."""
+        from privacy.worker_client import WorkerClient
+
+        client = WorkerClient(MagicMock())
+        mock_worker = MagicMock(device="cuda", model_id="other-model")
+        client._workers = {"other-model:torch-cuda:cuda": mock_worker}
+
+        with patch("os.kill") as mock_os_kill:
+            client.stop_other_cuda_workers(keep_model_id="target-model")
+            for call in mock_os_kill.call_args_list:
+                pid_arg = call[0][0]
+                self.assertNotEqual(pid_arg, 465815)
+
+    def test_memprivacy_exclusive_cuda_policy(self):
+        """Exclusive CUDA policy: evict others before inference and terminate self after inference."""
+        from privacy.detectors import MemPrivacyDetector
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            # Case A: CUDA mode
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model") as mock_resolve, \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_resolve.return_value = {
+                    "ready": True,
+                    "actual_device": "cuda",
+                    "runtime_profile": "torch-cuda",
+                }
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+                mock_worker.query.return_value = {"ok": True, "entities": []}
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (120, 180)
+                mock_gwc.return_value = mock_client
+
+                entities, warnings = det.detect("Test input for MemPrivacy.")
+                mock_client.stop_other_cuda_workers.assert_called_once_with(keep_model_id="memprivacy-1.7b-rl")
+                mock_client.stop_worker_for_model.assert_called_with("memprivacy-1.7b-rl")
+
+            # Case B: CPU mode
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model") as mock_resolve, \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_resolve.return_value = {
+                    "ready": True,
+                    "actual_device": "cpu",
+                    "runtime_profile": "torch-cpu",
+                }
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+                mock_worker.query.return_value = {"ok": True, "entities": []}
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (150, 360)
+                mock_gwc.return_value = mock_client
+
+                entities, warnings = det.detect("Test input for MemPrivacy CPU.")
+                mock_client.stop_other_cuda_workers.assert_not_called()
+                mock_client.stop_worker_for_model.assert_not_called()
+
+    def test_device_aware_timeouts(self):
+        """Worker timeouts must adapt to model type and active execution device."""
+        from privacy.worker_client import WorkerClient
+
+        client = WorkerClient(MagicMock())
+        # MemPrivacy: 120s/180s for CUDA, 150s/360s for CPU
+        self.assertEqual(client.get_timeout_for_model("memprivacy-1.7b-rl", device="cuda"), (120, 180))
+        self.assertEqual(client.get_timeout_for_model("memprivacy-1.7b-rl", device="cpu"), (150, 360))
+        self.assertEqual(client.get_timeout_for_model("memprivacy-4b-rl", device="cuda"), (120, 180))
+        self.assertEqual(client.get_timeout_for_model("memprivacy-4b-rl", device="cpu"), (150, 360))
+
+        # GLiNER: 30s/45s
+        self.assertEqual(client.get_timeout_for_model("gliner-pii-edge", device="cuda"), (30, 45))
+        self.assertEqual(client.get_timeout_for_model("gliner-pii-edge", device="cpu"), (30, 45))
+
+    def test_memprivacy_oom_fallback_and_warnings(self):
+        """When CUDA OOM occurs during inference, worker terminates, resources are freed, and friendly warning is emitted."""
+        from privacy.detectors import MemPrivacyDetector
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model") as mock_resolve, \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_resolve.return_value = {
+                    "ready": True,
+                    "actual_device": "cuda",
+                    "runtime_profile": "torch-cuda",
+                }
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+                mock_worker.query.return_value = {
+                    "ok": False,
+                    "error_type": "CUDAOutOfMemoryError",
+                    "error": "CUDA out of memory. Tried to allocate 1.57 GiB (GPU 0; 7.42 GiB total capacity)",
+                }
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (120, 180)
+                mock_gwc.return_value = mock_client
+
+                entities, warnings = det.detect("Test input that triggers OOM.")
+                self.assertEqual(len(entities), 0)
+                self.assertTrue(any("MemPrivacy 可用显存不足" in w for w in warnings))
+                mock_client.stop_worker_for_model.assert_called_with("memprivacy-1.7b-rl")
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 

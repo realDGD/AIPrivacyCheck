@@ -33,6 +33,20 @@ STATE_BUSY = "busy"
 STATE_FAILED = "failed"
 
 
+def is_cuda_oom_response(resp: Dict[str, Any]) -> bool:
+    """Checks whether a worker response indicates a fatal CUDA Out-Of-Memory condition."""
+    if not isinstance(resp, dict) or resp.get("ok"):
+        return False
+    err_type = str(resp.get("error_type", ""))
+    err_msg = str(resp.get("error", ""))
+    if err_type in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
+        return True
+    err_lower = err_msg.lower()
+    if "cuda out of memory" in err_lower or "cuda error: out of memory" in err_lower:
+        return True
+    return False
+
+
 class RuntimeWorkerProcess:
     """Represents a long-running, isolated worker process communicating via JSONL."""
 
@@ -363,7 +377,13 @@ class RuntimeWorkerProcess:
 
         try:
             data = json.loads(resp_line.strip())
-            self.state = STATE_READY
+            if is_cuda_oom_response(data):
+                self._terminate_locked()
+                self.state = STATE_FAILED
+                self._last_error = data.get("error", "CUDA out of memory")
+                logger.error(f"Worker [{self.model_id}] 发生致命 CUDA 显存不足 (OOM)，已立即终止进程释放显存。")
+            else:
+                self.state = STATE_READY
             return data
         except Exception as json_exc:
             self.state = STATE_READY
@@ -419,14 +439,18 @@ class WorkerClient:
         else:
             raise ValueError(f"Unknown worker type for model: {model_id}")
 
-    def get_timeout_for_model(self, model_id: str) -> Tuple[int, int]:
-        """Returns (startup_timeout, inference_timeout)."""
-        if "gliner" in model_id.lower():
+    def get_timeout_for_model(self, model_id: str, device: str = "cpu") -> Tuple[int, int]:
+        """Returns (startup_timeout, inference_timeout) adjusted for model and execution device."""
+        m_lower = model_id.lower()
+        if "gliner" in m_lower:
             return 30, 45
-        elif "siamese" in model_id.lower():
+        elif "siamese" in m_lower:
             return 45, 60
-        elif "memprivacy" in model_id.lower():
-            return 120, 180
+        elif "memprivacy" in m_lower:
+            if device == "cuda":
+                return 120, 180
+            else:
+                return 150, 360
         return 45, 60
 
     def get_worker(
@@ -447,7 +471,7 @@ class WorkerClient:
 
             python_bin = self.runtime_manager.get_python_bin(profile)
             worker_script = self._get_worker_script(model_id)
-            startup_timeout, _ = self.get_timeout_for_model(model_id)
+            startup_timeout, _ = self.get_timeout_for_model(model_id, device=device)
 
             worker = RuntimeWorkerProcess(
                 python_bin=python_bin,
@@ -461,6 +485,30 @@ class WorkerClient:
             worker.start()
             self._workers[key] = worker
             return worker
+
+    def stop_other_cuda_workers(self, keep_model_id: Optional[str] = None) -> List[str]:
+        """Terminates and evicts all active CUDA workers except keep_model_id.
+        Leaves CPU workers completely intact.
+        NEVER touches or kills any external processes.
+        """
+        evicted: List[str] = []
+        with self._lock:
+            keys_to_remove = []
+            for key, worker in list(self._workers.items()):
+                if getattr(worker, "device", "") == "cuda":
+                    if keep_model_id is None or worker.model_id != keep_model_id:
+                        keys_to_remove.append(key)
+            for key in keys_to_remove:
+                worker = self._workers.pop(key, None)
+                if worker:
+                    try:
+                        worker.terminate()
+                    except Exception as exc:
+                        logger.warning(f"终止 CUDA worker [{key}] 异常: {exc}")
+                    evicted.append(key)
+        if evicted:
+            logger.info(f"已驱逐 AIPrivacyCheck CUDA worker 以释放显存: {evicted}")
+        return evicted
 
     def stop_worker_for_model(self, model_id: str) -> None:
         with self._lock:
@@ -485,8 +533,11 @@ class WorkerClient:
     ) -> Tuple[bool, Optional[str]]:
         """Executes a synthetic end-to-end smoke inference test to verify model + worker readiness."""
         try:
+            if device == "cuda" and "memprivacy" in model_id.lower():
+                self.stop_other_cuda_workers(keep_model_id=model_id)
+
             worker = self.get_worker(model_id, profile, device=device)
-            _, infer_timeout = self.get_timeout_for_model(model_id)
+            _, infer_timeout = self.get_timeout_for_model(model_id, device=device)
 
             if "gliner" in model_id.lower():
                 sample_text = "My email is test@example.com."
@@ -524,6 +575,9 @@ class WorkerClient:
             return True, None
         except Exception as exc:
             return False, f"冒烟测试异常: {exc}"
+        finally:
+            if device == "cuda" and "memprivacy" in model_id.lower():
+                self.stop_worker_for_model(model_id)
 
 
 _GLOBAL_WORKER_CLIENT: Optional[WorkerClient] = None

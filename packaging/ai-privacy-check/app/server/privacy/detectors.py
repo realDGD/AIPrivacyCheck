@@ -29,7 +29,7 @@ from .model_catalog import (
 from .rules import MultilingualRuleDetector
 from .span_resolver import resolve_semantic_spans
 from .taxonomy import PL2, PL3, PL4, resolve_privacy_level
-from .worker_client import get_worker_client
+from .worker_client import get_worker_client, is_cuda_oom_response
 
 logger = logging.getLogger("ai_privacy.detectors")
 
@@ -293,7 +293,7 @@ class GLiNERDetector(Detector):
         try:
             worker_client = get_worker_client(self.data_dir)
             worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
-            _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id)
+            _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=dev)
 
             labels = list(set(self.GLINER_LABEL_MAP.keys()))
             res = worker.query({
@@ -580,18 +580,44 @@ class MemPrivacyDetector(Detector):
         if not profile:
             return entities, warnings
 
-        try:
-            worker_client = get_worker_client(self.data_dir)
-            worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
-            _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id)
+        worker_client = get_worker_client(self.data_dir)
+        is_cuda = (dev == "cuda")
 
-            res = worker.query({
-                "action": "detect",
-                "model_path": str(model_dir),
-                "text": text,
-                "real_name": "unknown",
-                "max_new_tokens": 2048,
-            }, timeout=infer_timeout)
+        try:
+            if is_cuda:
+                worker_client.stop_other_cuda_workers(keep_model_id=self.active_model_id)
+
+            worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
+            _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=dev)
+
+            try:
+                res = worker.query({
+                    "action": "detect",
+                    "model_path": str(model_dir),
+                    "text": text,
+                    "real_name": "unknown",
+                    "max_new_tokens": 2048,
+                }, timeout=infer_timeout)
+            except Exception as query_exc:
+                err_str = str(query_exc)
+                if "cuda out of memory" in err_str.lower() or "out of memory" in err_str.lower():
+                    warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
+                    try:
+                        worker_client.stop_worker_for_model(self.active_model_id)
+                    except Exception:
+                        pass
+                    return entities, warnings
+                else:
+                    warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {query_exc}")
+                    return entities, warnings
+
+            if is_cuda_oom_response(res):
+                warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
+                try:
+                    worker_client.stop_worker_for_model(self.active_model_id)
+                except Exception:
+                    pass
+                return entities, warnings
 
             if not res.get("ok"):
                 err_msg = res.get("error") or "Worker returned ok=False"
@@ -622,5 +648,11 @@ class MemPrivacyDetector(Detector):
             warnings.extend(resolve_warns)
         except Exception as exc:
             warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {exc}")
+        finally:
+            if is_cuda:
+                try:
+                    worker_client.stop_worker_for_model(self.active_model_id)
+                except Exception as exc:
+                    logger.warning(f"释放 MemPrivacy CUDA worker 显存异常: {exc}")
 
         return entities, warnings
