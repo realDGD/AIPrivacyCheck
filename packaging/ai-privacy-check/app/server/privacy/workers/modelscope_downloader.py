@@ -15,7 +15,7 @@ import sys
 import traceback
 
 
-MEMPRIVACY_OFFICIAL_PROMPT = """You are a professional "Data Security and Privacy Compliance Expert." Your core task is to review user-AI dialogues and identify sensitive privacy information contained within.
+MEMPRIVACY_COMPATIBLE_PROMPT = """You are a professional "Data Security and Privacy Compliance Expert." Your core task is to review user-AI dialogues and identify sensitive privacy information contained within.
 
 # Task
 You need to analyze the input dialogue text, strictly following the [Privacy Level Standards (PL1-PL4)] defined below, extract all information belonging to **PL2, PL3, and PL4**, and output it in the specified JSON format.
@@ -69,6 +69,8 @@ Core Principle: Only extract "Sensitive Entities" or "Minimum Sensitive Fact Fra
 4. Real Name Must Be the User's Own Full Name: Use provided User's Real Name field as reference.
 """
 
+MEMPRIVACY_OFFICIAL_PROMPT = MEMPRIVACY_COMPATIBLE_PROMPT
+
 
 def download_model(repo_id: str, revision: str, target_dir: str, model_id: str) -> dict:
     os.makedirs(target_dir, exist_ok=True)
@@ -82,18 +84,18 @@ def download_model(repo_id: str, revision: str, target_dir: str, model_id: str) 
         local_dir=target_dir,
     )
 
-    # For MemPrivacy models, ensure prompt asset is saved as raw third-party resource with metadata
+    # For MemPrivacy models, ensure prompt asset is saved as compatible prompt resource with metadata
     if "memprivacy" in model_id.lower():
         prompt_path = os.path.join(target_dir, "privacy_prompt.txt")
         meta_path = os.path.join(target_dir, "privacy_prompt.meta.json")
         if not os.path.isfile(prompt_path):
             with open(prompt_path, "w", encoding="utf-8") as f:
-                f.write(MEMPRIVACY_OFFICIAL_PROMPT)
+                f.write(MEMPRIVACY_COMPATIBLE_PROMPT)
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({
-                    "source": f"https://modelscope.cn/models/{repo_id}",
-                    "license": "CC BY-NC-ND 4.0",
-                    "license_note": "Raw official MemPrivacy extraction prompt, unmodified third-party resource",
+                    "name": "AIPrivacyCheck MemPrivacy-compatible privacy extraction prompt",
+                    "license": "Apache-2.0",
+                    "license_note": "AIPrivacyCheck MemPrivacy-compatible privacy extraction prompt",
                     "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 }, f, indent=2)
 

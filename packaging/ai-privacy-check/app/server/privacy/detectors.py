@@ -135,8 +135,9 @@ class GLiNERDetector(Detector):
     def set_active_model(self, model_id: str) -> None:
         with self._lock:
             if model_id != self.active_model_id:
+                old_model_id = self.active_model_id
                 self.active_model_id = model_id
-                get_worker_client(self.data_dir).stop_worker_for_model(self.active_model_id)
+                get_worker_client(self.data_dir).stop_worker_for_model(old_model_id)
 
     def _get_model_dir(self) -> Path:
         return self.data_dir / "models" / self.active_model_id
@@ -421,8 +422,9 @@ class MemPrivacyDetector(Detector):
     def set_active_model(self, model_id: str) -> None:
         with self._lock:
             if model_id != self.active_model_id:
+                old_model_id = self.active_model_id
                 self.active_model_id = model_id
-                get_worker_client(self.data_dir).stop_worker_for_model(self.active_model_id)
+                get_worker_client(self.data_dir).stop_worker_for_model(old_model_id)
 
     def _get_model_dir(self) -> Path:
         return self.data_dir / "models" / self.active_model_id

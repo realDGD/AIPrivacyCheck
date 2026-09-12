@@ -20,6 +20,7 @@ from urllib.parse import unquote, urlsplit
 from privacy import PrivacyService
 from privacy.device import DEVICE_MANAGER
 from privacy.model_catalog import list_all_models
+from privacy.worker_client import get_worker_client
 import model_installer
 
 
@@ -145,7 +146,7 @@ INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.5.0"
+    server_version = "AIPrivacyCheck/0.5.1"
 
     def log_message(self, fmt: str, *args) -> None:
         safe_path = urlsplit(self.path).path
@@ -226,7 +227,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.5.0",
+                    "version": "0.5.1",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },
@@ -385,6 +386,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 device = str(payload.get("device", "auto"))
                 actual = DEVICE_MANAGER.set_requested_device(device)
+                get_worker_client(DATA_DIR).stop_all()
                 PRIVACY.reset_models()
                 self._json(HTTPStatus.OK, {"ok": True, "device": DEVICE_MANAGER.probe_diagnostics()})
             except Exception as exc:
@@ -454,6 +456,7 @@ def run() -> None:
         server.serve_forever()
     finally:
         INSTALLER.stop()
+        get_worker_client(DATA_DIR).stop_all()
         server.server_close()
         if gateway_socket:
             socket_path = Path(gateway_socket)

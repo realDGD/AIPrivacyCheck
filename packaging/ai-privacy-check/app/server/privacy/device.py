@@ -52,16 +52,20 @@ class DeviceManager:
         env_dev = os.environ.get("AI_PRIVACY_DEVICE")
         if env_dev and env_dev.strip().lower() in ("auto", "cpu", "cuda"):
             return env_dev.strip().lower()
-        return self._settings_store.get_requested_device()
+        stored = self._settings_store.get_requested_device()
+        if stored and stored.strip().lower() in ("auto", "cpu", "cuda"):
+            return stored.strip().lower()
+        return "auto"
 
     def set_requested_device(self, device: str) -> str:
         device = device.strip().lower()
         if device not in ("auto", "cpu", "cuda"):
             device = "auto"
-        os.environ["AI_PRIVACY_DEVICE"] = device
         self._settings_store.set_requested_device(device)
         with self._lock:
             self._diagnostics_cache = None
+        from .worker_client import get_worker_client
+        get_worker_client(self.data_dir).stop_all()
         return device
 
     def probe_diagnostics(self, force_refresh: bool = False) -> Dict[str, Any]:

@@ -11,18 +11,26 @@ Features:
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
 from pathlib import Path
+import queue
 import subprocess
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, Optional, Tuple
 
 from privacy.runtime_manager import RuntimeManager, get_runtime_manager
 
 logger = logging.getLogger("ai_privacy.worker_client")
+
+STATE_STOPPED = "stopped"
+STATE_STARTING = "starting"
+STATE_READY = "ready"
+STATE_BUSY = "busy"
+STATE_FAILED = "failed"
 
 
 class RuntimeWorkerProcess:
@@ -45,129 +53,207 @@ class RuntimeWorkerProcess:
         self.startup_timeout = startup_timeout
 
         self._process: Optional[subprocess.Popen] = None
+        self._pid: Optional[int] = None
         self._lock = threading.Lock()
-        self._alive = False
+        self.state: str = STATE_STOPPED
+        self._alive: bool = False
         self._last_error: Optional[str] = None
+
+        self._stdout_queue: queue.Queue[str] = queue.Queue()
+        self._stderr_buffer: Deque[str] = collections.deque(maxlen=100)
+        self._stop_event = threading.Event()
+        self._stdout_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
+
+    def _is_alive_locked(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def _is_ready_locked(self) -> bool:
+        return self.state in (STATE_READY, STATE_BUSY) and self._is_alive_locked()
+
+    def _stdout_reader(self, proc: subprocess.Popen) -> None:
+        while not self._stop_event.is_set():
+            try:
+                if not proc.stdout:
+                    break
+                line = proc.stdout.readline()
+                if not line:
+                    # EOF: process terminated or closed stdout
+                    self._stdout_queue.put("")
+                    break
+                self._stdout_queue.put(line)
+            except Exception:
+                self._stdout_queue.put("")
+                break
+
+    def _stderr_drainer(self, proc: subprocess.Popen) -> None:
+        while not self._stop_event.is_set():
+            try:
+                if not proc.stderr:
+                    break
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                # Truncate each line to 500 chars to avoid memory bloat, strip sensitive data
+                clean_line = line.strip()[:500]
+                if clean_line:
+                    self._stderr_buffer.append(clean_line)
+            except Exception:
+                break
+
+    def _handshake_locked(self, timeout: int) -> Tuple[bool, Optional[str]]:
+        """Sends startup ping and waits for pong to guarantee worker initialization."""
+        ping_req = json.dumps({"action": "ping"}, ensure_ascii=False) + "\n"
+        try:
+            if not self._process or not self._process.stdin:
+                return False, "Worker stdin not open"
+            self._process.stdin.write(ping_req)
+            self._process.stdin.flush()
+        except Exception as exc:
+            return False, f"Failed to write ping to worker: {exc}"
+
+        try:
+            resp_line = self._stdout_queue.get(timeout=timeout)
+        except queue.Empty:
+            return False, f"Worker startup handshake timed out after {timeout}s"
+
+        if not resp_line:
+            ret = self._process.poll() if self._process else -1
+            recent_err = " | ".join(list(self._stderr_buffer)[-3:])
+            return False, f"Worker died during handshake (exit {ret}): {recent_err}"
+
+        try:
+            parsed = json.loads(resp_line.strip())
+            if parsed.get("ok") and (parsed.get("status") == "pong" or parsed.get("pong") is True):
+                return True, None
+            return False, f"Unexpected handshake response: {resp_line.strip()[:200]}"
+        except Exception as exc:
+            return False, f"Invalid handshake JSON: {exc}"
+
+    def _start_locked(self) -> None:
+        if self._is_ready_locked():
+            return
+
+        if self._is_alive_locked():
+            self._terminate_locked()
+
+        if not self.python_bin.is_file():
+            self.state = STATE_FAILED
+            self._last_error = f"Python interpreter not found: {self.python_bin}"
+            raise FileNotFoundError(self._last_error)
+        if not self.worker_script.is_file():
+            self.state = STATE_FAILED
+            self._last_error = f"Worker script not found: {self.worker_script}"
+            raise FileNotFoundError(self._last_error)
+
+        self.state = STATE_STARTING
+        self._stop_event.clear()
+        # Empty queues/buffers
+        while not self._stdout_queue.empty():
+            try:
+                self._stdout_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._stderr_buffer.clear()
+
+        env = os.environ.copy()
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
+        env["MODELSCOPE_OFFLINE"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+
+        venv_root = str(self.python_bin.parent.parent)
+        env["VIRTUAL_ENV"] = venv_root
+        env["PATH"] = f"{venv_root}/bin:{env.get('PATH', '')}"
+
+        cmd = [str(self.python_bin), str(self.worker_script)]
+        try:
+            self._process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+            self._pid = self._process.pid
+            self._alive = True
+            self._last_error = None
+        except Exception as exc:
+            self.state = STATE_FAILED
+            self._alive = False
+            self._last_error = str(exc)
+            logger.error(f"启动模型 worker [{self.model_id}] 失败: {exc}")
+            raise
+
+        # Spawn background reader and drainer threads
+        self._stdout_thread = threading.Thread(
+            target=self._stdout_reader,
+            args=(self._process,),
+            name=f"WorkerStdout-{self.model_id}-{self._pid}",
+            daemon=True,
+        )
+        self._stdout_thread.start()
+
+        self._stderr_thread = threading.Thread(
+            target=self._stderr_drainer,
+            args=(self._process,),
+            name=f"WorkerStderr-{self.model_id}-{self._pid}",
+            daemon=True,
+        )
+        self._stderr_thread.start()
+
+        # Perform explicit startup handshake
+        handshake_ok, handshake_err = self._handshake_locked(timeout=self.startup_timeout)
+        if not handshake_ok:
+            self._terminate_locked()
+            self.state = STATE_FAILED
+            self._last_error = handshake_err
+            raise RuntimeError(f"Worker startup handshake failed for [{self.model_id}]: {handshake_err}")
+
+        self.state = STATE_READY
+        self._alive = True
+        self._last_error = None
 
     def start(self) -> None:
         with self._lock:
-            if self._alive and self._process and self._process.poll() is None:
-                return
-
-            if not self.python_bin.is_file():
-                raise FileNotFoundError(f"Python interpreter not found: {self.python_bin}")
-            if not self.worker_script.is_file():
-                raise FileNotFoundError(f"Worker script not found: {self.worker_script}")
-
-            env = os.environ.copy()
-            # Strict offline inference enforcement
-            env["HF_HUB_OFFLINE"] = "1"
-            env["TRANSFORMERS_OFFLINE"] = "1"
-            env["MODELSCOPE_OFFLINE"] = "1"
-            env["PYTHONUNBUFFERED"] = "1"
-
-            # Set venv environment
-            venv_root = str(self.python_bin.parent.parent)
-            env["VIRTUAL_ENV"] = venv_root
-            env["PATH"] = f"{venv_root}/bin:{env.get('PATH', '')}"
-
-            cmd = [str(self.python_bin), str(self.worker_script)]
-            try:
-                self._process = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                    env=env,
-                )
-                self._alive = True
-                self._last_error = None
-            except Exception as exc:
-                self._alive = False
-                self._last_error = str(exc)
-                logger.error(f"启动模型 worker [{self.model_id}] 进程失败: {exc}")
-                raise
-
-    def query(self, req: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
-        with self._lock:
-            if not self._alive or not self._process or self._process.poll() is not None:
-                self.start()
-
-            if not self._process or not self._process.stdin or not self._process.stdout:
-                return {"ok": False, "error_type": "ProcessError", "error": "Worker process pipes not available"}
-
-            req_copy = dict(req)
-            req_copy.setdefault("device", self.device)
-            payload = json.dumps(req_copy, ensure_ascii=False) + "\n"
-
-            try:
-                self._process.stdin.write(payload)
-                self._process.stdin.flush()
-            except Exception as write_exc:
-                self._terminate_locked()
-                return {"ok": False, "error_type": "PipeWriteError", "error": str(write_exc)}
-
-            # Wait for response line with timeout simulation
-            resp_line = None
-            start_time = time.monotonic()
-
-            # Read stdout line
-            try:
-                resp_line = self._process.stdout.readline()
-            except Exception as read_exc:
-                self._terminate_locked()
-                return {"ok": False, "error_type": "PipeReadError", "error": str(read_exc)}
-
-            if not resp_line:
-                # Subprocess exited or died
-                ret = self._process.poll() if self._process else -1
-                stderr_output = ""
-                if self._process and self._process.stderr:
-                    try:
-                        stderr_output = self._process.stderr.read()
-                    except Exception:
-                        pass
-                self._terminate_locked()
-                return {
-                    "ok": False,
-                    "error_type": "WorkerCrashed",
-                    "error": f"Worker process died with exit code {ret}: {stderr_output.strip()[:200]}",
-                }
-
-            try:
-                return json.loads(resp_line.strip())
-            except Exception as parse_exc:
-                return {
-                    "ok": False,
-                    "error_type": "JSONDecodeError",
-                    "error": f"Failed to parse worker response: {parse_exc}",
-                }
+            self._start_locked()
 
     def _terminate_locked(self) -> None:
+        self._stop_event.set()
+        proc = self._process
+        self._process = None
+        self._pid = None
         self._alive = False
-        if self._process:
+        self.state = STATE_STOPPED
+
+        if proc:
             try:
-                if self._process.poll() is None:
-                    self._process.terminate()
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
                     try:
-                        self._process.wait(timeout=2)
+                        proc.wait(timeout=1.5)
                     except subprocess.TimeoutExpired:
-                        self._process.kill()
-                        self._process.wait(timeout=1)
+                        proc.kill()
+                        proc.wait(timeout=1.0)
             except Exception:
                 pass
             try:
-                if self._process.stdin:
-                    self._process.stdin.close()
-                if self._process.stdout:
-                    self._process.stdout.close()
-                if self._process.stderr:
-                    self._process.stderr.close()
+                if proc.stdout:
+                    proc.stdout.close()
             except Exception:
                 pass
-            self._process = None
+            try:
+                if proc.stderr:
+                    proc.stderr.close()
+            except Exception:
+                pass
 
     def terminate(self) -> None:
         with self._lock:
@@ -175,7 +261,105 @@ class RuntimeWorkerProcess:
 
     def is_alive(self) -> bool:
         with self._lock:
-            return self._alive and self._process is not None and self._process.poll() is None
+            return self._is_alive_locked()
+
+    def is_ready(self) -> bool:
+        with self._lock:
+            return self._is_ready_locked()
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "alive": self._is_alive_locked(),
+                "ready": self._is_ready_locked(),
+                "state": self.state,
+                "pid": self._pid,
+                "profile": self.profile,
+                "device": self.device,
+                "last_error": self._last_error,
+            }
+
+    def _query_raw_locked(self, req: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+        if not self._is_alive_locked() or not self._process or not self._process.stdin:
+            return {"ok": False, "error_type": "ProcessError", "error": "Worker process not running"}
+
+        self.state = STATE_BUSY
+        req_copy = dict(req)
+        req_copy.setdefault("device", self.device)
+        payload = json.dumps(req_copy, ensure_ascii=False) + "\n"
+
+        try:
+            self._process.stdin.write(payload)
+            self._process.stdin.flush()
+        except Exception as write_exc:
+            self._terminate_locked()
+            self.state = STATE_FAILED
+            self._last_error = str(write_exc)
+            return {"ok": False, "error_type": "PipeWriteError", "error": str(write_exc)}
+
+        try:
+            resp_line = self._stdout_queue.get(timeout=timeout)
+        except queue.Empty:
+            # Enforce true timeout: terminate hanging worker
+            self._terminate_locked()
+            self.state = STATE_FAILED
+            self._last_error = f"Worker inference timed out after {timeout}s"
+            logger.warning(f"模型 Worker [{self.model_id}] 执行超时 ({timeout}s)，已强制终止。")
+            return {
+                "ok": False,
+                "error_type": "WorkerTimeout",
+                "error": f"Worker inference timed out after {timeout}s",
+            }
+
+        if not resp_line:
+            # Process terminated or closed pipe unexpectedly
+            ret = self._process.poll() if self._process else -1
+            recent_err = " | ".join(list(self._stderr_buffer)[-3:])
+            self._terminate_locked()
+            self.state = STATE_FAILED
+            self._last_error = f"Worker died (exit {ret}): {recent_err}"
+            return {
+                "ok": False,
+                "error_type": "WorkerCrashed",
+                "error": f"Worker process died unexpectedly with exit code {ret}: {recent_err}",
+            }
+
+        try:
+            data = json.loads(resp_line.strip())
+            self.state = STATE_READY
+            return data
+        except Exception as json_exc:
+            self.state = STATE_READY
+            return {
+                "ok": False,
+                "error_type": "InvalidJSONResponse",
+                "error": f"Failed to parse worker response: {json_exc}",
+            }
+
+    def _query_with_retry_locked(self, req: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+        if not self._is_ready_locked():
+            self._start_locked()
+
+        res = self._query_raw_locked(req, timeout)
+        # Automatic 1-attempt restart on unexpected crash / pipe disconnect (NOT on timeout)
+        if res.get("error_type") in ("PipeWriteError", "WorkerCrashed"):
+            logger.warning(f"Worker [{self.model_id}] 发生崩溃或管道断开，正在尝试自动恢复重启...")
+            self._terminate_locked()
+            try:
+                self._start_locked()
+                return self._query_raw_locked(req, timeout)
+            except Exception as restart_exc:
+                return {
+                    "ok": False,
+                    "error_type": "WorkerRestartFailed",
+                    "error": f"Worker crashed and automatic restart failed: {restart_exc}",
+                }
+
+        return res
+
+    def query(self, req: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
+        with self._lock:
+            return self._query_with_retry_locked(req, timeout)
 
 
 class WorkerClient:
@@ -218,7 +402,7 @@ class WorkerClient:
         with self._lock:
             if key in self._workers:
                 worker = self._workers[key]
-                if worker.is_alive():
+                if worker.is_ready():
                     return worker
                 else:
                     worker.terminate()

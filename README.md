@@ -2,7 +2,7 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.5.0`（fnOS Native 原生应用）
+当前版本：`0.5.1`（fnOS Native 原生应用）
 
 ## 已实现功能
 
@@ -19,9 +19,9 @@
   - **层级仲裁机制**：校验位强规则 > 严格规则 > 专用实体抽取模型 > 生成式推理模型，高置信法定凭据永不被模型覆盖。
 - **控制面与执行面彻底隔离架构（Zero ML Control Plane）**：
   - **主控进程零 ML 依赖**：fnOS Native 主进程（Python 3.12）严格不 import 任何重量级 ML 库（`torch`, `transformers`, `gliner`, `modelscope`, `paddle`），保证控制面极速响应与低内存占用。
-  - **JSONL IPC 隔离 Worker**：所有神经网络模型均由独立 Python Worker 子进程通过标准输入输出行式 JSONL 通信（`privacy/workers/`），支持进程自愈与超时熔断。
-  - **HardwareProbe 与 RuntimeManager**：直接通过 `nvidia-smi` 独立子进程探测主机 GPU，运行时环境统一至 PyTorch 体系（`torch-cpu` / `torch-cuda`）。
-  - **配置持久化**：通过 `settings.json` 原子事务持久化计算设备偏好、检测器槽位与激活模型配置。
+  - **JSONL IPC 隔离 Worker 与高可靠生命周期**：所有神经网络模型均由独立 Python Worker 子进程通过标准输入输出行式 JSONL 通信（`privacy/workers/`）。v0.5.1 引入基于队列的真实超时中断、后台守护式 stderr 消耗（彻底杜绝 OS 管道死锁）、细粒度锁层次与状态机就绪握手，并支持故障单次自动崩溃重启。
+  - **HardwareProbe 与 RuntimeManager**：直接通过 `nvidia-smi` 独立子进程探测主机 GPU，运行时环境统一至 PyTorch 体系（`torch-cpu` / `torch-cuda`），支持 Auto 模式平滑降级与显式 CUDA 失败报错。
+  - **配置持久化与设备切换清理**：通过 `settings.json` 原子事务持久化计算设备偏好，设备切换或模型切换时主动终止旧 Worker 释放内存/显存。
 - **模型共享目录与生命周期管理（ModelScope 社区源）**：
   - **fnOS 共享模型源**：支持通过 fnOS `data-share` 共享目录（`AI 脱敏器/models`）放置离线模型，应用自动扫描并一键导入。
   - **私有应用模型副本**：应用管理副本激活于 `${TRIM_PKGVAR}/data/models/`，与用户源文件隔离，保证运行稳定性。
@@ -85,7 +85,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.5.0_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.5.1_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 

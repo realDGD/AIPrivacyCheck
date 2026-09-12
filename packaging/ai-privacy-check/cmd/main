@@ -55,7 +55,6 @@ start_app() {
     GATEWAY_SOCKET="$SOCKET_PATH" \
     MODELSCOPE_CACHE="${DATA_DIR}/modelscope" \
     PIP_CACHE_DIR="${DATA_DIR}/pip-cache" \
-    AI_PRIVACY_DEVICE="${AI_PRIVACY_DEVICE:-auto}" \
     PYTHONDONTWRITEBYTECODE="1" \
     PYTHONUNBUFFERED="1" \
     "$PYTHON_BIN" "$APP_DIR/server.py" >> "$LOG_FILE" 2>&1 &

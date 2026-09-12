@@ -301,7 +301,9 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
     emit(f"正在对 [{profile}] 运行环境执行真实子进程 Probe 验证...")
     probe_result = rt_manager.probe_profile(profile, force_refresh=True)
     if not probe_result.get("verified", False):
-        emit(f"警告: 运行时 [{profile}] 验证结果未达标: {probe_result.get('error')}")
+        err = probe_result.get("error") or "探针验证失败"
+        emit(f"错误: 运行时 [{profile}] 验证未通过: {err}")
+        raise RuntimeError(f"隔离运行时 [{profile}] 验证未通过: {err}")
 
     metadata = {
         "profile": profile,
@@ -447,12 +449,68 @@ def import_local_model(data_dir: Path, model_id: str, source_path: Path) -> Tupl
         os.replace(staging_dir, target_dir)
 
     shutil.rmtree(staging_dir, ignore_errors=True)
-    emit(f"模型 [{model_id}] 本地导入并激活成功。")
+
+    # Strict synthetic smoke test verification
+    diag = DEVICE_MANAGER.probe_diagnostics()
+    model_res = DEVICE_MANAGER.resolve_for_model(model_id)
+    profile = model_res.get("runtime_profile")
+    device = model_res.get("actual_device", "cpu")
+
+    if not profile:
+        req = DEVICE_MANAGER.get_requested_device()
+        has_nv = bool(diag["hardware"].get("nvidia_available", False))
+        supports_cuda = descriptor.supports_cuda if descriptor else True
+        supports_cpu = descriptor.supports_cpu if descriptor else True
+
+        target_p = PROFILE_TORCH_CUDA if (has_nv and req in ("auto", "cuda") and supports_cuda) else PROFILE_TORCH_CPU
+        if target_p == PROFILE_TORCH_CPU and not supports_cpu:
+            write_state(data_dir, "error", f"模型 [{model_id}] 仅支持 CUDA，但无可用 CUDA 环境", model_id)
+            return False, f"模型 [{model_id}] 仅支持 CUDA，但无可用 CUDA 环境"
+        try:
+            write_state(data_dir, "installing", f"正在为本地导入模型准备 [{target_p}] 隔离运行环境...", model_id)
+            install_isolated_runtime(data_dir, target_p)
+            profile = target_p
+            device = "cuda" if target_p == PROFILE_TORCH_CUDA else "cpu"
+        except Exception as rt_exc:
+            if target_p == PROFILE_TORCH_CUDA and req == "auto" and supports_cpu:
+                emit(f"CUDA 环境安装失败，自动回退 CPU: {rt_exc}")
+                try:
+                    install_isolated_runtime(data_dir, PROFILE_TORCH_CPU)
+                    profile = PROFILE_TORCH_CPU
+                    device = "cpu"
+                except Exception as cpu_exc:
+                    write_state(data_dir, "error", f"隔离运行环境准备失败: {cpu_exc}", model_id)
+                    return False, f"隔离运行环境准备失败: {cpu_exc}"
+            else:
+                write_state(data_dir, "error", f"隔离运行环境准备失败: {rt_exc}", model_id)
+                return False, f"隔离运行环境准备失败: {rt_exc}"
+
+    write_state(data_dir, "testing", "正在执行端到端合成冒烟推理验证...", model_id)
+    client = get_worker_client(data_dir)
+    smoke_ok, smoke_err = client.run_smoke_test(
+        model_id=model_id,
+        model_path=target_dir,
+        profile=profile,
+        device=device,
+    )
+    if not smoke_ok:
+        write_state(data_dir, "error", f"模型已导入但冒烟测试失败: {smoke_err}", model_id)
+        emit(f"警告: 模型 [{model_id}] 冒烟推理未通过 ({smoke_err})，权重已保留在 {target_dir}。")
+        return False, f"模型导入后冒烟推理未通过: {smoke_err}"
+
+    write_state(data_dir, "ready", f"模型已就绪: {target_dir}", model_id)
+    emit(f"模型 [{model_id}] 本地导入并通过冒烟验证成功。")
     return True, f"成功导入模型到 {target_dir}"
 
 
 def uninstall_model(data_dir: Path, model_id: str) -> Tuple[bool, str]:
     """Uninstall private model weights cleanly without touching user shared source models."""
+    try:
+        from privacy.worker_client import get_worker_client
+        get_worker_client(data_dir).stop_worker_for_model(model_id)
+    except Exception as exc:
+        emit(f"停止模型 worker 提示: {exc}")
+
     target_dir = get_model_dir(data_dir, model_id)
     if not target_dir.exists():
         return True, "模型原本未安装"
@@ -473,32 +531,81 @@ def main() -> int:
     model_id = sys.argv[2] if len(sys.argv) > 2 else "gliner-pii-edge"
 
     descriptor = get_model_descriptor(model_id)
-    runtime_fw = descriptor.runtime if descriptor else "torch"
+    if not descriptor:
+        write_state(data_dir, "error", f"未知的模型标识: {model_id}", model_id)
+        emit(f"错误: 未知的模型标识 {model_id}")
+        return 1
+
+    supports_cpu = descriptor.supports_cpu
+    supports_cuda = descriptor.supports_cuda
 
     try:
         if action == "install":
-            # Decide runtime profile based on hardware & request
-            diag = DEVICE_MANAGER.probe_diagnostics()
-            req = diag.get("requested_device", "auto")
+            diag = DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
+            req = DEVICE_MANAGER.get_requested_device()
             has_nv = bool(diag["hardware"].get("nvidia_available", False))
-            target_profile = PROFILE_TORCH_CUDA if (has_nv and req in ("auto", "cuda")) else PROFILE_TORCH_CPU
 
-            write_state(data_dir, "installing", f"正在准备 [{target_profile}] 隔离运行环境...", model_id)
-            install_isolated_runtime(data_dir, target_profile)
+            target_profile: str
+            target_device: str
+
+            if req == "cuda":
+                if not supports_cuda:
+                    raise RuntimeError(f"模型 [{model_id}] 不支持 CUDA 加速。")
+                if not has_nv:
+                    raise RuntimeError("用户显式配置使用 NVIDIA CUDA，但主机未检测到可用 NVIDIA GPU 或驱动。")
+                target_profile = PROFILE_TORCH_CUDA
+                target_device = "cuda"
+                write_state(data_dir, "installing", f"正在准备 [{target_profile}] 隔离运行环境...", model_id)
+                install_isolated_runtime(data_dir, target_profile)
+
+            elif req == "cpu":
+                if not supports_cpu:
+                    raise RuntimeError(f"模型 [{model_id}] 仅支持 CUDA 运行，不支持 CPU 模式。")
+                target_profile = PROFILE_TORCH_CPU
+                target_device = "cpu"
+                write_state(data_dir, "installing", f"正在准备 [{target_profile}] 隔离运行环境...", model_id)
+                install_isolated_runtime(data_dir, target_profile)
+
+            else:  # "auto"
+                if has_nv and supports_cuda:
+                    write_state(data_dir, "installing", f"检测到 NVIDIA GPU，正在准备 [{PROFILE_TORCH_CUDA}] 隔离运行环境...", model_id)
+                    try:
+                        install_isolated_runtime(data_dir, PROFILE_TORCH_CUDA)
+                        target_profile = PROFILE_TORCH_CUDA
+                        target_device = "cuda"
+                    except Exception as cuda_exc:
+                        emit(f"CUDA 运行环境部署失败: {cuda_exc}")
+                        if not supports_cpu:
+                            raise RuntimeError(f"CUDA 运行时不可用，且模型 [{model_id}] 不支持 CPU: {cuda_exc}")
+                        emit("自动降级至 CPU 运行环境...")
+                        write_state(data_dir, "installing", f"CUDA 环境失败，正在回退准备 [{PROFILE_TORCH_CPU}] 运行环境...", model_id)
+                        target_profile = PROFILE_TORCH_CPU
+                        target_device = "cpu"
+                        install_isolated_runtime(data_dir, PROFILE_TORCH_CPU)
+                else:
+                    if not supports_cpu:
+                        raise RuntimeError(f"主机未检测到可用 NVIDIA GPU，且模型 [{model_id}] 不支持 CPU。")
+                    target_profile = PROFILE_TORCH_CPU
+                    target_device = "cpu"
+                    write_state(data_dir, "installing", f"正在准备 [{PROFILE_TORCH_CPU}] 隔离运行环境...", model_id)
+                    install_isolated_runtime(data_dir, PROFILE_TORCH_CPU)
+
             write_state(data_dir, "downloading", "正在从 ModelScope 下载模型权重...", model_id)
             checkpoint_dir = download_modelscope_model(data_dir, model_id)
 
-            # Synthetic smoke test
+            # Strict Synthetic smoke test
             write_state(data_dir, "testing", "正在执行端到端合成冒烟推理验证...", model_id)
             client = get_worker_client(data_dir)
             smoke_ok, smoke_err = client.run_smoke_test(
                 model_id=model_id,
                 model_path=checkpoint_dir,
                 profile=target_profile,
-                device="cuda" if target_profile == PROFILE_TORCH_CUDA else "cpu",
+                device=target_device,
             )
             if not smoke_ok:
-                emit(f"警告: 冒烟推理未通过 ({smoke_err})，但模型权重已就绪。")
+                write_state(data_dir, "error", f"冒烟推理验证未通过: {smoke_err}", model_id)
+                emit(f"错误: 冒烟推理未通过 ({smoke_err})，模型权重已保留供排查。")
+                return 1
 
             write_state(data_dir, "ready", f"模型已就绪: {checkpoint_dir}", model_id)
             emit("安装流程全部完成。")
@@ -509,8 +616,6 @@ def main() -> int:
                 return 1
             source_path = Path(sys.argv[3]).resolve()
             ok, msg = import_local_model(data_dir, model_id, source_path)
-            state = "ready" if ok else "error"
-            write_state(data_dir, state, msg, model_id)
             return 0 if ok else 1
         elif action == "uninstall":
             ok, msg = uninstall_model(data_dir, model_id)

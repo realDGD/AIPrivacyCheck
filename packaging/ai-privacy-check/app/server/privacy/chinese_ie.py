@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from .device import DEVICE_MANAGER
 from .entities import Entity
+from .worker_client import get_worker_client
 
 # Chinese Common Surnames (Top 100+ high frequency)
 COMMON_SURNAMES: Set[str] = {
@@ -230,9 +231,9 @@ class ChineseIEDetector:
     def set_active_model(self, model_id: str) -> None:
         with self._model_lock:
             if model_id != self.active_model_id:
+                old_model_id = self.active_model_id
                 self.active_model_id = model_id
-                from .worker_client import get_worker_client
-                get_worker_client(self.data_dir).stop_worker_for_model("siamese-uie")
+                get_worker_client(self.data_dir).stop_worker_for_model(old_model_id)
 
     def _get_model_dir(self) -> Path:
         return self.data_dir / "models" / self.active_model_id

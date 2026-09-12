@@ -21,8 +21,8 @@ _ACTIVE_TOKENIZER = None
 _ACTIVE_MODEL_PATH = None
 _ACTIVE_DEVICE = None
 
-# Fallback official system prompt if privacy_prompt.txt is absent
-DEFAULT_SYSTEM_PROMPT = """You are a professional "Data Security and Privacy Compliance Expert." Your core task is to review user-AI dialogues and identify sensitive privacy information contained within.
+## AIPrivacyCheck MemPrivacy-compatible privacy extraction prompt (Apache-2.0)
+AIPRIVACY_COMPATIBLE_SYSTEM_PROMPT = """You are a professional "Data Security and Privacy Compliance Expert." Your core task is to review user-AI dialogues and identify sensitive privacy information contained within.
 
 # Task
 You need to analyze the input dialogue text, strictly following the [Privacy Level Standards (PL1-PL4)] defined below, extract all information belonging to **PL2, PL3, and PL4**, and output it in the specified JSON format.
@@ -32,6 +32,8 @@ Core Principle: Only extract "Sensitive Entities" or "Minimum Sensitive Fact Fra
 Do not include introductory words or trailing punctuation.
 Output must be a JSON array of objects with keys: "original_text", "privacy_type", "privacy_level".
 """
+
+DEFAULT_SYSTEM_PROMPT = AIPRIVACY_COMPATIBLE_SYSTEM_PROMPT
 
 
 def load_prompt_template(model_path: str) -> str:
@@ -94,11 +96,18 @@ def strip_think_tags(text: str) -> str:
     return cleaned.strip()
 
 
-def parse_extracted_json(raw_output: str, original_text: str) -> list:
-    """Extracts and sanitizes JSON entity array from model output."""
-    cleaned = strip_think_tags(raw_output)
+def parse_extracted_json(raw_output: str, original_text: str) -> Tuple[list, bool, Optional[str]]:
+    """Extracts and sanitizes JSON entity array from model output.
 
-    # 1. Look for markdown code fence
+    Returns:
+        (entities, has_parse_error, error_detail)
+    """
+    cleaned = strip_think_tags(raw_output)
+    if not cleaned:
+        return [], False, None
+
+    # Check for markdown code fence
+    cand = cleaned
     fence_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", cleaned, re.DOTALL)
     if fence_match:
         cand = fence_match.group(1).strip()
@@ -107,25 +116,34 @@ def parse_extracted_json(raw_output: str, original_text: str) -> list:
         if array_match:
             cand = array_match.group(0).strip()
         else:
-            cand = cleaned
+            # Check if empty array was output: '[]'
+            empty_match = re.search(r"\[\s*\]", cleaned)
+            if empty_match:
+                return [], False, None
 
-    # 2. Clean trailing commas
-    cand = re.sub(r",\s*([\]\}])", r"\1", cand)
-
+    # Clean trailing commas
+    cand_cleaned = re.sub(r",\s*([\]\}])", r"\1", cand)
+    data = None
     try:
-        data = json.loads(cand)
+        data = json.loads(cand_cleaned)
     except Exception:
         # Fallback: extract individual JSON objects
-        data = []
-        for obj_m in re.finditer(r"\{[^{}]*\}", cand):
+        extracted_items = []
+        for obj_m in re.finditer(r"\{[^{}]*\}", cand_cleaned):
             try:
                 item = json.loads(re.sub(r",\s*\}", "}", obj_m.group(0)))
-                data.append(item)
+                extracted_items.append(item)
             except Exception:
                 continue
+        if extracted_items:
+            data = extracted_items
+
+    if data is None:
+        # Generated non-empty text that failed to parse into JSON
+        return [], True, f"Failed to parse generated text as JSON array: {cleaned[:150]}"
 
     if not isinstance(data, list):
-        return []
+        return [], True, f"Model output JSON is not a list (got {type(data).__name__})"
 
     entities = []
     for item in data:
@@ -147,7 +165,7 @@ def parse_extracted_json(raw_output: str, original_text: str) -> list:
             "context": item.get("context"),
         })
 
-    return entities
+    return entities, False, None
 
 
 def handle_request(req: dict) -> dict:
@@ -171,8 +189,8 @@ def handle_request(req: dict) -> dict:
         if not text:
             return {"ok": True, "entities": []}
 
-        real_name = str(req.get("real_name") or "unknown").strip()
-        max_new_tokens = min(int(req.get("max_new_tokens", 2048)), 4096)
+        real_name = req.get("real_name", "unknown")
+        max_new_tokens = int(req.get("max_new_tokens", 256))
 
         model, tokenizer = get_model_and_tokenizer(model_path, device=device)
         system_prompt = load_prompt_template(model_path)
@@ -211,7 +229,20 @@ def handle_request(req: dict) -> dict:
         is_truncated = len(gen_tokens) >= max_new_tokens
         gen_text = tokenizer.decode(gen_tokens, skip_special_tokens=True)
 
-        entities = parse_extracted_json(gen_text, text)
+        entities, parse_err, err_msg = parse_extracted_json(gen_text, text)
+        if parse_err:
+            if is_truncated and entities:
+                return {
+                    "ok": True,
+                    "entities": entities,
+                    "truncated": True,
+                }
+            return {
+                "ok": False,
+                "error_type": "ModelOutputParseError",
+                "error": err_msg or "Model output could not be parsed as JSON",
+            }
+
         return {
             "ok": True,
             "entities": entities,

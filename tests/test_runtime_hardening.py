@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -379,6 +380,247 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(new_store.get_requested_device(), "cuda")
         self.assertFalse(new_store.get_slot_enabled("chinese_ie"))
         self.assertEqual(new_store.get_active_model("general_pii"), "gliner-pii-base")
+
+
+class WorkerLifecycleAndResilienceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.mock_worker_script = self.root / "mock_worker.py"
+        script_content = """import sys, time, json
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    try:
+        data = json.loads(line.strip())
+    except Exception:
+        continue
+    act = data.get("action")
+    if act == "ping":
+        sys.stdout.write(json.dumps({"ok": True, "pong": True}) + "\\n")
+        sys.stdout.flush()
+    elif act == "hang":
+        time.sleep(10)
+    elif act == "crash":
+        sys.exit(139)
+    elif act == "spam_stderr":
+        sys.stderr.write("E" * 131072 + "\\n")
+        sys.stderr.flush()
+        sys.stdout.write(json.dumps({"ok": True, "spammed": True}) + "\\n")
+        sys.stdout.flush()
+    else:
+        sys.stdout.write(json.dumps({"ok": True, "echo": act}) + "\\n")
+        sys.stdout.flush()
+"""
+        self.mock_worker_script.write_text(script_content, encoding="utf-8")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_worker_timeout_enforced(self):
+        from privacy.worker_client import RuntimeWorkerProcess
+        worker = RuntimeWorkerProcess(
+            model_id="mock-model",
+            profile="test-profile",
+            python_bin=Path(sys.executable),
+            worker_script=self.mock_worker_script,
+            startup_timeout=5,
+        )
+        try:
+            start_t = time.time()
+            res = worker.query({"action": "hang"}, timeout=1)
+            duration = time.time() - start_t
+            self.assertFalse(res.get("ok"))
+            self.assertEqual(res.get("error_type"), "WorkerTimeout")
+            self.assertLess(duration, 3.0)
+            self.assertFalse(worker.is_ready())
+        finally:
+            worker.terminate()
+
+    def test_worker_stderr_saturation_no_deadlock(self):
+        from privacy.worker_client import RuntimeWorkerProcess
+        worker = RuntimeWorkerProcess(
+            model_id="mock-model",
+            profile="test-profile",
+            python_bin=Path(sys.executable),
+            worker_script=self.mock_worker_script,
+            startup_timeout=5,
+        )
+        try:
+            res = worker.query({"action": "spam_stderr"}, timeout=5)
+            self.assertTrue(res.get("ok"))
+            self.assertTrue(res.get("spammed"))
+        finally:
+            worker.terminate()
+
+    def test_worker_crash_recovery_no_deadlock(self):
+        from privacy.worker_client import RuntimeWorkerProcess
+        worker = RuntimeWorkerProcess(
+            model_id="mock-model",
+            profile="test-profile",
+            python_bin=Path(sys.executable),
+            worker_script=self.mock_worker_script,
+            startup_timeout=5,
+        )
+        try:
+            res = worker.query({"action": "crash"}, timeout=5)
+            self.assertFalse(res.get("ok"))
+            self.assertIn(res.get("error_type"), ("WorkerCrashed", "WorkerRestartFailed", "PipeWriteError"))
+        finally:
+            worker.terminate()
+
+    def test_model_switch_stops_old_worker(self):
+        from privacy.detectors import GLiNERDetector
+        from privacy.chinese_ie import ChineseIEDetector
+        from privacy.detectors import MemPrivacyDetector
+
+        gliner = GLiNERDetector(self.root, active_model_id="gliner-pii-edge")
+        with patch("privacy.detectors.get_worker_client") as mock_wc:
+            mock_client = MagicMock()
+            mock_wc.return_value = mock_client
+            gliner.set_active_model("gliner-pii-base")
+            self.assertEqual(gliner.active_model_id, "gliner-pii-base")
+            mock_client.stop_worker_for_model.assert_called_once_with("gliner-pii-edge")
+
+        mem = MemPrivacyDetector(self.root, active_model_id="memprivacy-1.7b-rl")
+        with patch("privacy.detectors.get_worker_client") as mock_wc:
+            mock_client = MagicMock()
+            mock_wc.return_value = mock_client
+            mem.set_active_model("memprivacy-4b-rl")
+            self.assertEqual(mem.active_model_id, "memprivacy-4b-rl")
+            mock_client.stop_worker_for_model.assert_called_once_with("memprivacy-1.7b-rl")
+
+        chie = ChineseIEDetector(self.root, active_model_id="siamese-uie")
+        with patch("privacy.chinese_ie.get_worker_client") as mock_wc:
+            mock_client = MagicMock()
+            mock_wc.return_value = mock_client
+            chie.set_active_model("other-chinese-model")
+            self.assertEqual(chie.active_model_id, "other-chinese-model")
+            mock_client.stop_worker_for_model.assert_called_once_with("siamese-uie")
+
+    def test_device_priority_and_persistence(self):
+        from privacy.device import DeviceManager
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AI_PRIVACY_DEVICE", None)
+            dm1 = DeviceManager(self.root)
+            self.assertEqual(dm1.get_requested_device(), "auto")
+
+            dm1.set_requested_device("cuda")
+            self.assertEqual(dm1.get_requested_device(), "cuda")
+
+            dm2 = DeviceManager(self.root)
+            self.assertEqual(dm2.get_requested_device(), "cuda")
+
+        with patch.dict(os.environ, {"AI_PRIVACY_DEVICE": "cpu"}):
+            dm3 = DeviceManager(self.root)
+            self.assertEqual(dm3.get_requested_device(), "cpu")
+
+    def test_strict_smoke_gate_records_error_state(self):
+        import model_installer
+        from privacy.device import DEVICE_MANAGER
+
+        data_dir = self.root / "app_data"
+        data_dir.mkdir(parents=True)
+        model_id = "gliner-pii-edge"
+        model_dir = data_dir / "models" / model_id
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}")
+        (model_dir / "pytorch_model.bin").write_text("dummy")
+        (model_dir / "tokenizer.json").write_text("{}")
+
+        DEVICE_MANAGER.set_data_dir(data_dir)
+        DEVICE_MANAGER.set_requested_device("cpu")
+
+        with patch("model_installer.get_worker_client") as mock_wc, \
+             patch("model_installer.install_isolated_runtime") as mock_rt, \
+             patch("model_installer.download_modelscope_model", return_value=model_dir), \
+             patch.dict(os.environ, {"APP_DATA_DIR": str(data_dir)}, clear=False), \
+             patch("sys.argv", ["model_installer.py", "install", model_id]):
+            mock_client = MagicMock()
+            mock_client.run_smoke_test.return_value = (False, "Inference validation failed")
+            mock_wc.return_value = mock_client
+
+            ret = model_installer.main()
+            self.assertEqual(ret, 1)
+
+            status_file = data_dir / "status" / f"{model_id}-install.json"
+            self.assertTrue(status_file.exists())
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["state"], "error")
+            self.assertIn("冒烟推理验证未通过", status["detail"])
+
+    def test_cuda_auto_fallback_to_cpu(self):
+        import model_installer
+        from privacy.device import DEVICE_MANAGER
+        from privacy.runtime_manager import PROFILE_TORCH_CUDA, PROFILE_TORCH_CPU
+
+        data_dir = self.root / "auto_fallback_test"
+        data_dir.mkdir(parents=True)
+        model_id = "gliner-pii-edge"
+        model_dir = data_dir / "models" / model_id
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}")
+        (model_dir / "pytorch_model.bin").write_text("dummy")
+        (model_dir / "tokenizer.json").write_text("{}")
+
+        DEVICE_MANAGER.set_data_dir(data_dir)
+        DEVICE_MANAGER.set_requested_device("auto")
+
+        installed_profiles = []
+
+        def mock_install_runtime(d_dir, profile):
+            if profile == PROFILE_TORCH_CUDA:
+                raise RuntimeError("CUDA driver missing")
+            installed_profiles.append(profile)
+            return Path("/fake/venv")
+
+        with patch("model_installer.install_isolated_runtime", side_effect=mock_install_runtime), \
+             patch("model_installer.download_modelscope_model", return_value=model_dir), \
+             patch("model_installer.get_worker_client") as mock_wc, \
+             patch.object(DEVICE_MANAGER._hw_probe, "probe_nvidia", return_value={"nvidia_available": True}), \
+             patch.dict(os.environ, {"APP_DATA_DIR": str(data_dir)}, clear=False), \
+             patch("sys.argv", ["model_installer.py", "install", model_id]):
+            mock_client = MagicMock()
+            mock_client.run_smoke_test.return_value = (True, None)
+            mock_wc.return_value = mock_client
+
+            ret = model_installer.main()
+            self.assertEqual(ret, 0)
+            self.assertIn(PROFILE_TORCH_CPU, installed_profiles)
+
+            status_file = data_dir / "status" / f"{model_id}-install.json"
+            self.assertTrue(status_file.exists())
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["state"], "ready")
+
+    def test_cuda_explicit_failure_no_silent_cpu_fallback(self):
+        import model_installer
+        from privacy.device import DEVICE_MANAGER
+        from privacy.runtime_manager import PROFILE_TORCH_CUDA
+
+        data_dir = self.root / "explicit_cuda_test"
+        data_dir.mkdir(parents=True)
+        model_id = "gliner-pii-edge"
+
+        DEVICE_MANAGER.set_data_dir(data_dir)
+        DEVICE_MANAGER.set_requested_device("cuda")
+
+        def mock_install_runtime(d_dir, profile):
+            raise RuntimeError("NVIDIA driver failure")
+
+        with patch("model_installer.install_isolated_runtime", side_effect=mock_install_runtime), \
+             patch.object(DEVICE_MANAGER._hw_probe, "probe_nvidia", return_value={"nvidia_available": True}), \
+             patch.dict(os.environ, {"APP_DATA_DIR": str(data_dir)}, clear=False), \
+             patch("sys.argv", ["model_installer.py", "install", model_id]):
+            ret = model_installer.main()
+            self.assertEqual(ret, 1)
+
+            status_file = data_dir / "status" / f"{model_id}-install.json"
+            self.assertTrue(status_file.exists())
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["state"], "error")
+            self.assertIn("NVIDIA driver failure", status["detail"])
 
 
 class IntegrationSmokeTests(unittest.TestCase):
