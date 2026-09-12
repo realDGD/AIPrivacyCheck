@@ -131,6 +131,14 @@ class RuntimeManager:
         installed_flag = self.profile_dir(profile) / "installed.json"
         return interp is not None and installed_flag.is_file()
 
+    def invalidate_probe_cache(self, profile: Optional[str] = None) -> None:
+        """Thread-safely invalidates cached runtime probe results."""
+        with self._lock:
+            if profile is None:
+                self._probe_cache.clear()
+            else:
+                self._probe_cache.pop(profile, None)
+
     def probe_profile(self, profile: str, force_refresh: bool = False) -> Dict[str, Any]:
         """Probes an isolated runtime profile via its dedicated interpreter."""
         with self._lock:

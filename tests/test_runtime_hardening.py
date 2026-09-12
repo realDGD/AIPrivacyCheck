@@ -1350,6 +1350,223 @@ class RuntimeReadinessAndStateSeparationV055Tests(unittest.TestCase):
                 self.assertEqual(st_cpu["device"], "none")
 
 
+
+class RuntimeCacheInvalidationV056Tests(unittest.TestCase):
+    """Regression tests for v0.5.6 event-driven runtime probe and device diagnostics cache invalidation."""
+
+    def test_runtime_probe_cache_invalidation(self):
+        """RuntimeManager must invalidate probe cache on demand, allowing updated runtime state to reflect."""
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            rm = RuntimeManager(data_dir)
+
+            # 1. Initial probe: torch-cpu not installed
+            res1 = rm.probe_profile("torch-cpu")
+            self.assertFalse(res1["installed"])
+            self.assertIn("torch-cpu", rm._probe_cache)
+
+            # 2. Simulate installation of torch-cpu in filesystem
+            profile_dir = rm.profile_dir("torch-cpu")
+            venv_bin = profile_dir / "venv" / "bin"
+            venv_bin.mkdir(parents=True, exist_ok=True)
+            mock_python = venv_bin / "python3"
+            mock_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mock_python.chmod(0o755)
+
+            # Mock runner for probe command
+            mock_probe_out = json.dumps({
+                "ok": True,
+                "framework": "torch",
+                "framework_version": "2.4.0+cpu",
+                "device_target": "cpu",
+                "cuda_available": False,
+                "device_count": 0,
+                "device_name": None,
+                "cuda_version": None,
+                "interpreter": str(mock_python),
+                "error": None,
+            })
+            rm._runner = lambda cmd, **kwargs: (0, mock_probe_out, "")
+
+            # Without cache invalidation: hits old cache
+            res_cached = rm.probe_profile("torch-cpu")
+            self.assertFalse(res_cached["installed"])
+
+            # Call invalidate_probe_cache with specific profile
+            rm.invalidate_probe_cache("torch-cpu")
+            self.assertNotIn("torch-cpu", rm._probe_cache)
+
+            # Now probe again: reflects new installed state
+            res_fresh = rm.probe_profile("torch-cpu")
+            self.assertTrue(res_fresh["installed"])
+            self.assertTrue(res_fresh["verified"])
+
+            # Call invalidate_probe_cache without arguments: clears entire cache
+            rm.invalidate_probe_cache()
+            self.assertEqual(len(rm._probe_cache), 0)
+
+    def test_device_diagnostics_cache_invalidation(self):
+        """DeviceManager.invalidate_runtime_state must clear both runtime probe cache and device diagnostics."""
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            rm = RuntimeManager(data_dir)
+            dm = DeviceManager(data_dir=data_dir, runtime_manager=rm)
+
+            # 1. Initial diagnostics: torch-cpu uninstalled
+            diag1 = dm.probe_diagnostics()
+            self.assertFalse(diag1["runtimes"]["torch_cpu"].get("installed", False))
+            self.assertIsNotNone(dm._diagnostics_cache)
+
+            # 2. Simulate torch-cpu installed
+            profile_dir = rm.profile_dir("torch-cpu")
+            venv_bin = profile_dir / "venv" / "bin"
+            venv_bin.mkdir(parents=True, exist_ok=True)
+            mock_python = venv_bin / "python3"
+            mock_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mock_python.chmod(0o755)
+
+            mock_probe_out = json.dumps({
+                "ok": True,
+                "framework": "torch",
+                "framework_version": "2.4.0+cpu",
+                "device_target": "cpu",
+                "cuda_available": False,
+                "device_count": 0,
+                "device_name": None,
+                "cuda_version": None,
+                "interpreter": str(mock_python),
+                "error": None,
+            })
+            rm._runner = lambda cmd, **kwargs: (0, mock_probe_out, "")
+
+            # Without invalidation: returns old cached diagnostics
+            diag_cached = dm.probe_diagnostics()
+            self.assertFalse(diag_cached["runtimes"]["torch_cpu"].get("installed", False))
+
+            # Call invalidate_runtime_state
+            dm.invalidate_runtime_state()
+            self.assertIsNone(dm._diagnostics_cache)
+            self.assertNotIn("torch-cpu", rm._probe_cache)
+
+            # Next probe_diagnostics reflects new installed state
+            diag_fresh = dm.probe_diagnostics()
+            self.assertTrue(diag_fresh["runtimes"]["torch_cpu"].get("installed", False))
+
+    def test_installer_completion_integration(self):
+        """Installer child process completion must automatically invalidate caches and reflect ready in status()."""
+        import server
+        from server import ModelLifecycleController
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            # Create model weights
+            m_dir = data_dir / "models" / "gliner-pii-edge"
+            m_dir.mkdir(parents=True, exist_ok=True)
+            (m_dir / "gliner_config.json").write_text("{}", encoding="utf-8")
+            (m_dir / "model.safetensors").write_text("fake", encoding="utf-8")
+            (m_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+            controller = ModelLifecycleController(data_dir)
+            server.DEVICE_MANAGER.set_data_dir(data_dir)
+            server.DEVICE_MANAGER.set_requested_device("cpu")
+            server.PRIVACY = server.PrivacyService(data_dir)
+
+            # Before installation: torch-cpu not installed
+            st_before = controller.status()
+            self.assertFalse(st_before["device"]["runtimes"]["torch_cpu"].get("installed", False))
+            self.assertFalse(st_before["registry"]["slots"]["general_pii"]["detector"]["ready"])
+
+            # Simulate child process creating runtime
+            rm = server.DEVICE_MANAGER._rt_manager
+            profile_dir = rm.profile_dir("torch-cpu")
+            venv_bin = profile_dir / "venv" / "bin"
+            venv_bin.mkdir(parents=True, exist_ok=True)
+            mock_python = venv_bin / "python3"
+            mock_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mock_python.chmod(0o755)
+
+            mock_probe_out = json.dumps({
+                "ok": True,
+                "framework": "torch",
+                "framework_version": "2.4.0+cpu",
+                "device_target": "cpu",
+                "cuda_available": False,
+                "device_count": 0,
+                "device_name": None,
+                "cuda_version": None,
+                "interpreter": str(mock_python),
+                "error": None,
+            })
+            rm._runner = lambda cmd, **kwargs: (0, mock_probe_out, "")
+
+            # Execute cache invalidation and refresh flow as done in wait_for_install
+            server.DEVICE_MANAGER.invalidate_runtime_state()
+            server.DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
+            server.PRIVACY.reset_models()
+
+            # Now status() must immediately reflect ready without server restart
+            st_after = controller.status()
+            self.assertTrue(st_after["device"]["runtimes"]["torch_cpu"].get("installed", False))
+            self.assertTrue(st_after["registry"]["slots"]["general_pii"]["detector"]["ready"])
+
+    def test_ready_without_server_restart(self):
+        """Model readiness transitions from false to true without needing application/server restart."""
+        import server
+        from server import ModelLifecycleController
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            m_dir = data_dir / "models" / "gliner-pii-edge"
+            m_dir.mkdir(parents=True, exist_ok=True)
+            (m_dir / "gliner_config.json").write_text("{}", encoding="utf-8")
+            (m_dir / "model.safetensors").write_text("fake", encoding="utf-8")
+            (m_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+            controller = ModelLifecycleController(data_dir)
+            server.DEVICE_MANAGER.set_data_dir(data_dir)
+            server.DEVICE_MANAGER.set_requested_device("cpu")
+            server.PRIVACY = server.PrivacyService(data_dir)
+
+            # 1. State before: not ready
+            st1 = controller.status()
+            self.assertTrue(st1["registry"]["slots"]["general_pii"]["detector"]["installed"])
+            self.assertFalse(st1["registry"]["slots"]["general_pii"]["detector"]["ready"])
+
+            # 2. Simulate runtime installation finishing in background
+            rm = server.DEVICE_MANAGER._rt_manager
+            profile_dir = rm.profile_dir("torch-cpu")
+            venv_bin = profile_dir / "venv" / "bin"
+            venv_bin.mkdir(parents=True, exist_ok=True)
+            mock_python = venv_bin / "python3"
+            mock_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mock_python.chmod(0o755)
+
+            mock_probe_out = json.dumps({
+                "ok": True,
+                "framework": "torch",
+                "framework_version": "2.4.0+cpu",
+                "device_target": "cpu",
+                "cuda_available": False,
+                "device_count": 0,
+                "device_name": None,
+                "cuda_version": None,
+                "interpreter": str(mock_python),
+                "error": None,
+            })
+            rm._runner = lambda cmd, **kwargs: (0, mock_probe_out, "")
+
+            # Invalidate runtime state
+            server.DEVICE_MANAGER.invalidate_runtime_state()
+            server.DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
+            server.PRIVACY.reset_models()
+
+            # 3. Next status check on SAME controller and SAME server instance
+            st2 = controller.status()
+            self.assertTrue(st2["registry"]["slots"]["general_pii"]["detector"]["installed"])
+            self.assertTrue(st2["registry"]["slots"]["general_pii"]["detector"]["ready"])
+            self.assertEqual(st2["registry"]["slots"]["general_pii"]["detector"]["device"], "cpu")
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 

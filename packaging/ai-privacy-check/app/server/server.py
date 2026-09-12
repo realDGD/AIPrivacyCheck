@@ -26,11 +26,12 @@ import model_installer
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
-DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/data")).resolve()
+DATA_DIR = Path(os.environ.get("APP_DATA_DIR") or (os.environ.get("TRIM_PKGVAR", "/tmp") + "/data")).resolve()
 BASE_PATH = os.environ.get("APP_BASE_PATH", "").rstrip("/")
 MAX_BODY_BYTES = 2 * 1024 * 1024
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+DEVICE_MANAGER.set_data_dir(DATA_DIR)
 PRIVACY = PrivacyService(DATA_DIR)
 
 
@@ -117,7 +118,9 @@ class ModelLifecycleController:
         def wait_for_install() -> None:
             process.wait()
             log_handle.close()
+            DEVICE_MANAGER.invalidate_runtime_state()
             if process.returncode == 0:
+                DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
                 PRIVACY.reset_models()
 
         threading.Thread(target=wait_for_install, daemon=True).start()
@@ -126,12 +129,15 @@ class ModelLifecycleController:
     def import_model(self, model_name: str, source_path: str) -> Tuple[bool, str]:
         path = Path(source_path).resolve()
         ok, msg = model_installer.import_local_model(self.data_dir, model_name, path)
+        DEVICE_MANAGER.invalidate_runtime_state()
         if ok:
+            DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
             PRIVACY.reset_models()
         return ok, msg
 
     def uninstall_model(self, model_name: str) -> Tuple[bool, str]:
         ok, msg = model_installer.uninstall_model(self.data_dir, model_name)
+        DEVICE_MANAGER.invalidate_cache()
         if ok:
             PRIVACY.reset_models()
         return ok, msg
@@ -153,7 +159,7 @@ INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.5.5"
+    server_version = "AIPrivacyCheck/0.5.6"
 
     def log_message(self, fmt: str, *args) -> None:
         safe_path = urlsplit(self.path).path
@@ -234,7 +240,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.5.5",
+                    "version": "0.5.6",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },

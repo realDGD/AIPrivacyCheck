@@ -68,6 +68,17 @@ class DeviceManager:
         get_worker_client(self.data_dir).stop_all()
         return device
 
+    def invalidate_cache(self) -> None:
+        """Thread-safely invalidates diagnostics cache."""
+        with self._lock:
+            self._diagnostics_cache = None
+
+    def invalidate_runtime_state(self) -> None:
+        """Thread-safely invalidates both underlying runtime probe cache and diagnostics cache."""
+        self._rt_manager.invalidate_probe_cache()
+        with self._lock:
+            self._diagnostics_cache = None
+
     def probe_diagnostics(self, force_refresh: bool = False) -> Dict[str, Any]:
         """Inspects hardware and framework runtimes without importing heavy frameworks into control plane."""
         with self._lock:
