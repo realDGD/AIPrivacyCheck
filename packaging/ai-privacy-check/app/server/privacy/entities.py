@@ -128,6 +128,20 @@ PRIORITY: Dict[str, int] = {
 }
 
 
+def codepoint_index_to_utf16(text: Optional[str], index: int) -> int:
+    """Converts a Python Unicode codepoint character index into a UTF-16 code unit offset.
+
+    Browser JavaScript String.slice and Selection/Range measure character offsets in
+    UTF-16 code units (where surrogate pairs count as 2 code units). This helper provides
+    the bridge between Python's internal codepoint indices and the browser's view coordinates.
+    """
+    if not text or index <= 0:
+        return 0
+    if index >= len(text):
+        return len(text.encode("utf-16-le")) // 2
+    return len(text[:index].encode("utf-16-le")) // 2
+
+
 @dataclass(frozen=True)
 class Entity:
     """One detected span using Python's half-open character offsets."""
@@ -162,12 +176,16 @@ class Entity:
             confidence=max(self.confidence, confidence),
         )
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self, text: Optional[str] = None) -> Dict[str, object]:
+        start_u16 = codepoint_index_to_utf16(text, self.start) if text is not None else self.start
+        end_u16 = codepoint_index_to_utf16(text, self.end) if text is not None else self.end
         payload: Dict[str, object] = {
             "type": self.entity_type,
             "label": self.label_zh,
             "start": self.start,
             "end": self.end,
+            "start_utf16": start_u16,
+            "end_utf16": end_u16,
             "text": self.text,
             "confidence": round(float(self.confidence), 4),
             "sources": list(self.sources),

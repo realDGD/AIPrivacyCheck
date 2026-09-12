@@ -96,7 +96,7 @@ class PrivacyService:
             counts[entity.entity_type] = counts.get(entity.entity_type, 0) + 1
 
         return {
-            "entities": [entity.to_dict() for entity in merged],
+            "entities": [entity.to_dict(text=text) for entity in merged],
             "counts": counts,
             "engines": engines,
             "warnings": warnings,
