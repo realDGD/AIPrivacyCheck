@@ -186,6 +186,89 @@ class GLiNERDetector(Detector):
         with self._lock:
             get_worker_client(self.data_dir).stop_worker_for_model(self.active_model_id)
 
+    @staticmethod
+    def _is_plausible_username(
+        text: str,
+        start: int,
+        end: int,
+        entity_text: str,
+    ) -> bool:
+        """Plausibility filter for GLiNER USERNAME predictions to eliminate Chinese false positives."""
+        if not entity_text:
+            return False
+        val = entity_text.strip()
+        if len(val) < 2 or len(val) > 40:
+            return False
+
+        # Sentence/clause-breaking punctuation is unacceptable in any username
+        clause_punctuations = ("，", "。", "！", "？", "；", "…", "\n", "\r", ",", ";", "!", "?")
+        if any(ch in val for ch in clause_punctuations):
+            return False
+
+        # Check for CJK characters
+        has_cjk = any(
+            "\u4e00" <= ch <= "\u9fff" or "\u3400" <= ch <= "\u4dbf" or "\u20000" <= ch <= "\u2ceaf"
+            for ch in val
+        )
+
+        if not has_cjk:
+            # Case A: ASCII / Latin token-like username (allowed without explicit context)
+            if re.search(r"\s", val):
+                return False
+            if not re.search(r"[a-zA-Z0-9]", val):
+                return False
+            clean_token = val.rstrip(".")
+            if len(clean_token) >= 2 and re.fullmatch(r"[a-zA-Z0-9_@.-]+", clean_token):
+                return True
+            return False
+
+        # Case B: CJK / Chinese / CJK-heavy username
+        # Must have explicit account context in nearby local window (preceding ~20-30 chars, following ~10-20 chars)
+        pre_window = text[max(0, start - 30):start]
+        post_window = text[end:min(len(text), end + 20)]
+
+        context_indicators = (
+            "用户名",
+            "用户名称",
+            "登录账号",
+            "登录帐号",
+            "登录id",
+            "登录ID",
+            "账号",
+            "账户名",
+            "帐号",
+            "username",
+            "user name",
+            "login id",
+            "account name",
+        )
+        pre_lower = pre_window.lower()
+        post_lower = post_window.lower()
+
+        has_explicit_context = any(ind in pre_lower or ind in post_lower for ind in context_indicators)
+        if not has_explicit_context:
+            return False
+
+        # Even with context, CJK span must not exceed reasonable handle length
+        if len(val) > 20:
+            return False
+
+        # Must not contain excessive whitespace
+        if len(val.split()) > 2:
+            return False
+
+        # Narrative words indicate natural language sentence rather than a username
+        narrative_words = (
+            "今天", "明天", "昨天", "去了", "来了", "然后", "打电话", "联系了",
+            "上班", "下班", "吃饭", "回家", "发生", "看到", "听到", "觉得",
+            "因为", "所以", "如果", "但是", "而且", "不过", "由于", "不仅",
+            "公司", "会议", "工作", "报告", "讨论", "协商", "安排",
+        )
+        if any(w in val for w in narrative_words):
+            return False
+
+        return True
+
     def detect(self, text: str) -> Tuple[List[Entity], List[str]]:
         entities: List[Entity] = []
         warnings: List[str] = []
@@ -242,6 +325,9 @@ class GLiNERDetector(Detector):
                     continue
 
                 mapped_type, sem_type = self.GLINER_LABEL_MAP.get(label_raw, (label_raw.upper(), label_raw))
+
+                if mapped_type == "USERNAME" and not self._is_plausible_username(text, start, end, actual_text):
+                    continue
                 pl = resolve_privacy_level(mapped_type, semantic_type=sem_type)
                 entities.append(
                     Entity(

@@ -1886,6 +1886,87 @@ class CorrectnessHardeningV061Tests(unittest.TestCase):
                 server.DEVICE_MANAGER.probe_diagnostics = orig_probe
 
 
+class GlinerUsernameHardeningV062Tests(unittest.TestCase):
+    """P1: GLiNER username plausibility filtering regression tests (v0.6.2)."""
+
+    def test_gliner_rejects_chinese_narrative_as_username(self):
+        from privacy.detectors import GLiNERDetector
+        text = "张三今天来了，稍后张三又打电话过来。"
+
+        # Narrative spans from real reproducer must be rejected
+        self.assertFalse(GLiNERDetector._is_plausible_username(text, 0, 6, "张三今天来了"))
+        self.assertFalse(GLiNERDetector._is_plausible_username(text, 6, 7, "，"))
+        self.assertFalse(GLiNERDetector._is_plausible_username(text, 8, 17, "稍后张三又打电话过来"))
+
+        # Pure CJK names or short phrases without username context must also be rejected
+        self.assertFalse(GLiNERDetector._is_plausible_username(text, 0, 2, "张三"))
+        self.assertFalse(GLiNERDetector._is_plausible_username("王五今天上班", 0, 2, "王五"))
+        self.assertFalse(GLiNERDetector._is_plausible_username("稍后联系李雷", 4, 6, "李雷"))
+
+    def test_gliner_accepts_ascii_username_token(self):
+        from privacy.detectors import GLiNERDetector
+
+        # Standard ASCII token usernames are accepted without explicit context
+        self.assertTrue(GLiNERDetector._is_plausible_username("My username is ecarter92.", 15, 24, "ecarter92"))
+        self.assertTrue(GLiNERDetector._is_plausible_username("Contact john.smith", 8, 18, "john.smith"))
+        self.assertTrue(GLiNERDetector._is_plausible_username("user_123 logged in", 0, 8, "user_123"))
+        self.assertTrue(GLiNERDetector._is_plausible_username("admin-test", 0, 10, "admin-test"))
+        self.assertTrue(GLiNERDetector._is_plausible_username("zimo_zhou96", 0, 11, "zimo_zhou96"))
+        self.assertTrue(GLiNERDetector._is_plausible_username("camille.m91", 0, 11, "camille.m91"))
+        self.assertTrue(GLiNERDetector._is_plausible_username("登录账号为 zhangsan2026", 6, 18, "zhangsan2026"))
+
+    def test_gliner_accepts_cjk_username_with_explicit_context(self):
+        from privacy.detectors import GLiNERDetector
+
+        # CJK usernames with nearby explicit account indicators are accepted
+        t1 = "用户名：测试用户01"
+        self.assertTrue(GLiNERDetector._is_plausible_username(t1, 4, 10, "测试用户01"))
+
+        t2 = "用户名是 张三2026"
+        self.assertTrue(GLiNERDetector._is_plausible_username(t2, 5, 11, "张三2026"))
+
+        t3 = "登录账号：测试账户"
+        self.assertTrue(GLiNERDetector._is_plausible_username(t3, 5, 9, "测试账户"))
+
+        t4 = "登录ID 是 zhangsan2026"
+        self.assertTrue(GLiNERDetector._is_plausible_username(t4, 6, 18, "zhangsan2026"))
+
+        # But long narrative sentence with a username context is still rejected
+        t5 = "用户名是 张三今天来了然后去了公司"
+        self.assertFalse(GLiNERDetector._is_plausible_username(t5, 5, 18, "张三今天来了然后去了公司"))
+
+    def test_gliner_username_filter_runs_in_detector_path(self):
+        from privacy.detectors import GLiNERDetector
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            det = GLiNERDetector(data_dir, active_model_id="gliner-pii-edge")
+
+            # Mock check_model_integrity and resolve_for_model so detector believes model is ready
+            with patch("privacy.detectors.check_model_integrity", return_value=(True, "")):
+                with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model", return_value={"ready": True, "runtime_profile": "torch-cpu", "actual_device": "cpu"}):
+                    mock_worker = MagicMock()
+                    # Simulate real reproducer raw output where GLiNER produced 3 false positive usernames
+                    text = "张三今天来了，稍后张三又打电话过来。"
+                    mock_worker.query.return_value = {
+                        "ok": True,
+                        "entities": [
+                            {"label": "username", "start": 0, "end": 6, "text": "张三今天来了", "score": 0.88},
+                            {"label": "username", "start": 6, "end": 7, "text": "，", "score": 0.76},
+                            {"label": "username", "start": 8, "end": 17, "text": "稍后张三又打电话过来", "score": 0.92},
+                            {"label": "phone", "start": 12, "end": 15, "text": "打电话", "score": 0.35},
+                        ],
+                    }
+                    with patch("privacy.detectors.get_worker_client") as mock_gwc:
+                        mock_client = MagicMock()
+                        mock_client.get_worker.return_value = mock_worker
+                        mock_client.get_timeout_for_model.return_value = (10, 10)
+                        mock_gwc.return_value = mock_client
+
+                        entities, warnings = det.detect(text)
+                        usernames = [e for e in entities if e.entity_type == "USERNAME"]
+                        self.assertEqual(len(usernames), 0, "All narrative false positive usernames must be filtered out")
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 
