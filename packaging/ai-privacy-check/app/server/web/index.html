@@ -101,7 +101,15 @@
                 <div><span class="step-label">安全副本</span><h2>复制给 AI 的文本</h2></div>
                 <span class="counter" id="redactedCounter">0 字</span>
               </div>
-              <textarea id="redactedText" readonly spellcheck="false" placeholder="复核命中项并生成脱敏文本后，结果会出现在这里。"></textarea>
+              <div
+                class="redacted-preview"
+                id="redactedPreview"
+                role="textbox"
+                aria-label="复制给 AI 的脱敏文本；点击占位符可定位到对应的人工复核项目"
+                aria-readonly="true"
+                tabindex="0"
+              ><span class="redacted-preview-empty">复核命中项并生成脱敏文本后，结果会出现在这里。</span></div>
+              <textarea id="redactedText" hidden readonly aria-hidden="true" tabindex="-1"></textarea>
               <div class="output-actions">
                 <button class="button button-secondary" id="copyRedactedButton" type="button" disabled>复制文本</button>
                 <button class="button button-primary" id="copyPromptButton" type="button" disabled>复制并附占位符说明</button>
@@ -245,6 +253,7 @@
         <div class="dialog-actions"><button class="button button-ghost" value="cancel">取消</button><button class="button button-primary" id="confirmExportButton" type="button">加密并下载</button></div>
       </form>
     </dialog>
+    <div class="selection-popover" id="selectionPopover" role="menu" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </body>
 </html>

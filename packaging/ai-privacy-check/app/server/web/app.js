@@ -10,7 +10,28 @@ const state = {
   vault: [],
   model: null,
   modelPoll: null,
+  pendingSelection: null,
+  retargeting: null,
 };
+
+const MANUAL_ENTITY_OPTIONS = [
+  { type: "GENERIC_PRIVACY", label: "隐私条目", privacyLevel: "PL2" },
+  { type: "CN_NAME", label: "姓名", privacyLevel: "PL2" },
+  { type: "PHONE", label: "电话号码", privacyLevel: "PL2" },
+  { type: "EMAIL", label: "电子邮箱", privacyLevel: "PL2" },
+  { type: "CN_ADDRESS", label: "地址", privacyLevel: "PL2" },
+  { type: "CN_ID_CARD", label: "身份证", privacyLevel: "PL3" },
+  { type: "PASSPORT", label: "护照", privacyLevel: "PL3" },
+  { type: "CN_BANK_CARD", label: "银行卡号", privacyLevel: "PL3" },
+  { type: "USERNAME", label: "用户名", privacyLevel: "PL2" },
+  { type: "PASSWORD", label: "密码", privacyLevel: "PL4" },
+  { type: "API_TOKEN", label: "API Token", privacyLevel: "PL4" },
+  { type: "IP_ADDRESS", label: "IP 地址", privacyLevel: "PL2" },
+  { type: "MEDICAL", label: "医疗信息", privacyLevel: "PL3" },
+  { type: "FINANCIAL", label: "财务信息", privacyLevel: "PL3" },
+  { type: "ORGANIZATION", label: "组织机构", privacyLevel: "PL2" },
+  { type: "OTHER_PRIVACY", label: "其他隐私", privacyLevel: "PL2" },
+];
 
 const $ = (id) => document.getElementById(id);
 const elements = {
@@ -25,6 +46,8 @@ const elements = {
   entityEmpty: $("entityEmpty") || { hidden: false },
   entityCount: $("entityCount") || $("entityCountTag"),
   reviewFooter: $("reviewFooter") || { hidden: false },
+  redactedPreview: $("redactedPreview"),
+  selectionPopover: $("selectionPopover"),
   redactedText: $("redactedText") || $("maskedText"),
   redactedCounter: $("redactedCounter") || { textContent: "" },
   copyRedactedButton: $("copyRedactedButton") || $("copyMaskedButton"),
@@ -116,10 +139,14 @@ async function shortFingerprint(value) {
   return Array.from(digest.slice(0, 2), (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase();
 }
 
+let entitySequence = 0;
+
 async function prepareEntities(entities) {
   const typeCounts = new Map();
   const tokens = new Map();
   for (const entity of entities) {
+    entitySequence += 1;
+    entity.id = entity.id || `ent_${entitySequence}_${Math.random().toString(36).slice(2, 7)}`;
     const key = `${entity.type}\u0000${entity.text}`;
     if (!tokens.has(key)) {
       const next = (typeCounts.get(entity.type) || 0) + 1;
@@ -139,8 +166,559 @@ function maskPreview(value) {
   return `${value.slice(0, 2)}${"•".repeat(Math.min(8, value.length - 3))}${value.slice(-1)}`;
 }
 
+function buildRedactedSegments(source, entities, excludedEntity = null) {
+  const ordered = entities
+    .map((entity, entityIndex) => ({ entity, entityIndex }))
+    .filter(({ entity }) => entity !== excludedEntity && entity.enabled && entity.replacement)
+    .sort((left, right) => left.entity.start - right.entity.start || left.entity.end - right.entity.end);
+  const segments = [];
+  let cursor = 0;
+
+  ordered.forEach(({ entity, entityIndex }) => {
+    const start = Number(entity.start);
+    const end = Number(entity.end);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < cursor || end <= start || end > source.length) return;
+    if (start > cursor) {
+      segments.push({ kind: "text", text: source.slice(cursor, start), sourceStart: cursor, sourceEnd: start });
+    }
+    const tokenSegment = {
+      kind: "token",
+      text: entity.replacement,
+      entityIndex,
+      label: entity.label,
+      sourceStart: start,
+      sourceEnd: end,
+    };
+    if (entity.id) {
+      tokenSegment.entityId = entity.id;
+    }
+    segments.push(tokenSegment);
+    cursor = end;
+  });
+
+  if (cursor < source.length) {
+    segments.push({ kind: "text", text: source.slice(cursor), sourceStart: cursor, sourceEnd: source.length });
+  }
+  return segments;
+}
+
+function normalizeSourceSelection(source, start, end, entities, excludedEntity = null) {
+  let sourceStart = Math.max(0, Math.min(Number(start), Number(end)));
+  let sourceEnd = Math.min(source.length, Math.max(Number(start), Number(end)));
+  if (!Number.isInteger(sourceStart) || !Number.isInteger(sourceEnd) || sourceEnd <= sourceStart) return null;
+
+  let text = source.slice(sourceStart, sourceEnd);
+  const leadingWhitespace = text.length - text.trimStart().length;
+  const trailingWhitespace = text.length - text.trimEnd().length;
+  sourceStart += leadingWhitespace;
+  sourceEnd -= trailingWhitespace;
+  text = source.slice(sourceStart, sourceEnd);
+  if (!text) return null;
+
+  const overlapsEntity = entities.some((entity) => (
+    entity !== excludedEntity
+    && Number.isFinite(Number(entity.start))
+    && Number.isFinite(Number(entity.end))
+    && sourceStart < Number(entity.end)
+    && sourceEnd > Number(entity.start)
+  ));
+  if (overlapsEntity) return null;
+  return { start: sourceStart, end: sourceEnd, text };
+}
+
+function activateLinkedElement(container, selector, moveFirst = false) {
+  if (!container || typeof container.querySelector !== "function") return false;
+  const target = container.querySelector(selector);
+  if (!target || !target.classList) return false;
+  if (moveFirst && typeof container.prepend === "function") container.prepend(target);
+
+  target.classList.remove("is-link-target");
+  void target.offsetWidth;
+  target.classList.add("is-link-target");
+  if (typeof target.addEventListener === "function") {
+    target.addEventListener("animationend", () => target.classList.remove("is-link-target"), { once: true });
+  }
+
+  const reduceMotion = typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (typeof target.scrollIntoView === "function") {
+    target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center", inline: "nearest" });
+  }
+  if (typeof target.focus === "function") target.focus({ preventScroll: true });
+  return true;
+}
+
+function focusReviewEntity(target) {
+  const selector = typeof target === "string" && isNaN(Number(target))
+    ? `[data-entity-id="${target}"]`
+    : `[data-entity-id="${target}"], [data-entity-index="${target}"]`;
+  return activateLinkedElement(elements.entityList, selector, true);
+}
+
+function focusRedactedEntity(target) {
+  const selector = typeof target === "string" && isNaN(Number(target))
+    ? `[data-entity-id="${target}"]`
+    : `[data-entity-id="${target}"], [data-entity-index="${target}"]`;
+  const found = activateLinkedElement(elements.redactedPreview, selector);
+  if (!found) toast("该项目当前未替换，启用后即可在安全副本中定位。");
+  return found;
+}
+
+function updateRedactedActionAvailability() {
+  const hasResult = Boolean(elements.redactedText.value);
+  const editingRange = Boolean(state.retargeting);
+  elements.copyRedactedButton.disabled = editingRange || !hasResult;
+  elements.copyPromptButton.disabled = editingRange || !hasResult;
+  elements.exportVaultButton.disabled = editingRange || state.vault.length === 0 || !crypto.subtle;
+}
+
+function compactRect(rect) {
+  return {
+    left: rect.left,
+    right: rect.right,
+    top: rect.top,
+    bottom: rect.bottom,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function pointRect(x, y) {
+  return { left: x, right: x, top: y, bottom: y, width: 0, height: 0 };
+}
+
+function positionSelectionPopover(anchorRect) {
+  if (!elements.selectionPopover) return;
+  const popover = elements.selectionPopover;
+  popover.hidden = false;
+  popover.style.visibility = "hidden";
+  requestAnimationFrame(() => {
+    const margin = 8;
+    const gap = 9;
+    const width = popover.offsetWidth;
+    const height = popover.offsetHeight;
+    const preferredLeft = anchorRect.left + (anchorRect.width / 2) - (width / 2);
+    const left = Math.max(margin, Math.min(window.innerWidth - width - margin, preferredLeft));
+    const above = anchorRect.top - height - gap;
+    const top = above >= margin
+      ? above
+      : Math.min(window.innerHeight - height - margin, anchorRect.bottom + gap);
+    popover.style.left = `${Math.round(left)}px`;
+    popover.style.top = `${Math.round(Math.max(margin, top))}px`;
+    popover.style.visibility = "visible";
+  });
+}
+
+function clearBrowserSelection() {
+  const selection = typeof window !== "undefined" ? window.getSelection() : null;
+  if (selection && typeof selection.removeAllRanges === "function") selection.removeAllRanges();
+}
+
+function hideSelectionPopover(clearSelection = false) {
+  if (elements.selectionPopover) {
+    elements.selectionPopover.hidden = true;
+    elements.selectionPopover.replaceChildren();
+    elements.selectionPopover.classList.remove("is-type-picker");
+  }
+  if (clearSelection) clearBrowserSelection();
+}
+
+function renderSelectionPopover(actions, anchorRect, title = "", typePicker = false) {
+  if (!elements.selectionPopover) return;
+  const popover = elements.selectionPopover;
+  popover.replaceChildren();
+  popover.classList.toggle("is-type-picker", typePicker);
+  if (title) {
+    const heading = document.createElement("div");
+    heading.className = "selection-popover-title";
+    heading.textContent = title;
+    popover.append(heading);
+  }
+  const actionRow = document.createElement("div");
+  actionRow.className = "selection-popover-actions";
+  actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `selection-action${action.primary ? " is-primary" : ""}${action.danger ? " is-danger" : ""}`;
+    button.textContent = action.label;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      Promise.resolve(action.run()).catch((error) => toast(error.message || "操作失败"));
+    });
+    actionRow.append(button);
+  });
+  popover.append(actionRow);
+  positionSelectionPopover(anchorRect);
+}
+
+function sourceOffsetFromBoundary(node, offset) {
+  if (!node) return null;
+  const element = node.nodeType === 1 ? node : node.parentElement;
+  const sourceSpan = element && element.closest
+    ? element.closest(".redacted-plain, .redacted-retarget-source")
+    : null;
+  if (!sourceSpan || !elements.redactedPreview.contains(sourceSpan)) return null;
+  const prefix = document.createRange();
+  prefix.selectNodeContents(sourceSpan);
+  try {
+    prefix.setEnd(node, offset);
+  } catch {
+    return null;
+  }
+  return Number(sourceSpan.dataset.sourceStart) + prefix.toString().length;
+}
+
+function readPreviewSelection() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  if (!elements.redactedPreview.contains(range.startContainer) || !elements.redactedPreview.contains(range.endContainer)) return null;
+  const start = sourceOffsetFromBoundary(range.startContainer, range.startOffset);
+  const end = sourceOffsetFromBoundary(range.endContainer, range.endOffset);
+  if (start === null || end === null) return null;
+  const excludedEntity = state.retargeting ? state.retargeting.entity : null;
+  const normalized = normalizeSourceSelection(state.source, start, end, state.entities, excludedEntity);
+  if (!normalized) return null;
+  return { ...normalized, anchorRect: compactRect(range.getBoundingClientRect()) };
+}
+
+function showManualTypePicker(anchorRect) {
+  if (!elements.selectionPopover || !state.pendingSelection) return;
+  const popover = elements.selectionPopover;
+  popover.replaceChildren();
+  popover.classList.add("is-type-picker");
+
+  const heading = document.createElement("div");
+  heading.className = "selection-popover-title";
+  heading.textContent = "选择隐私类型";
+  const hint = document.createElement("div");
+  hint.className = "selection-popover-hint";
+  hint.textContent = "不选择直接确认将设为“隐私条目”";
+  const options = document.createElement("div");
+  options.className = "selection-type-options";
+  let selectedOption = null;
+  MANUAL_ENTITY_OPTIONS.forEach((option) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "selection-type-option";
+    button.textContent = option.label;
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectedOption = option;
+      options.querySelectorAll(".selection-type-option").forEach((item) => item.classList.toggle("is-selected", item === button));
+    });
+    options.append(button);
+  });
+
+  const actions = document.createElement("div");
+  actions.className = "selection-popover-actions selection-popover-confirm";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "selection-action";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => {
+    state.pendingSelection = null;
+    hideSelectionPopover(true);
+  });
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "selection-action is-primary";
+  confirm.textContent = "确认";
+  confirm.addEventListener("click", () => createManualEntity(state.pendingSelection, selectedOption || MANUAL_ENTITY_OPTIONS[0]));
+  actions.append(cancel, confirm);
+  popover.append(heading, hint, options, actions);
+  positionSelectionPopover(anchorRect);
+}
+
+function showMarkSelectionActions(selection) {
+  state.pendingSelection = selection;
+  renderSelectionPopover([
+    { label: "设为隐私条目", primary: true, run: () => showManualTypePicker(selection.anchorRect) },
+    {
+      label: "取消",
+      run: () => {
+        state.pendingSelection = null;
+        hideSelectionPopover(true);
+      },
+    },
+  ], selection.anchorRect, `已选择 ${selection.text.length} 个字符`);
+}
+
+async function createManualEntity(selection, option) {
+  if (!selection) return;
+  const chosen = option || MANUAL_ENTITY_OPTIONS[0];
+  entitySequence += 1;
+  const key = `${chosen.type}\u0000${selection.text}`;
+  const fingerprint = await shortFingerprint(key);
+  const cleanLabel = chosen.label.replace(/[\s/]+/g, "_");
+  const typeCount = new Set(state.entities.filter((entity) => entity.type === chosen.type).map((entity) => entity.text)).size + 1;
+  const entity = {
+    id: `manual_${entitySequence}_${Math.random().toString(36).slice(2, 7)}`,
+    type: chosen.type,
+    label: chosen.label,
+    text: selection.text,
+    start: selection.start,
+    end: selection.end,
+    confidence: 1,
+    validated: true,
+    manual: true,
+    source: "manual",
+    sources: ["manual_review"],
+    privacy_level: chosen.privacyLevel || "PL2",
+    enabled: true,
+    replacement: `⟦${cleanLabel}_${String(typeCount).padStart(2, "0")}_${fingerprint}⟧`,
+  };
+  state.entities.push(entity);
+  state.entities.sort((left, right) => left.start - right.start || left.end - right.end);
+  state.pendingSelection = null;
+  hideSelectionPopover(true);
+  renderEntities();
+  generateRedacted();
+  focusReviewEntity(entity.id);
+  toast(`已添加“${chosen.label}”人工复核项目`);
+}
+
+function resolveEntity(target) {
+  if (!target && target !== 0) return null;
+  if (typeof target === "object") return target;
+  if (typeof target === "number") return state.entities[target] || null;
+  if (typeof target === "string") {
+    const byId = state.entities.find((e) => e.id === target);
+    if (byId) return byId;
+    const num = Number(target);
+    if (!isNaN(num)) return state.entities[num] || null;
+  }
+  return null;
+}
+
+function showEntityActions(target, anchorRect, isCard = false) {
+  const entity = resolveEntity(target);
+  if (!entity) return;
+  if (state.retargeting) {
+    toast("请先完成或取消当前的范围重选。");
+    return;
+  }
+  state.pendingSelection = null;
+  const actions = [
+    { label: "重新选择范围", primary: true, run: () => startEntityRetarget(entity) },
+    { label: "删除条目", danger: true, run: () => deleteEntity(entity) },
+    {
+      label: isCard ? "定位安全副本" : "定位人工复核",
+      run: () => {
+        hideSelectionPopover();
+        if (isCard) {
+          focusRedactedEntity(entity.id || target);
+        } else {
+          focusReviewEntity(entity.id || target);
+        }
+      },
+    },
+    { label: "取消", run: () => hideSelectionPopover() },
+  ];
+  renderSelectionPopover(actions, anchorRect, entity.label);
+}
+
+function deleteEntity(target) {
+  const entity = resolveEntity(target);
+  if (!entity) return;
+  const index = state.entities.indexOf(entity);
+  if (index >= 0) {
+    state.entities.splice(index, 1);
+  }
+  state.pendingSelection = null;
+  hideSelectionPopover(true);
+  renderEntities();
+  generateRedacted();
+  toast(`已删除“${entity.label}”条目，原文已恢复`);
+}
+
+function startEntityRetarget(target) {
+  const entity = resolveEntity(target);
+  if (!entity) return;
+  hideSelectionPopover(true);
+  state.pendingSelection = null;
+  state.retargeting = {
+    entity,
+    snapshot: {
+      start: entity.start,
+      end: entity.end,
+      text: entity.text,
+      enabled: entity.enabled,
+      replacement: entity.replacement,
+    },
+  };
+  renderEntities();
+  renderRedactedPreview();
+  updateRedactedActionAvailability();
+  const original = elements.redactedPreview.querySelector(".redacted-retarget-source");
+  if (original) {
+    original.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    original.focus({ preventScroll: true });
+  }
+  toast(`请重新划选“${entity.label}”的准确范围，Esc 可取消`);
+}
+
+function cancelEntityRetarget(announce = true) {
+  if (!state.retargeting) return;
+  const { entity, snapshot } = state.retargeting;
+  if (entity && snapshot) {
+    entity.start = snapshot.start;
+    entity.end = snapshot.end;
+    entity.text = snapshot.text;
+    entity.enabled = snapshot.enabled;
+    entity.replacement = snapshot.replacement;
+  }
+  state.retargeting = null;
+  state.pendingSelection = null;
+  hideSelectionPopover(true);
+  renderEntities();
+  generateRedacted();
+  if (announce) toast("已取消范围重选");
+}
+
+function applyEntityRetarget(selection) {
+  if (!state.retargeting || !selection) return;
+  const entity = state.retargeting.entity;
+  const overlaps = state.entities.some((other) => (
+    other !== entity
+    && Number.isFinite(Number(other.start))
+    && Number.isFinite(Number(other.end))
+    && selection.start < Number(other.end)
+    && selection.end > Number(other.start)
+  ));
+  if (overlaps) {
+    toast("所选范围与现有隐私条目重叠，请重新选择。");
+    return;
+  }
+  entity.start = selection.start;
+  entity.end = selection.end;
+  entity.text = selection.text;
+  state.retargeting = null;
+  state.pendingSelection = null;
+  state.entities.sort((left, right) => left.start - right.start || left.end - right.end);
+  hideSelectionPopover(true);
+  renderEntities();
+  generateRedacted();
+  focusReviewEntity(entity.id);
+  toast(`“${entity.label}”范围已更新`);
+}
+
+function handlePreviewSelection() {
+  const browserSelection = window.getSelection();
+  if (!browserSelection || browserSelection.isCollapsed || !browserSelection.toString().trim()) {
+    hideSelectionPopover();
+    return;
+  }
+  const selection = readPreviewSelection();
+  if (!selection) {
+    hideSelectionPopover();
+    toast("所选范围与现有隐私条目重叠，请重新选择。");
+    return;
+  }
+  state.pendingSelection = selection;
+  if (state.retargeting) {
+    renderSelectionPopover([
+      { label: "确认新范围", primary: true, run: () => applyEntityRetarget(state.pendingSelection) },
+      { label: "取消", run: () => cancelEntityRetarget() },
+    ], selection.anchorRect, `新范围：${selection.text.length} 个字符`);
+    return;
+  }
+  showMarkSelectionActions(selection);
+}
+
+function createSourceSpan(text, sourceStart, sourceEnd, className = "redacted-plain") {
+  const span = document.createElement("span");
+  span.className = className;
+  span.dataset.sourceStart = String(sourceStart);
+  span.dataset.sourceEnd = String(sourceEnd);
+  span.textContent = text;
+  return span;
+}
+
+function appendTextSegment(fragment, segment, retargetEntity) {
+  if (!retargetEntity || retargetEntity.start < segment.sourceStart || retargetEntity.end > segment.sourceEnd) {
+    fragment.append(createSourceSpan(segment.text, segment.sourceStart, segment.sourceEnd));
+    return;
+  }
+  if (retargetEntity.start > segment.sourceStart) {
+    fragment.append(createSourceSpan(
+      state.source.slice(segment.sourceStart, retargetEntity.start),
+      segment.sourceStart,
+      retargetEntity.start,
+    ));
+  }
+  const original = createSourceSpan(
+    state.source.slice(retargetEntity.start, retargetEntity.end),
+    retargetEntity.start,
+    retargetEntity.end,
+    "redacted-retarget-source",
+  );
+  original.tabIndex = 0;
+  original.setAttribute("aria-label", `${retargetEntity.label}当前范围，重新圈选正确文字`);
+  fragment.append(original);
+  if (retargetEntity.end < segment.sourceEnd) {
+    fragment.append(createSourceSpan(
+      state.source.slice(retargetEntity.end, segment.sourceEnd),
+      retargetEntity.end,
+      segment.sourceEnd,
+    ));
+  }
+}
+
+function renderRedactedPreview() {
+  if (!elements.redactedPreview) return;
+  elements.redactedPreview.replaceChildren();
+  const retargetEntity = state.retargeting ? state.retargeting.entity : null;
+  elements.redactedPreview.classList.toggle("is-retargeting", Boolean(retargetEntity));
+  if (!state.source) {
+    const empty = document.createElement("span");
+    empty.className = "redacted-preview-empty";
+    empty.textContent = "复核命中项并生成脱敏文本后，结果会出现在这里。";
+    elements.redactedPreview.append(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  if (retargetEntity) {
+    const instruction = document.createElement("div");
+    instruction.className = "redacted-retarget-instruction";
+    const instructionText = document.createElement("span");
+    instructionText.textContent = `重新划选“${retargetEntity.label}”的准确范围`;
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "取消重选";
+    cancel.addEventListener("click", () => cancelEntityRetarget());
+    instruction.append(instructionText, cancel);
+    fragment.append(instruction);
+  }
+  buildRedactedSegments(state.source, state.entities, retargetEntity).forEach((segment) => {
+    if (segment.kind === "text") {
+      appendTextSegment(fragment, segment, retargetEntity);
+      return;
+    }
+    const token = document.createElement("button");
+    token.type = "button";
+    token.className = "redacted-token";
+    token.dataset.entityIndex = String(segment.entityIndex);
+    if (segment.entityId) token.dataset.entityId = segment.entityId;
+    token.textContent = segment.text;
+    token.title = "定位到对应的人工复核项目";
+    token.setAttribute("aria-label", `定位到${segment.label}的人工复核项目`);
+    token.addEventListener("click", () => focusReviewEntity(segment.entityId || segment.entityIndex));
+    token.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      showEntityActions(segment.entityId || segment.entityIndex, pointRect(event.clientX, event.clientY), false);
+    });
+    token.disabled = Boolean(retargetEntity);
+    fragment.append(token);
+  });
+  elements.redactedPreview.append(fragment);
+}
+
 function renderEntities() {
   elements.entityList.replaceChildren();
+  elements.entityList.classList.toggle("is-retargeting", Boolean(state.retargeting));
   elements.entityEmpty.hidden = state.entities.length > 0;
   elements.reviewFooter.hidden = state.entities.length === 0;
   elements.entityCount.textContent = `${state.entities.filter((item) => item.enabled).length} / ${state.entities.length} 项`;
@@ -153,12 +731,19 @@ function renderEntities() {
   };
 
   state.entities.forEach((entity, index) => {
-    const card = document.createElement("label");
+    const card = document.createElement("article");
     card.className = "entity-card";
+    card.dataset.entityIndex = String(index);
+    if (entity.id) card.dataset.entityId = entity.id;
+    card.tabIndex = 0;
+    card.classList.toggle("is-retargeting", Boolean(state.retargeting && state.retargeting.entity === entity));
+    card.setAttribute("aria-label", `${entity.label}复核项目；按回车定位到安全副本中的占位符`);
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = entity.enabled;
+    checkbox.disabled = Boolean(state.retargeting);
+    checkbox.setAttribute("aria-label", `${entity.label}是否替换`);
     checkbox.addEventListener("change", () => {
       entity.enabled = checkbox.checked;
       elements.entityCount.textContent = `${state.entities.filter((item) => item.enabled).length} / ${state.entities.length} 项`;
@@ -180,8 +765,32 @@ function renderEntities() {
 
     const score = document.createElement("span");
     score.className = "entity-score";
-    score.textContent = entity.validated ? "已校验" : `${Math.round(entity.confidence * 100)}%`;
-    top.append(type, plBadge, score);
+    score.textContent = entity.manual ? "人工" : (entity.validated ? "已校验" : `${Math.round(entity.confidence * 100)}%`);
+
+    const linkButton = document.createElement("button");
+    linkButton.type = "button";
+    linkButton.className = "entity-link-button";
+    linkButton.textContent = "↔";
+    linkButton.disabled = Boolean(state.retargeting);
+    linkButton.title = "定位到安全副本中的占位符";
+    linkButton.setAttribute("aria-label", `定位到安全副本中的${entity.label}占位符`);
+    linkButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      focusRedactedEntity(entity.id || index);
+    });
+    const menuButton = document.createElement("button");
+    menuButton.type = "button";
+    menuButton.className = "entity-menu-button";
+    menuButton.textContent = "⋯";
+    menuButton.title = "项目操作";
+    menuButton.disabled = Boolean(state.retargeting);
+    menuButton.setAttribute("aria-label", `${entity.label}项目操作`);
+    menuButton.setAttribute("aria-haspopup", "menu");
+    menuButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      showEntityActions(entity.id || index, compactRect(menuButton.getBoundingClientRect()), true);
+    });
+    top.append(type, plBadge, score, linkButton, menuButton);
 
     const value = document.createElement("span");
     value.className = "entity-value";
@@ -191,6 +800,7 @@ function renderEntities() {
     const replacement = document.createElement("input");
     replacement.className = "entity-replacement";
     replacement.value = entity.replacement;
+    replacement.disabled = Boolean(state.retargeting);
     replacement.setAttribute("aria-label", `${entity.label}的替换占位符`);
     replacement.addEventListener("input", () => {
       state.entities[index].replacement = replacement.value.trim();
@@ -203,6 +813,21 @@ function renderEntities() {
     sources.textContent = `引擎: ${readableSources}`;
     main.append(top, value, replacement, sources);
     card.append(checkbox, main);
+    card.addEventListener("click", (event) => {
+      if (event.target.closest && event.target.closest("input, button")) return;
+      if (state.retargeting) return;
+      focusRedactedEntity(entity.id || index);
+    });
+    card.addEventListener("contextmenu", (event) => {
+      if (event.target.closest && event.target.closest("input")) return;
+      event.preventDefault();
+      showEntityActions(entity.id || index, pointRect(event.clientX, event.clientY), true);
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.target !== card || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      focusRedactedEntity(entity.id || index);
+    });
     elements.entityList.append(card);
   });
 }
@@ -230,6 +855,7 @@ function generateRedacted() {
     state.vault.push({ token: entity.replacement, value: entity.text, type: entity.type, label: entity.label });
   });
   elements.redactedText.value = result;
+  renderRedactedPreview();
   setCounter(elements.redactedText, elements.redactedCounter);
   elements.copyRedactedButton.disabled = !result;
   elements.copyPromptButton.disabled = !result;
@@ -892,6 +1518,7 @@ function clearAll() {
   state.vault = [];
   [elements.sourceText, elements.redactedText, elements.replyText, elements.restoredText].forEach((node) => { node.value = ""; });
   renderEntities();
+  renderRedactedPreview();
   [
     [elements.sourceText, elements.sourceCounter],
     [elements.redactedText, elements.redactedCounter],
@@ -969,7 +1596,45 @@ if ($("confirmExportButton")) $("confirmExportButton").addEventListener("click",
 if ($("importVaultButton")) $("importVaultButton").addEventListener("click", importVault);
 if (elements.installModelButton) elements.installModelButton.addEventListener("click", installModel);
 
+if (elements.redactedPreview) {
+  elements.redactedPreview.addEventListener("mouseup", () => {
+    setTimeout(handlePreviewSelection, 20);
+  });
+  elements.redactedPreview.addEventListener("touchend", () => {
+    setTimeout(handlePreviewSelection, 20);
+  });
+  elements.redactedPreview.addEventListener("keyup", (event) => {
+    if (event.key === "Shift" || event.key.startsWith("Arrow")) {
+      setTimeout(handlePreviewSelection, 20);
+    }
+  });
+}
+
+document.addEventListener("mousedown", (event) => {
+  if (!elements.selectionPopover || elements.selectionPopover.hidden) return;
+  if (elements.selectionPopover.contains(event.target)) return;
+  if (event.target.closest && event.target.closest(".entity-menu-button, .redacted-token")) return;
+  hideSelectionPopover();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    if (state.retargeting) {
+      cancelEntityRetarget();
+    } else if (elements.selectionPopover && !elements.selectionPopover.hidden) {
+      hideSelectionPopover(true);
+    }
+  }
+});
+
+window.addEventListener("resize", () => {
+  if (elements.selectionPopover && !elements.selectionPopover.hidden) {
+    hideSelectionPopover();
+  }
+});
+
 renderEntities();
+renderRedactedPreview();
 refreshModelStatus();
 
 if (typeof window !== "undefined") {
