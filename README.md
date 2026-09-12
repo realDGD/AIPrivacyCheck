@@ -6,6 +6,21 @@
 
 ## 已实现功能
 
+- **模型运行时依赖契约与 SiameseUIE 安装链修复 (v0.6.4)**：
+  - **模型专属运行时依赖契约（Model-specific Runtime Dependency Contract）**：在 Model Catalog 的 `ModelDescriptor` 上新增 `runtime_dependencies` 声明字段，并新增 `ensure_model_runtime_dependencies` 安装阶段：先复现真实 fnOS 故障（共享 torch-cuda 运行时 Probe 通过但 SiameseUIE Pipeline 报 `No module named 'addict'`），经实证确认 ModelScope 1.40 将 `addict`/`datasets`/`scipy`/`Pillow`/`simplejson`/`sortedcontainers` 全部移入 extras 而非核心依赖后，按模型声明、增量补装缺失依赖（`importlib` 探测已满足项即快速跳过，绝不重装 PyTorch 或重建 venv）。现有已安装运行时升级后同样自动补齐。
+  - **共享运行时 transformers 兼容区间钉扎**：基础运行时固定 `transformers>=4.51,<5` —— 下限来自 MemPrivacy/Qwen3 权重（`Qwen3ForCausalLM` 需要 >=4.51），上限来自 ModelScope 旧式 NLP pipeline 依赖的 `transformers.onnx` 模块（transformers 5.x 已移除）。
+  - **拒绝模型目录远程代码执行**：安装/导入时对 `configuration.json` 执行净化，移除 `allow_remote`/`plugins` 声明（官方 iic 模型携带 `allow_remote: true` 会令新版 ModelScope pip 安装模型自带 requirements.txt 并执行目录内任意 .py）；worker 坚决不传 `trust_remote_code`，仅经 ModelScope 内建 pipeline/model 类加载。
+  - **SiameseUIE 输出结构适配修复**：适配 ModelScope 新版真实输出形状（`{"output": [[{"type","span","offset"}]]}` 按 schema 分组嵌套列表 + 半开区间 `offset`），修复 pipeline 加载成功但实体抽取恒为空的问题；真实端到端冒烟（下载官方权重 → 生产 worker 推理）已验证通过。
+- **高确定性凭证规则扩展与误报治理 (v0.6.4)**：
+  - **新增 JDBC 连接串规则**：覆盖 `jdbc:mysql:`/`jdbc:postgresql:`/`jdbc:oracle:`/`jdbc:sqlserver:`/`jdbc:mariadb:`（含 loadbalance/replication/sequential 等 inner qualifier 变体），并为既有 `xxx://` 规则添加 `(?<!jdbc:)` 防双杀；URI 内嵌 `user:password@host` 的 overlap 回归受保护（EMAIL 等小规则不得吞并）。
+  - **新增云厂商与协作平台凭证规则（全部查证一手官方文档）**：阿里云 AccessKey ID（`LTAI` 前缀）、腾讯云 SecretId（`AKID`/`IKID` 36 位）、Slack 官方在册前缀（`xoxb-`/`xoxp-`/`xapp-`/`xwfp-`；`xoxa-`/`xoxr-` 因现行官方文档未定义而刻意排除）、GitHub fine-grained PAT（`github_pat_` + 22 + `_` + 59 官方结构；`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` 已有规则继续保留）。
+  - **JWT 结构校验器**：三段 Base64URL 之外新增 header 解码校验（必须为含字符串 `alg` 的 JSON 对象，`typ` 可选），不做签名验证；垃圾三段串不再误报。
+  - **中文上下文误报修复**：移除误伤「我的密码是…」「我的用户名是…」的 CJK 前置 lookbehind；用户名值支持中文（有显式标签约束）；病历号/工号/学号等 ID 规则支持空格分隔；安全码支持「安全码」中文标签；阿拉伯语人名模式支持单词与「،」分隔。
+- **Benchmark v2 中文上下文隐私种子与模型基准能力 (v0.6.4)**：
+  - **61 条中文 Contextual Privacy Seed**（`tests/fixtures/contextual_privacy_seed.jsonl`，25% 负样本/占位符）：覆盖用户名↔人名混淆、公开 vs 私有（10086/8.8.8.8/test@example.com/公开办公地址）、医疗/财务/关系语义样本、Emoji/ZWJ/SIP CJK/阿拉伯语 RTL/JSON/YAML/SQL/URI 等 Unicode 压力样本；schema 校验（span↔文本一致、UTF-16 换算一致性、重复 ID、overlap 语义）由单元测试把关。
+  - **指标体系**：Exact Span P/R/F1、PII-free FPR、上下文误报分类、字符泄漏（Character leakage）、过度脱敏（Over-redaction）、逐模型延迟（`scripts/benchmark_v2.py` 内置评估 + `scripts/benchmark_scoring.py` 共享评分）。
+  - **模型基准 Harness**（`scripts/benchmark_models.py`）：对已安装模型运行相同数据集，不自动下载（未安装明确 SKIP）、不触碰生产服务；GLiNER 适配器镜像生产标签集/阈值/USERNAME 过滤器，RANER 走 ModelScope NER pipeline，MemPrivacy 复用生产 worker 提示词与 JSON 解析；记录墙钟、进程峰值 RSS，CUDA 显存仅在真机报告。
+  - **基于基准的 GLiNER 阈值调优**：种子集上阈值 0.40→0.55 在召回不变（14.5%）的前提下将模型假阳性下降约 5 倍（6/15 → 1/15 量级），生产阈值据此调整。
 - **MemPrivacy / CUDA 并发安全与整请求语义预算加固 (v0.6.4)**：
   - **Worker 永久退役契约与防复活安全**：在 `RuntimeWorkerProcess` 引入 `self._retired` 与 `retire()` 方法及 `WorkerRetiredError` 契约。当 Worker 因换代、驱逐或主动停止被移除时，严格调用 `retire()` 并永久终止进程；任何已停退役 Worker 绝不允许被后续并发请求重新唤醒，彻底根除高并发下孤儿 Worker 驻留后台窃取 GPU 显存的问题。
   - **跨模型 CUDA 执行全局协调器**：引入 `WorkerClient.cuda_execution_session` 上下文协调锁，在多模型级联（MemPrivacy、GLiNER、SiameseUIE 及冒烟测试）中统一排他管理物理 GPU 访问；在 MemPrivacy 独占会话期间，阻止并发 GPU 请求拉起 GLiNER，彻底杜绝导致 CUDA OOM 的时序竞态。

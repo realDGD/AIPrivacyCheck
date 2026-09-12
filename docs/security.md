@@ -36,6 +36,8 @@
 - **模型误报抑制与前端交互稳定性 (v0.6.2)**：针对神经网络实体抽取模型（GLiNER）在中文自然语言环境中过度提取短语为 `USERNAME` 的问题，实施了基于账号词汇特征与显式上下文判定的生产级过滤规则，防止中文日常会话整句被模型过度脱敏或破坏语义；前端交互与布局全面加固，双向定位收口至内部容器滚动，防止外层 document 滚动突兀跳跃导致的用户误操作。
 - **显存耗尽与超时拒绝服务防御 (v0.6.3)**：为防止大参数量语义模型（MemPrivacy）在多模型级联或显存受限设备（如 8GB 显卡）上耗尽系统 GPU 显存，实施 exclusive CUDA 独占调度并在执行完成后立即释放显存；发生底层 CUDA OOM 时立即终止子进程释放显存并温和降级，杜绝显存泄漏导致的宿主机 GPU 瘫痪；对推理 token 生成预算实施 <=512 tokens 的严格上限与 >3500 字符长文本分块处理，杜绝长文本推理引发的 KV 缓存爆炸与长时间挂起。
 - **并发 Worker 隔离与整请求预算拒绝服务防御 (v0.6.4)**：引入 Worker 永久退役机制（`WorkerRetiredError` 与 `retire()` 契约），彻底杜绝并发下已被停用的 Worker 进程被重新激活为孤儿进程盗用 GPU 显存；引入跨模型 `cuda_execution_session` 全局协调锁，在物理 GPU 层面排他互斥，杜绝并发导致 GLiNER 与 MemPrivacy 同时在 GPU 上运行引发 CUDA OOM；建立整请求语义时间预算体系（CUDA 240s / CPU 480s）与 Deadline 截止控制，锁等待超时快速返回繁忙状态，单块超时安全保留已完成分块与实体并输出 X/Y 进度告警，彻底避免长文本跨块累加导致十数小时的同步挂起拒绝服务。
+- **模型目录远程代码执行防御 (v0.6.4)**：新版 ModelScope 会对携带 `allow_remote`/`plugins` 声明的模型 configuration.json 执行目录内任意 `.py` 代码并 pip 安装模型自带 requirements.txt（官方 iic 权重即携带 `allow_remote: true`）。本应用在模型下载与本地导入的暂存阶段对 configuration.json 实施净化（移除 `allow_remote`/`plugins` 字段，幂等且对已存在权重同样生效），推理 worker 坚决不传 `trust_remote_code`，所有目录模型仅经 ModelScope 内建 pipeline/model 类加载；共享运行时的 transformers 固定为 `>=4.51,<5` 兼容区间，杜绝依赖解析期被第三方声明拖入不可信版本。
+- **模型专属依赖契约与供应链最小化 (v0.6.4)**：`ensure_model_runtime_dependencies` 仅安装 Catalog 中经实证声明的模型专属依赖（当前仅 SiameseUIE 需要 `addict`/`datasets`/`scipy`/`Pillow`/`simplejson`/`sortedcontainers`），通过目标 venv 解释器 `importlib` 探测实现幂等快速跳过，杜绝"遇错全量 pip freeze"式供应链扩散。
 - **资源耗尽保护**：单次处理正文限制为 2 MB，文本字符上限为 500,000 字符；模型推理采用进程级互斥锁保证串行，防止显存或内存击穿。
 
 ## 已知限制与使用建议
