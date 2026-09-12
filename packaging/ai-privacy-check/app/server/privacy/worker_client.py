@@ -12,6 +12,7 @@ Features:
 from __future__ import annotations
 
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ import queue
 import subprocess
 import threading
 import time
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from privacy.runtime_manager import RuntimeManager, get_runtime_manager
 
@@ -31,6 +32,11 @@ STATE_STARTING = "starting"
 STATE_READY = "ready"
 STATE_BUSY = "busy"
 STATE_FAILED = "failed"
+
+
+class WorkerRetiredError(RuntimeError):
+    """Raised when an operation is attempted on a permanently retired worker."""
+    pass
 
 
 def is_cuda_oom_response(resp: Dict[str, Any]) -> bool:
@@ -45,6 +51,44 @@ def is_cuda_oom_response(resp: Dict[str, Any]) -> bool:
     if "cuda out of memory" in err_lower or "cuda error: out of memory" in err_lower:
         return True
     return False
+
+
+def is_cuda_oom_exception(exc: Exception, device: str = "cpu") -> bool:
+    """Checks whether an exception during worker execution was caused by CUDA Out-Of-Memory."""
+    if device != "cuda":
+        return False
+    err_str = str(exc).lower()
+    return (
+        "cuda out of memory" in err_str
+        or "cuda error: out of memory" in err_str
+        or ("out of memory" in err_str and "cuda" in err_str)
+    )
+
+
+def is_cpu_oom_exception(exc: Exception, device: str = "cpu") -> bool:
+    """Checks whether an exception during worker execution was caused by host CPU/system Out-Of-Memory."""
+    if device == "cuda":
+        return False
+    if isinstance(exc, MemoryError):
+        return True
+    err_str = str(exc).lower()
+    return (
+        "std::bad_alloc" in err_str
+        or "bad_alloc" in err_str
+        or "memoryerror" in err_str
+        or ("out of memory" in err_str and "cuda" not in err_str)
+    )
+
+
+def is_cpu_oom_response(resp: Dict[str, Any]) -> bool:
+    """Checks whether a worker response indicates a host CPU MemoryError or bad_alloc."""
+    if not isinstance(resp, dict) or resp.get("ok"):
+        return False
+    err_type = str(resp.get("error_type", ""))
+    err_msg = str(resp.get("error", "")).lower()
+    if err_type in ("MemoryError",):
+        return True
+    return "bad_alloc" in err_msg or "std::bad_alloc" in err_msg or "memoryerror" in err_msg
 
 
 class RuntimeWorkerProcess:
@@ -73,6 +117,7 @@ class RuntimeWorkerProcess:
         self._lock = threading.Lock()
         self.state: str = STATE_STOPPED
         self._alive: bool = False
+        self._retired: bool = False
         self._last_error: Optional[str] = None
 
         self._generation: int = 0
@@ -160,6 +205,9 @@ class RuntimeWorkerProcess:
             return False, f"Invalid handshake JSON: {exc}"
 
     def _start_locked(self) -> None:
+        if self._retired:
+            raise WorkerRetiredError(f"Worker [{self.model_id}] has been retired and cannot be started.")
+
         if self._is_ready_locked():
             return
 
@@ -251,6 +299,8 @@ class RuntimeWorkerProcess:
 
     def start(self) -> None:
         with self._lock:
+            if self._retired:
+                raise WorkerRetiredError(f"Worker [{self.model_id}] has been retired and cannot be started.")
             self._start_locked()
 
     def _terminate_locked(self) -> None:
@@ -310,20 +360,37 @@ class RuntimeWorkerProcess:
         with self._lock:
             self._terminate_locked()
 
+    def retire(self) -> None:
+        """Permanently evict and terminate this worker.
+        Once retired, this worker cannot be restarted or queried.
+        """
+        with self._lock:
+            self._retired = True
+            self._terminate_locked()
+
+    def is_retired(self) -> bool:
+        with self._lock:
+            return self._retired
+
     def is_alive(self) -> bool:
         with self._lock:
+            if self._retired:
+                return False
             return self._is_alive_locked()
 
     def is_ready(self) -> bool:
         with self._lock:
+            if self._retired:
+                return False
             return self._is_ready_locked()
 
     def status(self) -> Dict[str, Any]:
         with self._lock:
             return {
-                "alive": self._is_alive_locked(),
-                "ready": self._is_ready_locked(),
-                "state": self.state,
+                "alive": not self._retired and self._is_alive_locked(),
+                "ready": not self._retired and self._is_ready_locked(),
+                "retired": self._retired,
+                "state": self.state if not self._retired else STATE_STOPPED,
                 "pid": self._pid,
                 "profile": self.profile,
                 "device": self.device,
@@ -331,6 +398,9 @@ class RuntimeWorkerProcess:
             }
 
     def _query_raw_locked(self, req: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+        if self._retired:
+            return {"ok": False, "error_type": "WorkerRetiredError", "error": f"Worker [{self.model_id}] has been retired"}
+
         if not self._is_alive_locked() or not self._process or not self._process.stdin:
             return {"ok": False, "error_type": "ProcessError", "error": "Worker process not running"}
 
@@ -394,12 +464,17 @@ class RuntimeWorkerProcess:
             }
 
     def _query_with_retry_locked(self, req: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+        if self._retired:
+            raise WorkerRetiredError(f"Worker [{self.model_id}] has been retired and cannot be queried.")
+
         if not self._is_ready_locked():
             self._start_locked()
 
         res = self._query_raw_locked(req, timeout)
         # Automatic 1-attempt restart on unexpected crash / pipe disconnect (NOT on timeout)
         if res.get("error_type") in ("PipeWriteError", "WorkerCrashed"):
+            if self._retired:
+                raise WorkerRetiredError(f"Worker [{self.model_id}] was retired during query.")
             logger.warning(f"Worker [{self.model_id}] 发生崩溃或管道断开，正在尝试自动恢复重启...")
             self._terminate_locked()
             try:
@@ -416,6 +491,8 @@ class RuntimeWorkerProcess:
 
     def query(self, req: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
         with self._lock:
+            if self._retired:
+                raise WorkerRetiredError(f"Worker [{self.model_id}] has been retired and cannot be queried.")
             return self._query_with_retry_locked(req, timeout)
 
 
@@ -427,6 +504,33 @@ class WorkerClient:
         self.runtime_manager = get_runtime_manager(data_dir)
         self._workers: Dict[str, RuntimeWorkerProcess] = {}
         self._lock = threading.Lock()
+        self._cuda_execution_lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def cuda_execution_session(self, device: str = "cpu", timeout: Optional[float] = None):
+        """Coordinates exclusive access to CUDA devices across all models and detectors.
+        Pass-through for CPU requests (allows concurrent CPU execution).
+        For CUDA requests, acquires _cuda_execution_lock to ensure only one CUDA
+        session (worker query or smoke test) runs on the physical GPU at a time.
+        """
+        if device != "cuda":
+            yield
+            return
+
+        acquired = False
+        try:
+            if timeout is None:
+                acquired = self._cuda_execution_lock.acquire(blocking=True)
+            else:
+                if timeout <= 0:
+                    raise TimeoutError("Timed out waiting for CUDA execution session (budget exhausted)")
+                acquired = self._cuda_execution_lock.acquire(blocking=True, timeout=float(timeout))
+                if not acquired:
+                    raise TimeoutError(f"Timed out after {timeout:.1f}s waiting for CUDA execution session")
+            yield
+        finally:
+            if acquired:
+                self._cuda_execution_lock.release()
 
     def _get_worker_script(self, model_id: str) -> Path:
         workers_dir = Path(__file__).resolve().parent / "workers"
@@ -460,14 +564,26 @@ class WorkerClient:
         device: str = "cpu",
     ) -> RuntimeWorkerProcess:
         key = f"{model_id}:{profile}:{device}"
+        old_worker_to_retire: Optional[RuntimeWorkerProcess] = None
+
         with self._lock:
             if key in self._workers:
                 worker = self._workers[key]
-                if worker.is_ready():
+                if not worker.is_retired() and worker.is_ready():
                     return worker
-                else:
-                    worker.terminate()
-                    del self._workers[key]
+                old_worker_to_retire = self._workers.pop(key, None)
+
+        if old_worker_to_retire:
+            try:
+                old_worker_to_retire.retire()
+            except Exception:
+                pass
+
+        with self._lock:
+            if key in self._workers:
+                worker = self._workers[key]
+                if not worker.is_retired() and worker.is_ready():
+                    return worker
 
             python_bin = self.runtime_manager.get_python_bin(profile)
             worker_script = self._get_worker_script(model_id)
@@ -482,16 +598,23 @@ class WorkerClient:
                 startup_timeout=startup_timeout,
                 data_dir=self.data_dir,
             )
-            worker.start()
-            self._workers[key] = worker
-            return worker
+            try:
+                worker.start()
+                self._workers[key] = worker
+                return worker
+            except Exception:
+                try:
+                    worker.retire()
+                except Exception:
+                    pass
+                raise
 
     def stop_other_cuda_workers(self, keep_model_id: Optional[str] = None) -> List[str]:
         """Terminates and evicts all active CUDA workers except keep_model_id.
         Leaves CPU workers completely intact.
         NEVER touches or kills any external processes.
         """
-        evicted: List[str] = []
+        victims: List[Tuple[str, RuntimeWorkerProcess]] = []
         with self._lock:
             keys_to_remove = []
             for key, worker in list(self._workers.items()):
@@ -501,28 +624,54 @@ class WorkerClient:
             for key in keys_to_remove:
                 worker = self._workers.pop(key, None)
                 if worker:
-                    try:
-                        worker.terminate()
-                    except Exception as exc:
-                        logger.warning(f"终止 CUDA worker [{key}] 异常: {exc}")
-                    evicted.append(key)
+                    victims.append((key, worker))
+
+        evicted: List[str] = []
+        for key, worker in victims:
+            try:
+                if hasattr(worker, "retire"):
+                    worker.retire()
+                if hasattr(worker, "terminate"):
+                    worker.terminate()
+            except Exception as exc:
+                logger.warning(f"终止 CUDA worker [{key}] 异常: {exc}")
+            evicted.append(key)
+
         if evicted:
             logger.info(f"已驱逐 AIPrivacyCheck CUDA worker 以释放显存: {evicted}")
         return evicted
 
     def stop_worker_for_model(self, model_id: str) -> None:
+        victims: List[RuntimeWorkerProcess] = []
         with self._lock:
             keys_to_remove = [k for k in self._workers if k.startswith(f"{model_id}:")]
             for k in keys_to_remove:
                 worker = self._workers.pop(k, None)
                 if worker:
+                    victims.append(worker)
+
+        for worker in victims:
+            try:
+                if hasattr(worker, "retire"):
+                    worker.retire()
+                if hasattr(worker, "terminate"):
                     worker.terminate()
+            except Exception as exc:
+                logger.warning(f"终止 worker [{getattr(worker, 'model_id', '')}] 异常: {exc}")
 
     def stop_all(self) -> None:
         with self._lock:
-            for worker in self._workers.values():
-                worker.terminate()
+            victims = list(self._workers.values())
             self._workers.clear()
+
+        for worker in victims:
+            try:
+                if hasattr(worker, "retire"):
+                    worker.retire()
+                if hasattr(worker, "terminate"):
+                    worker.terminate()
+            except Exception as exc:
+                logger.warning(f"终止 worker 异常: {exc}")
 
     def run_smoke_test(
         self,
@@ -532,47 +681,48 @@ class WorkerClient:
         device: str = "cpu",
     ) -> Tuple[bool, Optional[str]]:
         """Executes a synthetic end-to-end smoke inference test to verify model + worker readiness."""
+        _, infer_timeout = self.get_timeout_for_model(model_id, device=device)
         try:
-            if device == "cuda" and "memprivacy" in model_id.lower():
-                self.stop_other_cuda_workers(keep_model_id=model_id)
+            with self.cuda_execution_session(device=device, timeout=float(infer_timeout)):
+                if device == "cuda" and "memprivacy" in model_id.lower():
+                    self.stop_other_cuda_workers(keep_model_id=model_id)
 
-            worker = self.get_worker(model_id, profile, device=device)
-            _, infer_timeout = self.get_timeout_for_model(model_id, device=device)
+                worker = self.get_worker(model_id, profile, device=device)
 
-            if "gliner" in model_id.lower():
-                sample_text = "My email is test@example.com."
-                req = {
-                    "action": "detect",
-                    "model_path": str(model_path),
-                    "text": sample_text,
-                    "labels": ["email"],
-                    "threshold": 0.2,
-                }
-            elif "siamese" in model_id.lower():
-                sample_text = "我叫张三，住在北京市朝阳区测试路88号。"
-                req = {
-                    "action": "detect",
-                    "model_path": str(model_path),
-                    "text": sample_text,
-                }
-            elif "memprivacy" in model_id.lower():
-                sample_text = "My verification code is 89757."
-                req = {
-                    "action": "detect",
-                    "model_path": str(model_path),
-                    "text": sample_text,
-                    "real_name": "unknown",
-                    "max_new_tokens": 128,
-                }
-            else:
+                if "gliner" in model_id.lower():
+                    sample_text = "My email is test@example.com."
+                    req = {
+                        "action": "detect",
+                        "model_path": str(model_path),
+                        "text": sample_text,
+                        "labels": ["email"],
+                        "threshold": 0.2,
+                    }
+                elif "siamese" in model_id.lower():
+                    sample_text = "我叫张三，住在北京市朝阳区测试路88号。"
+                    req = {
+                        "action": "detect",
+                        "model_path": str(model_path),
+                        "text": sample_text,
+                    }
+                elif "memprivacy" in model_id.lower():
+                    sample_text = "My verification code is 89757."
+                    req = {
+                        "action": "detect",
+                        "model_path": str(model_path),
+                        "text": sample_text,
+                        "real_name": "unknown",
+                        "max_new_tokens": 128,
+                    }
+                else:
+                    return True, None
+
+                res = worker.query(req, timeout=infer_timeout)
+                if not res.get("ok"):
+                    err_msg = res.get("error") or "Worker returned ok=False"
+                    return False, f"冒烟推理验证失败: {err_msg}"
+
                 return True, None
-
-            res = worker.query(req, timeout=infer_timeout)
-            if not res.get("ok"):
-                err_msg = res.get("error") or "Worker returned ok=False"
-                return False, f"冒烟推理验证失败: {err_msg}"
-
-            return True, None
         except Exception as exc:
             return False, f"冒烟测试异常: {exc}"
         finally:

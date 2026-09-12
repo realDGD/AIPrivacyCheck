@@ -336,14 +336,17 @@ class ChineseIEDetector:
                 if profile:
                     try:
                         from .worker_client import get_worker_client
-                        worker = get_worker_client(self.data_dir).get_worker(
-                            self.active_model_id, profile, device=device
-                        )
-                        res = worker.query({
-                            "action": "detect",
-                            "model_path": str(model_dir),
-                            "text": text,
-                        })
+                        worker_client = get_worker_client(self.data_dir)
+                        _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=device)
+                        with worker_client.cuda_execution_session(device=device, timeout=float(infer_timeout)):
+                            worker = worker_client.get_worker(
+                                self.active_model_id, profile, device=device
+                            )
+                            res = worker.query({
+                                "action": "detect",
+                                "model_path": str(model_dir),
+                                "text": text,
+                            }, timeout=infer_timeout)
                         if res.get("ok"):
                             for ent in res.get("entities", []):
                                 s = int(ent.get("start", 0))
