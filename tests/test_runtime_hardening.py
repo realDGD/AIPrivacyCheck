@@ -1801,6 +1801,91 @@ class RuntimeCacheInvalidationV056Tests(unittest.TestCase):
             self.assertEqual(st2["registry"]["slots"]["general_pii"]["detector"]["device"], "cpu")
 
 
+class CorrectnessHardeningV061Tests(unittest.TestCase):
+    """Regression tests for v0.6.1 correctness hardening."""
+
+    def test_codepoint_index_to_utf16_helper(self):
+        from privacy.entities import codepoint_index_to_utf16
+        # 1. ASCII
+        self.assertEqual(codepoint_index_to_utf16("hello", 0), 0)
+        self.assertEqual(codepoint_index_to_utf16("hello", 3), 3)
+        self.assertEqual(codepoint_index_to_utf16("hello", 5), 5)
+
+        # 2. Chinese (BMP, 1 code point == 1 code unit)
+        self.assertEqual(codepoint_index_to_utf16("你好世界", 2), 2)
+        self.assertEqual(codepoint_index_to_utf16("你好世界", 4), 4)
+
+        # 3. Emoji (Astral plane, U+1F600, 1 code point == 2 code units)
+        self.assertEqual(codepoint_index_to_utf16("😀张三", 0), 0)
+        self.assertEqual(codepoint_index_to_utf16("😀张三", 1), 2)
+        self.assertEqual(codepoint_index_to_utf16("😀张三", 2), 3)
+        self.assertEqual(codepoint_index_to_utf16("😀张三", 3), 4)
+
+        # 4. Regional indicator flag (🇨🇳 = U+1F1E8 U+1F1F3 -> 4 code units)
+        self.assertEqual(codepoint_index_to_utf16("🇨🇳张三", 1), 2)
+        self.assertEqual(codepoint_index_to_utf16("🇨🇳张三", 2), 4)
+        self.assertEqual(codepoint_index_to_utf16("🇨🇳张三", 3), 5)
+
+        # 5. Astral plane CJK character (𠀀 = U+20000 -> 2 code units)
+        self.assertEqual(codepoint_index_to_utf16("A𠀀B", 1), 1)
+        self.assertEqual(codepoint_index_to_utf16("A𠀀B", 2), 3)
+        self.assertEqual(codepoint_index_to_utf16("A𠀀B", 3), 4)
+
+        # 6. ZWJ emoji (👨\u200d👩\u200d👧\u200d👦 = 4 people + 3 ZWJs -> 7 codepoints, 11 code units)
+        zwj_text = "👨\u200d👩\u200d👧\u200d👦姓名"
+        self.assertEqual(codepoint_index_to_utf16(zwj_text, 7), 11)
+        self.assertEqual(codepoint_index_to_utf16(zwj_text, 9), 13)
+
+    def test_entity_serialization_exposes_utf16_offsets(self):
+        from privacy.entities import Entity
+        text = "😀张三的电话是13800138000"
+        entity = Entity(
+            entity_type="PHONE",
+            start=7,
+            end=18,
+            text="13800138000",
+            confidence=0.95,
+            sources=("rules",),
+        )
+        # Without text passed: falls back to start/end
+        d_no_text = entity.to_dict()
+        self.assertEqual(d_no_text["start"], 7)
+        self.assertEqual(d_no_text["end"], 18)
+        self.assertEqual(d_no_text["start_utf16"], 7)
+        self.assertEqual(d_no_text["end_utf16"], 18)
+
+        # With text passed: maps correctly to UTF-16 code unit offsets 8 and 19
+        d_with_text = entity.to_dict(text=text)
+        self.assertEqual(d_with_text["start"], 7)
+        self.assertEqual(d_with_text["end"], 18)
+        self.assertEqual(d_with_text["start_utf16"], 8)
+        self.assertEqual(d_with_text["end_utf16"], 19)
+
+    def test_reset_models_runs_even_if_refresh_probe_fails(self):
+        import server
+        with tempfile.TemporaryDirectory() as td:
+            ctrl = server.ModelLifecycleController(Path(td))
+            reset_called = []
+            orig_reset = server.PRIVACY.reset_models
+            server.PRIVACY.reset_models = lambda: reset_called.append(True)
+            orig_probe = server.DEVICE_MANAGER.probe_diagnostics
+            try:
+                def failing_probe(*args, **kwargs):
+                    if kwargs.get("force_refresh"):
+                        raise RuntimeError("Mock probe crash during refresh")
+                    return orig_probe(*args, **kwargs)
+
+                server.DEVICE_MANAGER.probe_diagnostics = failing_probe
+
+                with patch.object(server.model_installer, "import_local_model", return_value=(True, "ok")):
+                    with self.assertRaises(RuntimeError):
+                        ctrl.import_model("gliner-pii-edge", "/some/path")
+                    self.assertTrue(reset_called, "PRIVACY.reset_models must be called even if probe_diagnostics raised")
+            finally:
+                server.PRIVACY.reset_models = orig_reset
+                server.DEVICE_MANAGER.probe_diagnostics = orig_probe
+
+
 class IntegrationSmokeTests(unittest.TestCase):
     """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
 

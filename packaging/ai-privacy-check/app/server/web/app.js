@@ -107,6 +107,12 @@ function toast(message) {
 }
 
 function switchView(name) {
+  if (name !== "detect") {
+    if (state.retargeting) {
+      cancelEntityRetarget(false);
+    }
+    resetAnnotationInteractionState();
+  }
   document.querySelectorAll(".view-tab").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === name));
   document.querySelectorAll(".view").forEach((view) => {
     const active = view.id === `${name}View`;
@@ -141,24 +147,37 @@ async function shortFingerprint(value) {
 
 let entitySequence = 0;
 
+async function allocateReplacementToken(entityType, label, text, entities = []) {
+  const existing = entities.find((e) => e.type === entityType && e.text === text && e.replacement);
+  if (existing) {
+    return existing.replacement;
+  }
+  const distinctTexts = new Set(
+    entities
+      .filter((e) => e.type === entityType && e.replacement)
+      .map((e) => e.text)
+  );
+  const next = distinctTexts.size + 1;
+  const key = `${entityType}\u0000${text}`;
+  const fingerprint = await shortFingerprint(key);
+  const cleanLabel = (label || entityType).replace(/[\s/]+/g, "_");
+  return `⟦${cleanLabel}_${String(next).padStart(2, "0")}_${fingerprint}⟧`;
+}
+
 async function prepareEntities(entities) {
-  const typeCounts = new Map();
-  const tokens = new Map();
+  const prepared = [];
   for (const entity of entities) {
     entitySequence += 1;
     entity.id = entity.id || `ent_${entitySequence}_${Math.random().toString(36).slice(2, 7)}`;
-    const key = `${entity.type}\u0000${entity.text}`;
-    if (!tokens.has(key)) {
-      const next = (typeCounts.get(entity.type) || 0) + 1;
-      typeCounts.set(entity.type, next);
-      const fingerprint = await shortFingerprint(key);
-      const cleanLabel = entity.label.replace(/[\s/]+/g, "_");
-      tokens.set(key, `⟦${cleanLabel}_${String(next).padStart(2, "0")}_${fingerprint}⟧`);
+    if (typeof entity.start_utf16 === "number" && typeof entity.end_utf16 === "number") {
+      entity.start = entity.start_utf16;
+      entity.end = entity.end_utf16;
     }
     entity.enabled = true;
-    entity.replacement = tokens.get(key);
+    entity.replacement = await allocateReplacementToken(entity.type, entity.label, entity.text, prepared);
+    prepared.push(entity);
   }
-  return entities;
+  return prepared;
 }
 
 function maskPreview(value) {
@@ -217,6 +236,7 @@ function normalizeSourceSelection(source, start, end, entities, excludedEntity =
 
   const overlapsEntity = entities.some((entity) => (
     entity !== excludedEntity
+    && entity.enabled !== false
     && Number.isFinite(Number(entity.start))
     && Number.isFinite(Number(entity.end))
     && sourceStart < Number(entity.end)
@@ -307,6 +327,10 @@ function positionSelectionPopover(anchorRect) {
     popover.style.left = `${Math.round(left)}px`;
     popover.style.top = `${Math.round(Math.max(margin, top))}px`;
     popover.style.visibility = "visible";
+    const firstButton = popover.querySelector("button");
+    if (firstButton && typeof firstButton.focus === "function") {
+      firstButton.focus({ preventScroll: true });
+    }
   });
 }
 
@@ -322,6 +346,23 @@ function hideSelectionPopover(clearSelection = false) {
     elements.selectionPopover.classList.remove("is-type-picker");
   }
   if (clearSelection) clearBrowserSelection();
+}
+
+function resetAnnotationInteractionState(options = {}) {
+  const { preserveSelection = false } = options;
+  state.retargeting = null;
+  state.pendingSelection = null;
+  if (!preserveSelection && typeof clearBrowserSelection === "function") clearBrowserSelection();
+  hideSelectionPopover(true);
+  if (elements.redactedPreview && elements.redactedPreview.classList) {
+    elements.redactedPreview.classList.remove("is-retargeting");
+  }
+  if (elements.entityList && elements.entityList.classList) {
+    elements.entityList.classList.remove("is-retargeting");
+  }
+  if (typeof updateRedactedActionAvailability === "function") {
+    updateRedactedActionAvailability();
+  }
 }
 
 function renderSelectionPopover(actions, anchorRect, title = "", typePicker = false) {
@@ -374,12 +415,38 @@ function readPreviewSelection() {
   if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
   const range = selection.getRangeAt(0);
   if (!elements.redactedPreview.contains(range.startContainer) || !elements.redactedPreview.contains(range.endContainer)) return null;
+
+  const startInToken = Boolean(
+    (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement)?.closest(".redacted-token")
+  );
+  const endInToken = Boolean(
+    (range.endContainer.nodeType === 1 ? range.endContainer : range.endContainer.parentElement)?.closest(".redacted-token")
+  );
+  if (startInToken || endInToken) {
+    return { error: "crossing" };
+  }
+
   const start = sourceOffsetFromBoundary(range.startContainer, range.startOffset);
   const end = sourceOffsetFromBoundary(range.endContainer, range.endOffset);
-  if (start === null || end === null) return null;
+  if (start === null || end === null) return { error: "crossing" };
+
+  const sourceStart = Math.min(start, end);
+  const sourceEnd = Math.max(start, end);
   const excludedEntity = state.retargeting ? state.retargeting.entity : null;
+  const crossesEntity = state.entities.some((entity) => (
+    entity !== excludedEntity
+    && entity.enabled !== false
+    && Number.isFinite(Number(entity.start))
+    && Number.isFinite(Number(entity.end))
+    && sourceStart < Number(entity.start)
+    && sourceEnd > Number(entity.end)
+  ));
+  if (crossesEntity) {
+    return { error: "crossing" };
+  }
+
   const normalized = normalizeSourceSelection(state.source, start, end, state.entities, excludedEntity);
-  if (!normalized) return null;
+  if (!normalized) return { error: "overlap" };
   return { ...normalized, anchorRect: compactRect(range.getBoundingClientRect()) };
 }
 
@@ -449,10 +516,7 @@ async function createManualEntity(selection, option) {
   if (!selection) return;
   const chosen = option || MANUAL_ENTITY_OPTIONS[0];
   entitySequence += 1;
-  const key = `${chosen.type}\u0000${selection.text}`;
-  const fingerprint = await shortFingerprint(key);
-  const cleanLabel = chosen.label.replace(/[\s/]+/g, "_");
-  const typeCount = new Set(state.entities.filter((entity) => entity.type === chosen.type).map((entity) => entity.text)).size + 1;
+  const replacement = await allocateReplacementToken(chosen.type, chosen.label, selection.text, state.entities);
   const entity = {
     id: `manual_${entitySequence}_${Math.random().toString(36).slice(2, 7)}`,
     type: chosen.type,
@@ -467,12 +531,11 @@ async function createManualEntity(selection, option) {
     sources: ["manual_review"],
     privacy_level: chosen.privacyLevel || "PL2",
     enabled: true,
-    replacement: `⟦${cleanLabel}_${String(typeCount).padStart(2, "0")}_${fingerprint}⟧`,
+    replacement,
   };
   state.entities.push(entity);
   state.entities.sort((left, right) => left.start - right.start || left.end - right.end);
-  state.pendingSelection = null;
-  hideSelectionPopover(true);
+  resetAnnotationInteractionState();
   renderEntities();
   generateRedacted();
   focusReviewEntity(entity.id);
@@ -569,19 +632,18 @@ function cancelEntityRetarget(announce = true) {
     entity.enabled = snapshot.enabled;
     entity.replacement = snapshot.replacement;
   }
-  state.retargeting = null;
-  state.pendingSelection = null;
-  hideSelectionPopover(true);
+  resetAnnotationInteractionState();
   renderEntities();
   generateRedacted();
   if (announce) toast("已取消范围重选");
 }
 
-function applyEntityRetarget(selection) {
+async function applyEntityRetarget(selection) {
   if (!state.retargeting || !selection) return;
   const entity = state.retargeting.entity;
   const overlaps = state.entities.some((other) => (
     other !== entity
+    && other.enabled !== false
     && Number.isFinite(Number(other.start))
     && Number.isFinite(Number(other.end))
     && selection.start < Number(other.end)
@@ -594,10 +656,14 @@ function applyEntityRetarget(selection) {
   entity.start = selection.start;
   entity.end = selection.end;
   entity.text = selection.text;
-  state.retargeting = null;
-  state.pendingSelection = null;
+  entity.replacement = await allocateReplacementToken(
+    entity.type,
+    entity.label,
+    entity.text,
+    state.entities.filter((e) => e !== entity)
+  );
+  resetAnnotationInteractionState();
   state.entities.sort((left, right) => left.start - right.start || left.end - right.end);
-  hideSelectionPopover(true);
   renderEntities();
   generateRedacted();
   focusReviewEntity(entity.id);
@@ -612,6 +678,15 @@ function handlePreviewSelection() {
   }
   const selection = readPreviewSelection();
   if (!selection) {
+    hideSelectionPopover();
+    return;
+  }
+  if (selection.error === "crossing") {
+    hideSelectionPopover();
+    toast("不能跨已有隐私占位符划选，请只选择普通文本。");
+    return;
+  }
+  if (selection.error === "overlap") {
     hideSelectionPopover();
     toast("所选范围与现有隐私条目重叠，请重新选择。");
     return;
@@ -832,14 +907,48 @@ function renderEntities() {
   });
 }
 
+function invalidateRedactedState(hasConflict = false) {
+  elements.redactedText.value = "";
+  state.vault = [];
+  renderRedactedPreview();
+  setCounter(elements.redactedText, elements.redactedCounter);
+  elements.copyRedactedButton.disabled = true;
+  elements.copyPromptButton.disabled = true;
+  elements.exportVaultButton.disabled = true;
+  elements.vaultSummary.textContent = hasConflict ? "当前脱敏结果无效，映射已作废" : "尚未生成映射";
+  elements.activeVaultBadge.textContent = "当前会话：0 个映射";
+}
+
 function generateRedacted() {
-  if (!state.source) return;
-  const enabled = state.entities.filter((entity) => entity.enabled && entity.replacement);
-  const uniqueTokens = new Map();
-  enabled.forEach((entity) => uniqueTokens.set(entity.replacement, entity));
-  if (uniqueTokens.size !== enabled.reduce((set, entity) => set.add(`${entity.type}\u0000${entity.text}`), new Set()).size) {
-    showNotice("存在重复占位符，请修改后再复制。", true);
+  if (!state.source) {
+    invalidateRedactedState(false);
     return;
+  }
+  const enabled = state.entities.filter((entity) => entity.enabled && entity.replacement);
+
+  // Invariant 1: same replacement token must map to the exact same original text
+  const tokenToValue = new Map();
+  for (const entity of enabled) {
+    if (tokenToValue.has(entity.replacement)) {
+      const existingVal = tokenToValue.get(entity.replacement);
+      if (existingVal !== entity.text) {
+        showNotice("当前脱敏结果无效：同一占位符对应了不同原文内容，请修复冲突后再复制。", true);
+        invalidateRedactedState(true);
+        return;
+      }
+    } else {
+      tokenToValue.set(entity.replacement, entity.text);
+    }
+  }
+
+  // Invariant 2: enabled entities must not overlap in character spans
+  const sorted = [...enabled].sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (sorted[i].end > sorted[i + 1].start) {
+      showNotice("当前脱敏结果无效：存在重叠的隐私条目范围，请调整后再复制。", true);
+      invalidateRedactedState(true);
+      return;
+    }
   }
 
   let result = state.source;
@@ -884,6 +993,7 @@ async function detect() {
         policy_level: policyLevel,
       }),
     });
+    resetAnnotationInteractionState();
     state.source = text;
     state.entities = await prepareEntities(result.entities);
     renderEntities();
@@ -1513,6 +1623,7 @@ async function changeDevice() {
 }
 
 function clearAll() {
+  resetAnnotationInteractionState();
   state.source = "";
   state.entities = [];
   state.vault = [];
@@ -1633,6 +1744,20 @@ window.addEventListener("resize", () => {
   }
 });
 
+if (elements.redactedPreview) {
+  elements.redactedPreview.addEventListener("scroll", () => {
+    if (elements.selectionPopover && !elements.selectionPopover.hidden) {
+      hideSelectionPopover(true);
+    }
+  }, { passive: true });
+}
+
+window.addEventListener("scroll", () => {
+  if (elements.selectionPopover && !elements.selectionPopover.hidden) {
+    hideSelectionPopover(true);
+  }
+}, { passive: true });
+
 renderEntities();
 renderRedactedPreview();
 refreshModelStatus();
@@ -1641,5 +1766,16 @@ if (typeof window !== "undefined") {
   window.deriveModelRuntimeState = deriveModelRuntimeState;
 }
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { deriveModelRuntimeState };
+  module.exports = {
+    deriveModelRuntimeState,
+    allocateReplacementToken,
+    resetAnnotationInteractionState,
+    invalidateRedactedState,
+    prepareEntities,
+    generateRedacted,
+    normalizeSourceSelection,
+    buildRedactedSegments,
+    buildRetargetSegments,
+    createManualEntity,
+  };
 }

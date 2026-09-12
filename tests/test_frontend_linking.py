@@ -23,7 +23,8 @@ class FrontendEntityLinkingTests(unittest.TestCase):
           let start = content.indexOf(`async function ${{name}}`);
           if (start < 0) start = content.indexOf(`function ${{name}}`);
           if (start < 0) throw new Error(`Function not found: ${{name}}`);
-          const brace = content.indexOf('{{', start);
+          const paramClose = content.indexOf(')', start);
+          const brace = content.indexOf('{{', paramClose);
           let depth = 0;
           for (let index = brace; index < content.length; index += 1) {{
             if (content[index] === '{{') depth += 1;
@@ -189,6 +190,8 @@ class FrontendEntityLinkingTests(unittest.TestCase):
         function updateVaultSummary() {}
 
         eval(extractFunction('shortFingerprint'));
+        eval(extractFunction('allocateReplacementToken'));
+        eval(extractFunction('resetAnnotationInteractionState'));
         eval(extractFunction('createManualEntity'));
 
         const MANUAL_ENTITY_OPTIONS = [
@@ -292,33 +295,46 @@ class FrontendEntityLinkingTests(unittest.TestCase):
         function updateRedactedActionAvailability() {}
         function updateVaultSummary() {}
 
+        const crypto = require('crypto');
+        global.crypto = {
+          subtle: {
+            digest: async (algo, data) => crypto.createHash('sha256').update(data).digest()
+          }
+        };
+        const encoder = new (require('util').TextEncoder)();
+
+        eval(extractFunction('shortFingerprint'));
+        eval(extractFunction('allocateReplacementToken'));
+        eval(extractFunction('resetAnnotationInteractionState'));
         eval(extractFunction('resolveEntity'));
         eval(extractFunction('generateRedacted'));
         eval(extractFunction('startEntityRetarget'));
         eval(extractFunction('cancelEntityRetarget'));
         eval(extractFunction('applyEntityRetarget'));
 
-        startEntityRetarget('e1');
-        const snapshot = { ...state.retargeting.snapshot };
-        cancelEntityRetarget(false);
-        const restoredAfterCancel = state.entities[0].start === 3 && state.entities[0].end === 5;
+        (async () => {
+          startEntityRetarget('e1');
+          const snapshot = { ...state.retargeting.snapshot };
+          cancelEntityRetarget(false);
+          const restoredAfterCancel = state.entities[0].start === 3 && state.entities[0].end === 5;
 
-        startEntityRetarget('e1');
-        applyEntityRetarget({ start: 7, end: 15, text: '电话13800' });
-        const overlapRejected = state.retargeting !== null;
+          startEntityRetarget('e1');
+          await applyEntityRetarget({ start: 7, end: 15, text: '电话13800' });
+          const overlapRejected = state.retargeting !== null;
 
-        applyEntityRetarget({ start: 0, end: 5, text: '联系人张三' });
-        const finalEntity = state.entities.find(e => e.id === 'e1');
+          await applyEntityRetarget({ start: 0, end: 5, text: '联系人张三' });
+          const finalEntity = state.entities.find(e => e.id === 'e1');
 
-        console.log(JSON.stringify({
-          snapshot,
-          restoredAfterCancel,
-          overlapRejected,
-          finalStart: finalEntity.start,
-          finalEnd: finalEntity.end,
-          finalText: finalEntity.text,
-          finalId: finalEntity.id
-        }));
+          console.log(JSON.stringify({
+            snapshot,
+            restoredAfterCancel,
+            overlapRejected,
+            finalStart: finalEntity.start,
+            finalEnd: finalEntity.end,
+            finalText: finalEntity.text,
+            finalId: finalEntity.id
+          }));
+        })();
         """)
         self.assertEqual(result["snapshot"], {"start": 3, "end": 5, "text": "张三", "enabled": True, "replacement": "⟦姓名_01_A1B2⟧"})
         self.assertTrue(result["restoredAfterCancel"])
@@ -361,7 +377,7 @@ class FrontendEntityLinkingTests(unittest.TestCase):
         self.assertIn(".redacted-preview.is-retargeting", self.styles)
         self.assertIn(".entity-card.is-link-target", self.styles)
 
-    def test_full_12_step_browser_workflow_simulation(self):
+    def test_full_annotation_state_machine_simulation(self):
         result = self.run_node("""
         const crypto = require("crypto");
         global.crypto = {
@@ -440,6 +456,8 @@ class FrontendEntityLinkingTests(unittest.TestCase):
           detectionNotice: makeElement(),
           selectionPopover: makeElement()
         };
+        global.elements = elements;
+        global.window = { matchMedia: () => ({ matches: false }), getSelection: () => null };
 
         function toast(msg) { domEvents.push(`toast:${msg}`); }
         function setCounter() {}
@@ -448,6 +466,9 @@ class FrontendEntityLinkingTests(unittest.TestCase):
         function updateVaultSummary() {}
 
         eval(extractFunction("shortFingerprint"));
+        eval(extractFunction("allocateReplacementToken"));
+        eval(extractFunction("resetAnnotationInteractionState"));
+        eval(extractFunction("invalidateRedactedState"));
         eval(extractFunction("prepareEntities"));
         eval(extractFunction("maskPreview"));
         eval(extractFunction("buildRedactedSegments"));
@@ -516,7 +537,7 @@ class FrontendEntityLinkingTests(unittest.TestCase):
           // Step 11: Re-enter retarget and apply valid new range
           startEntityRetarget(manualEnt.id);
           const newRange = { start: 2, end: 8, text: "的电话号码" };
-          applyEntityRetarget(newRange);
+          await applyEntityRetarget(newRange);
           const step11Text = state.entities.find(e => e.id === manualEnt.id).text;
 
           // Step 12: Delete entity
@@ -546,8 +567,499 @@ class FrontendEntityLinkingTests(unittest.TestCase):
         self.assertEqual(result["step11Text"], "的电话号码")
         self.assertEqual(result["step12Count"], 3)
         self.assertIn("的电话号码", result["step12Restored"])
-        self.assertIn("⟦姓名_01_", result["step12Restored"])
-        self.assertIn("⟦电话号码_01_", result["step12Restored"])
+    def test_unicode_safe_copy_with_emoji_offsets(self):
+        result = self.run_node("""
+        const crypto = require('crypto');
+        global.crypto = {
+          subtle: {
+            digest: async (algo, data) => crypto.createHash('sha256').update(data).digest()
+          }
+        };
+        const encoder = new (require('util').TextEncoder)();
+        let entitySequence = 0;
+        const state = { source: '', entities: [], vault: [] };
+        const elements = {
+          redactedText: { value: '' },
+          redactedCounter: { textContent: '' },
+          copyRedactedButton: { disabled: true },
+          copyPromptButton: { disabled: true },
+          exportVaultButton: { disabled: true },
+          vaultSummary: { textContent: '' },
+          activeVaultBadge: { textContent: '' },
+          selectionPopover: { hidden: true, replaceChildren: () => {}, classList: { remove: () => {} } }
+        };
+        function renderEntities() {}
+        function renderRedactedPreview() {}
+        function hideSelectionPopover() {}
+        function setCounter() {}
+        function showNotice() {}
+        function updateRedactedActionAvailability() {}
+
+        eval(extractFunction('shortFingerprint'));
+        eval(extractFunction('allocateReplacementToken'));
+        eval(extractFunction('resetAnnotationInteractionState'));
+        eval(extractFunction('invalidateRedactedState'));
+        eval(extractFunction('prepareEntities'));
+        eval(extractFunction('generateRedacted'));
+
+        (async () => {
+          const testCases = [
+            // 1. Emoji 😀 (1 codepoint, 2 code units)
+            {
+              text: '😀张三的电话是13800138000',
+              raw: [{ type: 'PHONE', label: '电话号码', text: '13800138000', start: 7, end: 18, start_utf16: 8, end_utf16: 19 }]
+            },
+            // 2. Regional flag 🇨🇳 (2 codepoints, 4 code units)
+            {
+              text: '🇨🇳张三的电话是13800138000',
+              raw: [{ type: 'PHONE', label: '电话号码', text: '13800138000', start: 8, end: 19, start_utf16: 10, end_utf16: 21 }]
+            },
+            // 3. ZWJ emoji 👨‍👩‍👧‍👦 (7 codepoints, 11 code units)
+            {
+              text: '👨\\u200d👩\\u200d👧\\u200d👦姓名：张三电话13800138000',
+              raw: [
+                { type: 'CN_NAME', label: '姓名', text: '张三', start: 10, end: 12, start_utf16: 14, end_utf16: 16 },
+                { type: 'PHONE', label: '电话号码', text: '13800138000', start: 14, end: 25, start_utf16: 18, end_utf16: 29 }
+              ]
+            },
+            // 4. Astral plane character 𠀀 (U+20000, 1 codepoint, 2 code units)
+            {
+              text: 'A𠀀B王五电话13800138000',
+              raw: [
+                { type: 'CN_NAME', label: '姓名', text: '王五', start: 3, end: 5, start_utf16: 4, end_utf16: 6 },
+                { type: 'PHONE', label: '电话号码', text: '13800138000', start: 7, end: 18, start_utf16: 8, end_utf16: 19 }
+              ]
+            },
+            // 5. Combining mark é (e + \\u0301, 2 codepoints, 2 code units)
+            {
+              text: 'e\\u0301张三电话13800138000',
+              raw: [{ type: 'PHONE', label: '电话号码', text: '13800138000', start: 5, end: 16, start_utf16: 5, end_utf16: 16 }]
+            },
+            // 6. Arabic / RTL text
+            {
+              text: 'مرحبا 13800138000 شكرا',
+              raw: [{ type: 'PHONE', label: '电话号码', text: '13800138000', start: 6, end: 17, start_utf16: 6, end_utf16: 17 }]
+            }
+          ];
+
+          const outputs = [];
+          for (const tc of testCases) {
+            state.source = tc.text;
+            state.entities = await prepareEntities(tc.raw);
+            generateRedacted();
+            outputs.push({
+              source: tc.text,
+              redacted: elements.redactedText.value,
+              entities: state.entities
+            });
+          }
+          console.log(JSON.stringify(outputs));
+        })();
+        """)
+        # Verify Case 1 (😀): starts with "😀张三的电话是" and ends with replacement token, NO trailing "0"!
+        c1 = result[0]
+        self.assertTrue(c1["redacted"].startswith("😀张三的电话是⟦电话号码_"))
+        self.assertTrue(c1["redacted"].endswith("⟧"))
+        self.assertFalse(c1["redacted"].endswith("0"))
+
+        # Verify Case 2 (🇨🇳): starts with "🇨🇳张三的电话是" and ends with replacement token, NO trailing "0"!
+        c2 = result[1]
+        self.assertTrue(c2["redacted"].startswith("🇨🇳张三的电话是⟦电话号码_"))
+        self.assertTrue(c2["redacted"].endswith("⟧"))
+        self.assertFalse(c2["redacted"].endswith("0"))
+
+        # Verify Case 3 (👨‍👩‍👧‍👦): no broken surrogate, no replacement character, correct tokens
+        c3 = result[2]
+        self.assertNotIn("\ufffd", c3["redacted"])
+        self.assertIn("⟦姓名_", c3["redacted"])
+        self.assertIn("⟦电话号码_", c3["redacted"])
+
+        # Verify Case 4 (𠀀): astral plane preserved
+        c4 = result[3]
+        self.assertTrue(c4["redacted"].startswith("A𠀀B⟦姓名_"))
+        self.assertNotIn("\ufffd", c4["redacted"])
+
+        # Verify Case 6 (Arabic):
+        c6 = result[5]
+        self.assertIn("مرحبا", c6["redacted"])
+        self.assertIn("شكرا", c6["redacted"])
+
+    def test_unicode_vault_restore_roundtrip(self):
+        result = self.run_node("""
+        const crypto = require('crypto');
+        global.crypto = {
+          subtle: {
+            digest: async (algo, data) => crypto.createHash('sha256').update(data).digest()
+          }
+        };
+        const encoder = new (require('util').TextEncoder)();
+        let entitySequence = 0;
+        const state = { source: '', entities: [], vault: [] };
+        const elements = {
+          redactedText: { value: '' },
+          redactedCounter: { textContent: '' },
+          copyRedactedButton: { disabled: true },
+          copyPromptButton: { disabled: true },
+          exportVaultButton: { disabled: true },
+          vaultSummary: { textContent: '' },
+          activeVaultBadge: { textContent: '' },
+          selectionPopover: { hidden: true, replaceChildren: () => {}, classList: { remove: () => {} } }
+        };
+        function renderEntities() {}
+        function renderRedactedPreview() {}
+        function hideSelectionPopover() {}
+        function setCounter() {}
+        function showNotice() {}
+        function updateRedactedActionAvailability() {}
+
+        eval(extractFunction('shortFingerprint'));
+        eval(extractFunction('allocateReplacementToken'));
+        eval(extractFunction('resetAnnotationInteractionState'));
+        eval(extractFunction('invalidateRedactedState'));
+        eval(extractFunction('prepareEntities'));
+        eval(extractFunction('generateRedacted'));
+
+        (async () => {
+          const original = '😀张三联系了A𠀀B王五，电话是13800138000。';
+          state.source = original;
+          state.entities = await prepareEntities([
+            { type: 'CN_NAME', label: '姓名', text: '张三', start: 1, end: 3, start_utf16: 2, end_utf16: 4 },
+            { type: 'CN_NAME', label: '姓名', text: '王五', start: 9, end: 11, start_utf16: 11, end_utf16: 13 },
+            { type: 'PHONE', label: '电话号码', text: '13800138000', start: 15, end: 26, start_utf16: 17, end_utf16: 28 }
+          ]);
+          generateRedacted();
+          const safeCopy = elements.redactedText.value;
+
+          // Simulate AI reply repeating the placeholders
+          const aiReply = `收到，我们将尽快联系 ${state.entities[0].replacement} 和 ${state.entities[1].replacement}，确认号码 ${state.entities[2].replacement}。`;
+
+          // Restore using state.vault
+          let restored = aiReply;
+          state.vault.forEach((item) => {
+            restored = restored.replaceAll(item.token, item.value);
+          });
+
+          // Also restore safe copy directly
+          let fullRestored = safeCopy;
+          state.vault.forEach((item) => {
+            fullRestored = fullRestored.replaceAll(item.token, item.value);
+          });
+
+          console.log(JSON.stringify({
+            original,
+            safeCopy,
+            aiReply,
+            restored,
+            fullRestored,
+            vaultCount: state.vault.length
+          }));
+        })();
+        """)
+        self.assertEqual(result["fullRestored"], result["original"])
+        self.assertIn("张三", result["restored"])
+        self.assertIn("王五", result["restored"])
+        self.assertIn("13800138000", result["restored"])
+        self.assertEqual(result["vaultCount"], 3)
+
+    def test_manual_duplicate_reuses_existing_token(self):
+        result = self.run_node("""
+        const crypto = require('crypto');
+        global.crypto = {
+          subtle: {
+            digest: async (algo, data) => crypto.createHash('sha256').update(data).digest()
+          }
+        };
+        const encoder = new (require('util').TextEncoder)();
+        let entitySequence = 0;
+        const state = { source: '', entities: [], vault: [], pendingSelection: null };
+        const notices = [];
+        const elements = {
+          redactedText: { value: '' },
+          redactedCounter: { textContent: '' },
+          copyRedactedButton: { disabled: true },
+          copyPromptButton: { disabled: true },
+          exportVaultButton: { disabled: true },
+          vaultSummary: { textContent: '' },
+          activeVaultBadge: { textContent: '' },
+          selectionPopover: { hidden: true, replaceChildren: () => {}, classList: { remove: () => {} } }
+        };
+        function renderEntities() {}
+        function renderRedactedPreview() {}
+        function hideSelectionPopover() {}
+        function focusReviewEntity() {}
+        function toast() {}
+        function setCounter() {}
+        function showNotice(msg) { if (msg) notices.push(msg); }
+        function updateRedactedActionAvailability() {}
+
+        eval(extractFunction('shortFingerprint'));
+        eval(extractFunction('allocateReplacementToken'));
+        eval(extractFunction('resetAnnotationInteractionState'));
+        eval(extractFunction('invalidateRedactedState'));
+        eval(extractFunction('prepareEntities'));
+        eval(extractFunction('createManualEntity'));
+        eval(extractFunction('generateRedacted'));
+
+        (async () => {
+          state.source = '张三说你好，张三说再见。';
+          // Auto detector only found the first "张三"
+          state.entities = await prepareEntities([
+            { type: 'CN_NAME', label: '姓名', text: '张三', start: 0, end: 2, start_utf16: 0, end_utf16: 2 }
+          ]);
+          generateRedacted();
+          const autoToken = state.entities[0].replacement;
+
+          // User manually tags the second "张三" at 6..8
+          const manualOption = { type: 'CN_NAME', label: '姓名', privacyLevel: 'PL2' };
+          await createManualEntity({ text: '张三', start: 6, end: 8 }, manualOption);
+
+          const manualToken = state.entities.find(e => e.start === 6).replacement;
+          const redacted = elements.redactedText.value;
+          const copyEnabled = !elements.copyRedactedButton.disabled;
+
+          console.log(JSON.stringify({
+            autoToken,
+            manualToken,
+            redacted,
+            copyEnabled,
+            notices,
+            vault: state.vault
+          }));
+        })();
+        """)
+        # Both auto and manual entity share the same token
+        self.assertEqual(result["autoToken"], result["manualToken"])
+        self.assertTrue(result["copyEnabled"])
+        self.assertEqual(len(result["vault"]), 1)
+        # Redacted text has both replaced by the same token
+        token = result["autoToken"]
+        expected = f"{token}说你好，{token}说再见。"
+        self.assertEqual(result["redacted"], expected)
+
+    def test_generate_redacted_rejects_token_value_collision(self):
+        result = self.run_node("""
+        let entitySequence = 0;
+        const notices = [];
+        const state = {
+          source: '张三和李四在此。',
+          entities: [
+            { id: 'e1', type: 'CN_NAME', label: '姓名', text: '张三', start: 0, end: 2, enabled: true, replacement: '⟦姓名_01_TEST⟧' },
+            // Tampered/collision: same token but different value '李四'
+            { id: 'e2', type: 'CN_NAME', label: '姓名', text: '李四', start: 3, end: 5, enabled: true, replacement: '⟦姓名_01_TEST⟧' }
+          ],
+          vault: []
+        };
+        const elements = {
+          redactedText: { value: 'old valid text' },
+          redactedCounter: { textContent: '' },
+          copyRedactedButton: { disabled: false },
+          copyPromptButton: { disabled: false },
+          exportVaultButton: { disabled: false },
+          vaultSummary: { textContent: '' },
+          activeVaultBadge: { textContent: '' }
+        };
+        function renderRedactedPreview() {}
+        function setCounter() {}
+        function showNotice(msg, isError) { notices.push({ msg, isError }); }
+
+        eval(extractFunction('invalidateRedactedState'));
+        eval(extractFunction('generateRedacted'));
+
+        generateRedacted();
+
+        console.log(JSON.stringify({
+          copyDisabled: elements.copyRedactedButton.disabled,
+          promptDisabled: elements.copyPromptButton.disabled,
+          exportDisabled: elements.exportVaultButton.disabled,
+          redactedValue: elements.redactedText.value,
+          vaultLen: state.vault.length,
+          notices
+        }));
+        """)
+        self.assertTrue(result["copyDisabled"])
+        self.assertTrue(result["promptDisabled"])
+        self.assertTrue(result["exportDisabled"])
+        self.assertEqual(result["redactedValue"], "")
+        self.assertEqual(result["vaultLen"], 0)
+        self.assertTrue(any("同一占位符对应了不同原文内容" in n["msg"] for n in result["notices"]))
+
+    def test_generate_redacted_failure_disables_copy(self):
+        result = self.run_node("""
+        let entitySequence = 0;
+        const notices = [];
+        const state = {
+          source: '重叠测试样例。',
+          entities: [
+            // Overlapping spans: 0..4 and 2..6
+            { id: 'e1', type: 'GENERIC_PRIVACY', label: '隐私条目', text: '重叠测试', start: 0, end: 4, enabled: true, replacement: '⟦隐私条目_01_A⟧' },
+            { id: 'e2', type: 'GENERIC_PRIVACY', label: '隐私条目', text: '测试样例', start: 2, end: 6, enabled: true, replacement: '⟦隐私条目_02_B⟧' }
+          ],
+          vault: [{ token: 'old', value: 'val' }]
+        };
+        const elements = {
+          redactedText: { value: 'previously generated safe copy' },
+          redactedCounter: { textContent: '' },
+          copyRedactedButton: { disabled: false },
+          copyPromptButton: { disabled: false },
+          exportVaultButton: { disabled: false },
+          vaultSummary: { textContent: '3 个加密映射仅保留在当前页面' },
+          activeVaultBadge: { textContent: '当前会话：3 个映射' }
+        };
+        function renderRedactedPreview() {}
+        function setCounter() {}
+        function showNotice(msg, isError) { notices.push({ msg, isError }); }
+
+        eval(extractFunction('invalidateRedactedState'));
+        eval(extractFunction('generateRedacted'));
+
+        generateRedacted();
+
+        console.log(JSON.stringify({
+          copyDisabled: elements.copyRedactedButton.disabled,
+          promptDisabled: elements.copyPromptButton.disabled,
+          exportDisabled: elements.exportVaultButton.disabled,
+          redactedValue: elements.redactedText.value,
+          vaultLen: state.vault.length,
+          summary: elements.vaultSummary.textContent,
+          notices
+        }));
+        """)
+        self.assertTrue(result["copyDisabled"])
+        self.assertTrue(result["promptDisabled"])
+        self.assertTrue(result["exportDisabled"])
+        self.assertEqual(result["redactedValue"], "")
+        self.assertEqual(result["vaultLen"], 0)
+        self.assertIn("当前脱敏结果无效", result["summary"])
+        self.assertTrue(any("重叠的隐私条目范围" in n["msg"] for n in result["notices"]))
+
+    def test_detect_resets_retarget_state(self):
+        result = self.run_node("""
+        const state = {
+          source: '旧文本',
+          entities: [{ id: 'e1', text: '旧', start: 0, end: 1, enabled: true, replacement: '⟦旧_01_A⟧' }],
+          retargeting: { entity: {}, snapshot: {} },
+          pendingSelection: { start: 0, end: 1, text: '旧' }
+        };
+        const elements = {
+          sourceText: { value: '新文本内容' },
+          detectButton: { disabled: false, innerHTML: '' },
+          redactedPreview: { classList: { remove: () => {} } },
+          entityList: { classList: { remove: () => {} } },
+          selectionPopover: { hidden: false, replaceChildren: () => {}, classList: { remove: () => {} } }
+        };
+        function clearBrowserSelection() {}
+        function hideSelectionPopover() {}
+        function showNotice() {}
+        function renderEntities() {}
+        function generateRedacted() {}
+        function updateRedactedActionAvailability() {}
+        async function api(path, opts) {
+          return { entities: [], policy_level: 'PL2', processing_ms: 5 };
+        }
+        async function prepareEntities(e) { return e; }
+
+        eval(extractFunction('resetAnnotationInteractionState'));
+        eval(extractFunction('detect'));
+
+        (async () => {
+          await detect();
+          console.log(JSON.stringify({
+            retargeting: state.retargeting,
+            pendingSelection: state.pendingSelection,
+            source: state.source
+          }));
+        })();
+        """)
+        self.assertIsNone(result["retargeting"])
+        self.assertIsNone(result["pendingSelection"])
+        self.assertEqual(result["source"], "新文本内容")
+
+    def test_clear_all_resets_annotation_state(self):
+        result = self.run_node("""
+        const state = {
+          source: '测试文本',
+          entities: [{ id: 'e1', text: '测试', start: 0, end: 2 }],
+          vault: [{ token: 't', value: 'v' }],
+          retargeting: { entity: {} },
+          pendingSelection: { text: '选区' }
+        };
+        const elements = {
+          sourceText: { value: '测试文本' },
+          redactedText: { value: '脱敏文本' },
+          replyText: { value: '回复' },
+          restoredText: { value: '恢复' },
+          sourceCounter: {},
+          redactedCounter: {},
+          replyCounter: {},
+          restoredCounter: {},
+          copyRedactedButton: { disabled: false },
+          copyPromptButton: { disabled: false },
+          copyRestoredButton: { disabled: false },
+          exportVaultButton: { disabled: false },
+          vaultSummary: { textContent: '3 映射' },
+          activeVaultBadge: { textContent: '3 映射' },
+          restoreReport: { hidden: false },
+          redactedPreview: { classList: { remove: () => {} } },
+          entityList: { classList: { remove: () => {} } },
+          selectionPopover: { hidden: false, replaceChildren: () => {}, classList: { remove: () => {} } }
+        };
+        function clearBrowserSelection() {}
+        function hideSelectionPopover() {}
+        function renderEntities() {}
+        function renderRedactedPreview() {}
+        function setCounter() {}
+        function showNotice() {}
+        function toast() {}
+        function updateRedactedActionAvailability() {}
+
+        eval(extractFunction('resetAnnotationInteractionState'));
+        eval(extractFunction('clearAll'));
+
+        clearAll();
+
+        console.log(JSON.stringify({
+          source: state.source,
+          entitiesLen: state.entities.length,
+          vaultLen: state.vault.length,
+          retargeting: state.retargeting,
+          pendingSelection: state.pendingSelection,
+          copyRedactedDisabled: elements.copyRedactedButton.disabled
+        }));
+        """)
+        self.assertEqual(result["source"], "")
+        self.assertEqual(result["entitiesLen"], 0)
+        self.assertEqual(result["vaultLen"], 0)
+        self.assertIsNone(result["retargeting"])
+        self.assertIsNone(result["pendingSelection"])
+        self.assertTrue(result["copyRedactedDisabled"])
+
+    def test_disabled_entity_does_not_block_manual_annotation(self):
+        result = self.run_node("""
+        eval(extractFunction('normalizeSourceSelection'));
+
+        const source = '联系人张三先生';
+        // Case A: entity enabled=false
+        const entitiesDisabled = [
+          { id: 'e1', label: '姓名', text: '张三', start: 3, end: 5, enabled: false }
+        ];
+        const resA = normalizeSourceSelection(source, 3, 5, entitiesDisabled);
+
+        // Case B: entity enabled=true
+        const entitiesEnabled = [
+          { id: 'e1', label: '姓名', text: '张三', start: 3, end: 5, enabled: true }
+        ];
+        const resB = normalizeSourceSelection(source, 3, 5, entitiesEnabled);
+
+        console.log(JSON.stringify({ resA, resB }));
+        """)
+        # When disabled: selection over 3..5 is allowed
+        self.assertIsNotNone(result["resA"])
+        self.assertEqual(result["resA"]["start"], 3)
+        self.assertEqual(result["resA"]["end"], 5)
+        self.assertEqual(result["resA"]["text"], "张三")
+
+        # When enabled: selection over 3..5 is rejected as overlap
+        self.assertIsNone(result["resB"])
 
 
 if __name__ == "__main__":
