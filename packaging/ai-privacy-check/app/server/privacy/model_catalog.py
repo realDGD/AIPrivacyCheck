@@ -1,12 +1,15 @@
 """Centralized Model Catalog for AI Privacy Check.
 
-All officially supported downloadable models originate exclusively from ModelScope (魔搭社区).
+All officially supported downloadable models originate from ModelScope (魔搭社区).
 Centralizes model metadata, slot association, licensing, hardware compatibility,
-and prevents scattered hardcoding across server, UI, installer, and detectors.
+and model integrity validation.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 
 SLOT_BUILT_IN = "built_in"
@@ -49,7 +52,7 @@ class ModelDescriptor:
     license: str
     approx_size: str
     architectures: Tuple[str, ...]
-    runtime: str  # "paddle", "torch", "gliner"
+    runtime: str  # "torch"
     supports_cpu: bool
     supports_cuda: bool
     recommended: bool
@@ -81,15 +84,15 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         slot=SLOT_CHINESE_IE,
         provider="modelscope",
         repo_id="iic/nlp_structbert_siamese-uie_chinese-base",
-        revision="v1.0.0",
+        revision="master",
         license="Apache-2.0",
         approx_size="420 MB",
         architectures=("x86_64", "arm64", "aarch64"),
-        runtime="paddle",
+        runtime="torch",
         supports_cpu=True,
         supports_cuda=True,
         recommended=True,
-        description="面向中文信息抽取的通用 UIE 模型，针对人名、地址、机构、职位等复杂上下文实体具有高泛化能力。",
+        description="面向中文信息抽取的通用 UIE 深度模型，针对人名、地址、机构、学校、职位等实体具有高泛化跨度抽取能力。",
     ),
     "gliner-pii-edge": ModelDescriptor(
         id="gliner-pii-edge",
@@ -97,7 +100,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         slot=SLOT_GENERAL_PII,
         provider="modelscope",
         repo_id="knowledgator/gliner-pii-edge-v1.0",
-        revision="v1.0.0",
+        revision="master",
         license="Apache-2.0",
         approx_size="310 MB",
         architectures=("x86_64", "arm64", "aarch64"),
@@ -112,8 +115,8 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         display_name="GLiNER PII Base",
         slot=SLOT_GENERAL_PII,
         provider="modelscope",
-        repo_id="knowledgator/gliner-multitask-v1.0",
-        revision="v1.0.0",
+        repo_id="knowledgator/gliner-pii-base-v1.0",
+        revision="master",
         license="Apache-2.0",
         approx_size="850 MB",
         architectures=("x86_64", "arm64", "aarch64"),
@@ -121,7 +124,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         supports_cpu=True,
         supports_cuda=True,
         recommended=False,
-        description="更高容量的多任务通用 PII 抽取模型，提供更精细的多语言实体边界判定。",
+        description="更高容量的专用通用 PII 抽取模型，基于 DeBERTa 提供更精细的多语言实体边界判定。",
     ),
     "memprivacy-1.7b-rl": ModelDescriptor(
         id="memprivacy-1.7b-rl",
@@ -129,7 +132,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         slot=SLOT_SEMANTIC_PRIVACY,
         provider="modelscope",
         repo_id="MemTensor/MemPrivacy-1.7B-RL",
-        revision="v1.0.0",
+        revision="master",
         license="CC BY-NC-ND 4.0",
         approx_size="3.4 GB",
         architectures=("x86_64", "arm64", "aarch64"),
@@ -145,7 +148,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         slot=SLOT_SEMANTIC_PRIVACY,
         provider="modelscope",
         repo_id="MemTensor/MemPrivacy-4B-RL",
-        revision="v1.0.0",
+        revision="master",
         license="CC BY-NC-ND 4.0",
         approx_size="7.8 GB",
         architectures=("x86_64", "arm64", "aarch64"),
@@ -153,7 +156,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         supports_cpu=False,
         supports_cuda=True,
         recommended=False,
-        description="高参数量语义隐私理解大模型，需要具备充足专用显存（>=8GB）的 GPU 环境运行。",
+        description="高参数量语义隐私理解大模型，需要具备充足专用显存（>=8GB）的 NVIDIA CUDA GPU 环境运行。",
     ),
 }
 
@@ -168,3 +171,210 @@ def list_models_by_slot(slot: str) -> List[ModelDescriptor]:
 
 def list_all_models() -> List[ModelDescriptor]:
     return list(MODEL_CATALOG.values())
+
+
+def check_model_integrity(model_id: str, model_dir: Path) -> Tuple[bool, Optional[str]]:
+    """Strictly validates model directory contents according to model architecture contract."""
+    if not model_dir.is_dir():
+        return False, f"模型目录不存在: {model_dir}"
+
+    descriptor = get_model_descriptor(model_id)
+    if not descriptor:
+        return False, f"未知模型 ID: {model_id}"
+
+    if model_id == "siamese-uie":
+        # PyTorch StructBERT SiameseUIE requires:
+        # configuration.json, config.json, pytorch_model.bin, vocab.txt
+        req_files = ["configuration.json", "config.json", "vocab.txt"]
+        for rf in req_files:
+            if not (model_dir / rf).is_file():
+                return False, f"SiameseUIE 缺少必要配置文件: {rf}"
+        has_weights = (model_dir / "pytorch_model.bin").is_file() or (model_dir / "model.safetensors").is_file()
+        if not has_weights:
+            return False, "SiameseUIE 缺少权重文件 (pytorch_model.bin 或 model.safetensors)"
+        return True, None
+
+    elif model_id in ("gliner-pii-edge", "gliner-pii-base"):
+        # GLiNER requires config, weights, and tokenizer files
+        has_config = (model_dir / "gliner_config.json").is_file() or (model_dir / "config.json").is_file()
+        if not has_config:
+            return False, "GLiNER 缺少 gliner_config.json 或 config.json"
+        has_weights = (
+            (model_dir / "pytorch_model.bin").is_file()
+            or (model_dir / "model.safetensors").is_file()
+        )
+        if not has_weights:
+            return False, "GLiNER 缺少权重文件 (pytorch_model.bin 或 model.safetensors)"
+        has_tokenizer = (
+            (model_dir / "tokenizer.json").is_file()
+            or (model_dir / "tokenizer_config.json").is_file()
+            or (model_dir / "spm.model").is_file()
+        )
+        if not has_tokenizer:
+            return False, "GLiNER 缺少分词器文件 (tokenizer.json 或 tokenizer_config.json)"
+        return True, None
+
+    elif model_id in ("memprivacy-1.7b-rl", "memprivacy-4b-rl"):
+        # MemPrivacy requires config.json, weights (safetensors or sharded), and tokenizer
+        if not (model_dir / "config.json").is_file():
+            return False, "MemPrivacy 缺少 config.json"
+        has_weights = (
+            (model_dir / "model.safetensors").is_file()
+            or (model_dir / "model.safetensors.index.json").is_file()
+            or bool(list(model_dir.glob("model-*.safetensors")))
+            or (model_dir / "pytorch_model.bin").is_file()
+        )
+        if not has_weights:
+            return False, "MemPrivacy 缺少权重文件 (*.safetensors)"
+        has_tokenizer = (
+            (model_dir / "tokenizer.json").is_file()
+            or (model_dir / "vocab.json").is_file()
+        )
+        if not has_tokenizer:
+            return False, "MemPrivacy 缺少分词器文件 (tokenizer.json 或 vocab.json)"
+        return True, None
+
+    # Fallback generic check
+    has_cfg = any(model_dir.glob("*.json"))
+    has_wt = any(model_dir.glob("*.safetensors")) or any(model_dir.glob("*.bin"))
+    if not (has_cfg and has_wt):
+        return False, "模型文件校验失败：缺少配置文件或权重文件"
+    return True, None
+
+
+def resolve_for_model(
+    model_id: str,
+    requested_device: str,
+    runtime_manager: Any,
+    hardware_nvidia_available: bool,
+) -> Dict[str, Any]:
+    """Resolves runtime profile and execution device for a specific model, strictly enforcing capabilities.
+
+    For example, MemPrivacy 4B has supports_cpu=False; if CUDA is unavailable, it will NOT fallback to CPU.
+    """
+    descriptor = get_model_descriptor(model_id)
+    if not descriptor:
+        return {
+            "model_id": model_id,
+            "requested_device": requested_device,
+            "runtime_profile": None,
+            "actual_device": "none",
+            "ready": False,
+            "fallback": False,
+            "reason": f"未在目录中找到模型: {model_id}",
+        }
+
+    req = requested_device.lower()
+    can_use_cuda = hardware_nvidia_available and descriptor.supports_cuda
+
+    # Check CUDA runtime
+    cuda_profile = f"{descriptor.runtime}-cuda"
+    cuda_status = runtime_manager.probe_profile(cuda_profile) if runtime_manager else {}
+    cuda_ready = bool(
+        can_use_cuda
+        and cuda_status.get("installed")
+        and cuda_status.get("verified")
+        and cuda_status.get("cuda_available")
+    )
+
+    # Check CPU runtime
+    cpu_profile = f"{descriptor.runtime}-cpu"
+    cpu_status = runtime_manager.probe_profile(cpu_profile) if runtime_manager else {}
+    cpu_ready = bool(
+        descriptor.supports_cpu
+        and cpu_status.get("installed")
+        and cpu_status.get("verified")
+    )
+
+    if req == "cuda":
+        if cuda_ready:
+            return {
+                "model_id": model_id,
+                "requested_device": "cuda",
+                "runtime_profile": cuda_profile,
+                "actual_device": "cuda",
+                "ready": True,
+                "fallback": False,
+                "reason": None,
+            }
+        else:
+            reason = "请求了 CUDA 运行，但未检测到就绪的 NVIDIA CUDA 驱动或隔离环境。"
+            if not descriptor.supports_cuda:
+                reason = "该模型不支持 CUDA 设备加速。"
+            return {
+                "model_id": model_id,
+                "requested_device": "cuda",
+                "runtime_profile": None,
+                "actual_device": "none",
+                "ready": False,
+                "fallback": False,
+                "reason": reason,
+            }
+
+    elif req == "cpu":
+        if not descriptor.supports_cpu:
+            return {
+                "model_id": model_id,
+                "requested_device": "cpu",
+                "runtime_profile": None,
+                "actual_device": "none",
+                "ready": False,
+                "fallback": False,
+                "reason": f"模型 {descriptor.display_name} 限制仅支持 CUDA GPU 运行，不支持 CPU 模式。",
+            }
+        if cpu_ready:
+            return {
+                "model_id": model_id,
+                "requested_device": "cpu",
+                "runtime_profile": cpu_profile,
+                "actual_device": "cpu",
+                "ready": True,
+                "fallback": False,
+                "reason": None,
+            }
+        else:
+            return {
+                "model_id": model_id,
+                "requested_device": "cpu",
+                "runtime_profile": None,
+                "actual_device": "none",
+                "ready": False,
+                "fallback": False,
+                "reason": "CPU 隔离运行时未就绪或未安装。",
+            }
+
+    else:  # "auto"
+        if cuda_ready:
+            return {
+                "model_id": model_id,
+                "requested_device": "auto",
+                "runtime_profile": cuda_profile,
+                "actual_device": "cuda",
+                "ready": True,
+                "fallback": False,
+                "reason": None,
+            }
+        elif cpu_ready:
+            fallback = hardware_nvidia_available and descriptor.supports_cuda
+            return {
+                "model_id": model_id,
+                "requested_device": "auto",
+                "runtime_profile": cpu_profile,
+                "actual_device": "cpu",
+                "ready": True,
+                "fallback": fallback,
+                "reason": "已安全降级至 CPU 隔离环境运行。" if fallback else None,
+            }
+        else:
+            reason = "无可用隔离运行时。"
+            if not descriptor.supports_cpu and not cuda_ready:
+                reason = f"模型 {descriptor.display_name} 需要 NVIDIA CUDA 加速环境，但当前 CUDA 驱动或运行时未就绪。"
+            return {
+                "model_id": model_id,
+                "requested_device": "auto",
+                "runtime_profile": None,
+                "actual_device": "none",
+                "ready": False,
+                "fallback": False,
+                "reason": reason,
+            }

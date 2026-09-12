@@ -315,8 +315,87 @@ class UninstallCallbackTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Script failed: {res.stderr}")
         self.assertFalse(self.data_dir.exists())
         self.assertFalse(self.pkgetc.exists())
-        # The user's shared directory MUST NEVER be touched!
         self.assertTrue((self.shared_dir / "user_saved_model.safetensors").exists())
+
+
+class ControlPlaneIsolationTests(unittest.TestCase):
+    """Verifies that the control plane Python process NEVER imports heavy ML frameworks."""
+
+    def test_control_plane_has_no_ml_framework(self):
+        forbidden_modules = (
+            "torch",
+            "transformers",
+            "gliner",
+            "modelscope",
+            "paddle",
+            "paddlenlp",
+        )
+        for mod in forbidden_modules:
+            self.assertNotIn(
+                mod,
+                sys.modules,
+                f"Control plane Python process illegally imported {mod}! ML frameworks must run in isolated worker processes.",
+            )
+
+    def test_privacy_service_runs_without_ml_imports(self):
+        with tempfile.TemporaryDirectory() as td:
+            from privacy import PrivacyService
+            svc = PrivacyService(Path(td))
+            res = svc.detect("My phone is 13800138000 and ID is 11010519491231002X", use_model=True)
+            self.assertTrue(res["entities"])
+            # Ensure still no ML modules loaded
+            for mod in ("torch", "transformers", "gliner", "modelscope", "paddle", "paddlenlp"):
+                self.assertNotIn(mod, sys.modules)
+
+
+class SettingsStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_settings_store_defaults_and_persistence(self):
+        from privacy.settings_store import SettingsStore
+        store = SettingsStore(self.data_dir)
+        self.assertEqual(store.get_requested_device(), "auto")
+        self.assertTrue(store.get_slot_enabled("chinese_ie"))
+
+        # Mutate and verify atomic file write
+        store.set_requested_device("cuda")
+        store.set_slot_enabled("chinese_ie", False)
+        store.set_active_model("general_pii", "gliner-pii-base")
+
+        settings_file = self.data_dir / "settings.json"
+        self.assertTrue(settings_file.exists())
+        saved_data = json.loads(settings_file.read_text(encoding="utf-8"))
+        self.assertEqual(saved_data["requested_device"], "cuda")
+        self.assertFalse(saved_data["slots"]["chinese_ie"])
+        self.assertEqual(saved_data["active_models"]["general_pii"], "gliner-pii-base")
+
+        # Create fresh store instance on same directory and verify load
+        new_store = SettingsStore(self.data_dir)
+        self.assertEqual(new_store.get_requested_device(), "cuda")
+        self.assertFalse(new_store.get_slot_enabled("chinese_ie"))
+        self.assertEqual(new_store.get_active_model("general_pii"), "gliner-pii-base")
+
+
+class IntegrationSmokeTests(unittest.TestCase):
+    """End-to-end integration tests gated by AI_PRIVACY_INTEGRATION_TESTS=1."""
+
+    @unittest.skipUnless(
+        os.environ.get("AI_PRIVACY_INTEGRATION_TESTS") == "1",
+        "Integration tests skipped. Set AI_PRIVACY_INTEGRATION_TESTS=1 to execute.",
+    )
+    def test_live_isolated_worker_smoke(self):
+        from privacy.worker_client import get_worker_client
+        with tempfile.TemporaryDirectory() as td:
+            client = get_worker_client(Path(td))
+            # If no model installed, smoke test should cleanly return (False, err) without crashing
+            ok, err = client.run_smoke_test("gliner-pii-edge", Path(td) / "models" / "gliner-pii-edge", "torch-cpu")
+            self.assertFalse(ok)
+            self.assertIsNotNone(err)
 
 
 if __name__ == "__main__":

@@ -25,13 +25,9 @@ import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from privacy.device import DEVICE_MANAGER
-from privacy.model_catalog import MODEL_CATALOG, get_model_descriptor
+from privacy.model_catalog import MODEL_CATALOG, check_model_integrity, get_model_descriptor
 from privacy.runtime_manager import (
     ALL_PROFILES,
-    PADDLE_CPU_INDEX,
-    PADDLE_CUDA_INDEX,
-    PROFILE_PADDLE_CPU,
-    PROFILE_PADDLE_CUDA,
     PROFILE_TORCH_CPU,
     PROFILE_TORCH_CUDA,
     PYPI_MIRROR_URL,
@@ -39,6 +35,7 @@ from privacy.runtime_manager import (
     PYTORCH_CUDA_INDEX,
     get_runtime_manager,
 )
+from privacy.worker_client import get_worker_client
 
 
 def emit(message: str) -> None:
@@ -241,43 +238,14 @@ def scan_shared_models_directory(data_dir: Path) -> List[Dict[str, Any]]:
 
 def verify_model_integrity(model_dir: Path, model_id: str) -> Tuple[bool, str]:
     """Verify integrity of model weights and configs based on catalog descriptor."""
-    if not model_dir.is_dir():
-        return False, "模型目录不存在"
-
-    descriptor = get_model_descriptor(model_id)
-    if not descriptor:
-        weights = (
-            list(model_dir.glob("*.safetensors"))
-            + list(model_dir.glob("*.bin"))
-            + list(model_dir.glob("*.pdparams"))
-        )
-        if not weights:
-            return False, "未找到模型权重文件"
-        return True, "验证通过"
-
-    if descriptor.runtime == "paddle":
-        weights = (
-            list(model_dir.glob("*.pdparams"))
-            + list(model_dir.glob("*.bin"))
-            + list(model_dir.glob("*.safetensors"))
-        )
-        if not weights:
-            return False, "未检测到 Paddle/UIE 权重文件 (*.pdparams / *.safetensors / *.bin)"
-    else:
-        # PyTorch / Transformers / GLiNER format
-        config_file = model_dir / "config.json"
-        gliner_config = model_dir / "gliner_config.json"
-        if not config_file.is_file() and not gliner_config.is_file():
-            return False, "缺少模型配置文件 (config.json / gliner_config.json)"
-        weights = list(model_dir.glob("*.safetensors")) + list(model_dir.glob("*.bin"))
-        if not weights:
-            return False, "未检测到 PyTorch 权重文件 (*.safetensors / *.bin)"
-
-    return True, "验证通过"
+    return check_model_integrity(model_dir, model_id)
 
 
 def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
     """Creates isolated Python virtual environment for a runtime profile and verifies it."""
+    if profile not in (PROFILE_TORCH_CPU, PROFILE_TORCH_CUDA):
+        raise ValueError(f"不支持的运行时 Profile: {profile}")
+
     rt_manager = get_runtime_manager(data_dir)
     profile_dir = rt_manager.profile_dir(profile)
     venv_dir = rt_manager.venv_dir(profile)
@@ -293,41 +261,41 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
             return venv_dir
 
     emit(f"正在为 [{profile}] 创建隔离 Python 运行环境: {venv_dir}...")
+
+    # Locate uv tool as required by environment rules
+    uv_bin = shutil.which("uv")
+    if not uv_bin:
+        for p in ("/usr/local/bin/uv", "/opt/homebrew/bin/uv", os.path.expanduser("~/.cargo/bin/uv")):
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                uv_bin = p
+                break
+
     if not interp.is_file():
-        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+        if uv_bin:
+            cmd = [uv_bin, "venv", str(venv_dir)]
+            subprocess.run(cmd, check=True)
+        else:
+            subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
 
-    pip_bin = str(venv_dir / "bin" / "pip")
-
-    def run_pip(*args: str) -> None:
-        cmd = [
-            pip_bin,
-            "install",
-            "--disable-pip-version-check",
-            "--no-input",
-            "--upgrade",
-            *args,
-        ]
+    def run_install(*args: str) -> None:
+        if uv_bin:
+            cmd = [uv_bin, "pip", "install", "--python", str(interp), *args]
+        else:
+            pip_bin = str(venv_dir / "bin" / "pip")
+            cmd = [pip_bin, "install", "--disable-pip-version-check", "--no-input", "--upgrade", *args]
         subprocess.run(cmd, check=True)
 
     emit(f"正在安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
-    run_pip("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
+    run_install("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
 
     if profile == PROFILE_TORCH_CPU:
         emit(f"正在安装 [{profile}] PyTorch CPU 官方轮子...")
-        run_pip("torch", "--index-url", PYTORCH_CPU_INDEX)
-        run_pip("transformers", "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+        run_install("torch", "--index-url", PYTORCH_CPU_INDEX)
+        run_install("transformers", "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
     elif profile == PROFILE_TORCH_CUDA:
         emit(f"正在安装 [{profile}] PyTorch CUDA (cu124) 官方轮子...")
-        run_pip("torch", "--index-url", PYTORCH_CUDA_INDEX)
-        run_pip("transformers", "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
-    elif profile == PROFILE_PADDLE_CPU:
-        emit(f"正在安装 [{profile}] PaddlePaddle CPU 官方轮子...")
-        run_pip("paddlepaddle", "--index-url", PADDLE_CPU_INDEX)
-        run_pip("paddlenlp", "-i", PYPI_MIRROR_URL)
-    elif profile == PROFILE_PADDLE_CUDA:
-        emit(f"正在安装 [{profile}] PaddlePaddle CUDA (cu126) 官方轮子...")
-        run_pip("paddlepaddle-gpu", "--index-url", PADDLE_CUDA_INDEX)
-        run_pip("paddlenlp", "-i", PYPI_MIRROR_URL)
+        run_install("torch", "--index-url", PYTORCH_CUDA_INDEX)
+        run_install("transformers", "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
 
     # Run genuine probe verification via isolated interpreter
     emit(f"正在对 [{profile}] 运行环境执行真实子进程 Probe 验证...")
@@ -362,27 +330,38 @@ def download_modelscope_model(data_dir: Path, model_id: str) -> Path:
         shutil.rmtree(staging_dir, ignore_errors=True)
     staging_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    emit(f"正在从 ModelScope (魔搭社区) 下载模型 [{descriptor.display_name}] (repo: {descriptor.repo_id})...")
+    emit(f"正在从 ModelScope (魔搭社区) 下载模型 [{descriptor.display_name}] (repo: {descriptor.repo_id}, revision: {descriptor.revision})...")
 
-    # Use ModelScope SDK snapshot_download
-    try:
-        from modelscope.hub.snapshot_download import snapshot_download  # type: ignore
+    rt_manager = get_runtime_manager(data_dir)
+    dl_profile = rt_manager.get_modelscope_capable_runtime()
+    if dl_profile is None:
+        emit(f"准备下载前先安装基础运行环境 [{PROFILE_TORCH_CPU}]...")
+        install_isolated_runtime(data_dir, PROFILE_TORCH_CPU)
+        dl_profile = PROFILE_TORCH_CPU
 
-        snapshot_download(
-            model_id=descriptor.repo_id,
-            revision=descriptor.revision,
-            local_dir=str(staging_dir),
-        )
-    except ImportError:
-        emit("正在调用 ModelScope 专用下载器...")
-        subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                f"from modelscope.hub.snapshot_download import snapshot_download; snapshot_download(model_id='{descriptor.repo_id}', revision='{descriptor.revision}', local_dir='{staging_dir}')",
-            ],
-            check=True,
-        )
+    python_bin = rt_manager.get_python_bin(dl_profile)
+    downloader_script = Path(__file__).resolve().parent / "privacy" / "workers" / "modelscope_downloader.py"
+    cmd = [
+        str(python_bin),
+        str(downloader_script),
+        "--repo-id", descriptor.repo_id,
+        "--revision", descriptor.revision,
+        "--target-dir", str(staging_dir),
+        "--model-id", model_id,
+    ]
+
+    emit(f"正在通过隔离运行时 [{dl_profile}] 执行 ModelScope 快照下载...")
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+    if proc.returncode != 0:
+        err_msg = proc.stderr.strip() or proc.stdout.strip() or f"Downloader exit code {proc.returncode}"
+        try:
+            parsed = json.loads(proc.stdout.strip())
+            if parsed.get("error"):
+                err_msg = f"{parsed.get('error_type', 'Error')}: {parsed.get('error')}"
+        except Exception:
+            pass
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise RuntimeError(f"ModelScope 下载失败: {err_msg}")
 
     ok, reason = verify_model_integrity(staging_dir, model_id)
     if not ok:
@@ -502,12 +481,25 @@ def main() -> int:
             diag = DEVICE_MANAGER.probe_diagnostics()
             req = diag.get("requested_device", "auto")
             has_nv = bool(diag["hardware"].get("nvidia_available", False))
-            target_profile = f"{runtime_fw}-cuda" if (has_nv and req in ("auto", "cuda")) else f"{runtime_fw}-cpu"
+            target_profile = PROFILE_TORCH_CUDA if (has_nv and req in ("auto", "cuda")) else PROFILE_TORCH_CPU
 
             write_state(data_dir, "installing", f"正在准备 [{target_profile}] 隔离运行环境...", model_id)
             install_isolated_runtime(data_dir, target_profile)
             write_state(data_dir, "downloading", "正在从 ModelScope 下载模型权重...", model_id)
             checkpoint_dir = download_modelscope_model(data_dir, model_id)
+
+            # Synthetic smoke test
+            write_state(data_dir, "testing", "正在执行端到端合成冒烟推理验证...", model_id)
+            client = get_worker_client(data_dir)
+            smoke_ok, smoke_err = client.run_smoke_test(
+                model_id=model_id,
+                model_path=checkpoint_dir,
+                profile=target_profile,
+                device="cuda" if target_profile == PROFILE_TORCH_CUDA else "cpu",
+            )
+            if not smoke_ok:
+                emit(f"警告: 冒烟推理未通过 ({smoke_err})，但模型权重已就绪。")
+
             write_state(data_dir, "ready", f"模型已就绪: {checkpoint_dir}", model_id)
             emit("安装流程全部完成。")
             return 0

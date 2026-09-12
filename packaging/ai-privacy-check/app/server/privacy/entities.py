@@ -61,6 +61,8 @@ LABELS_ZH: Dict[str, str] = {
     "COMMUNICATION": "通信隐私",
     "JUDICIAL": "司法记录",
     "COMMERCIAL_SECRET": "商业秘密",
+    "JOB_TITLE": "职位/头衔",
+    "IDENTITY_BACKGROUND": "身份背景",
 }
 
 
@@ -115,8 +117,10 @@ PRIORITY: Dict[str, int] = {
     "LOCATION": 67,
     "ORGANIZATION": 66,
     "CN_NAME": 65,
-    "PERSON": 64,
-    "PRIVATE_PERSON": 62,
+    "PERSON": 65,
+    "PRIVATE_PERSON": 65,
+    "JOB_TITLE": 64,
+    "IDENTITY_BACKGROUND": 63,
     "RELATIONSHIP": 61,
     "PHONE": 60,
     "COMMUNICATION": 59,

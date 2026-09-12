@@ -198,78 +198,105 @@ class ChineseIEDetector:
             return p3
         return p1
 
-    def status(self) -> Dict[str, object]:
-        installed = False
-        model_path = None
-        model_dir = self._get_model_dir()
-        if model_dir and model_dir.is_dir():
-            has_weights = (
-                (model_dir / "model_state.pdparams").is_file()
-                or (model_dir / "config.json").is_file()
-                or any(model_dir.glob("*.safetensors"))
-                or any(model_dir.glob("*.pdparams"))
-            )
-            if has_weights:
-                installed = True
-                model_path = str(model_dir)
+CHINESE_IE_LABEL_MAP: Dict[str, str] = {
+    "姓名": "CN_NAME",
+    "人名": "CN_NAME",
+    "人物": "CN_NAME",
+    "地址": "CN_ADDRESS",
+    "地理位置": "CN_ADDRESS",
+    "机构": "ORGANIZATION",
+    "组织机构": "ORGANIZATION",
+    "学校": "ORGANIZATION",
+    "医院": "ORGANIZATION",
+    "职位": "JOB_TITLE",
+    "头衔": "JOB_TITLE",
+    "身份背景": "IDENTITY_BACKGROUND",
+}
 
-        actual_device, _, _ = DEVICE_MANAGER.resolve_for_framework("paddle")
+
+class ChineseIEDetector:
+    """Tier 2: High-precision Chinese Information Extraction (IE) detector."""
+
+    id = "chinese_ie"
+    slot = "chinese_ie"
+    name = "chinese_ie"
+
+    def __init__(self, data_dir: Path, active_model_id: str = "siamese-uie") -> None:
+        self.data_dir = data_dir
+        self.active_model_id = active_model_id
+        self._builtin = BuiltinChineseIE()
+        self._model_lock = threading.Lock()
+
+    def set_active_model(self, model_id: str) -> None:
+        with self._model_lock:
+            if model_id != self.active_model_id:
+                self.active_model_id = model_id
+                from .worker_client import get_worker_client
+                get_worker_client(self.data_dir).stop_worker_for_model("siamese-uie")
+
+    def _get_model_dir(self) -> Path:
+        return self.data_dir / "models" / self.active_model_id
+
+    def status(self) -> Dict[str, object]:
+        model_dir = self._get_model_dir()
+        from .model_catalog import check_model_integrity
+        installed, _ = check_model_integrity(self.active_model_id, model_dir)
+
+        model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
+        actual_device = model_res.get("actual_device", "cpu")
+        model_ready = installed and bool(model_res.get("ready", False))
+
         return {
             "id": self.id,
             "slot": self.slot,
             "name": self.name,
-            "engine": "siamese_uie" if installed and self._model_available else "builtin_semantic_ie",
+            "engine": "siamese_uie" if model_ready else "builtin_linguistic_ie",
             "active_model": self.active_model_id,
             "installed": installed,
             "ready": True,  # Built-in is always ready
-            "model_ready": self._model_available,
+            "model_ready": model_ready,
             "device": actual_device,
-            "path": model_path,
+            "path": str(model_dir) if installed else None,
         }
 
     def load(self) -> None:
-        self._try_init_uie()
+        # Pre-warm worker if model is installed
+        model_dir = self._get_model_dir()
+        from .model_catalog import check_model_integrity
+        installed, _ = check_model_integrity(self.active_model_id, model_dir)
+        if not installed:
+            return
+
+        model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
+        if not model_res.get("ready"):
+            return
+
+        profile = model_res.get("runtime_profile")
+        actual_dev = model_res.get("actual_device", "cpu")
+        if profile:
+            from .worker_client import get_worker_client
+            try:
+                worker = get_worker_client(self.data_dir).get_worker(
+                    self.active_model_id, profile, device=actual_dev
+                )
+                worker.query({"action": "load", "model_path": str(model_dir)})
+            except Exception:
+                pass
 
     def unload(self) -> None:
         with self._model_lock:
-            self._uie_model = None
-            self._model_attempted = False
-            self._model_available = False
-
-    def _try_init_uie(self) -> None:
-        with self._model_lock:
-            if self._model_attempted:
-                return
-            self._model_attempted = True
-            model_dir = self._get_model_dir()
-            if not model_dir or not model_dir.is_dir():
-                return
-
-            try:
-                from paddlenlp import Taskflow  # type: ignore
-
-                device, _, _ = DEVICE_MANAGER.resolve_for_framework("paddle")
-                use_gpu = device == "cuda"
-                self._uie_model = Taskflow(
-                    "information_extraction",
-                    schema=["姓名", "地址", "机构", "学校", "职位", "医院"],
-                    task_path=str(model_dir),
-                    device_id=0 if use_gpu else -1,
-                )
-                self._model_available = True
-            except Exception:
-                self._uie_model = None
-                self._model_available = False
+            from .worker_client import get_worker_client
+            get_worker_client(self.data_dir).stop_worker_for_model(self.active_model_id)
 
     def detect(self, text: str) -> Tuple[List[Entity], List[str]]:
-        """Detect Chinese semantic entities with chunking and safe exact span mapping."""
+        """Detect Chinese semantic entities via Built-in rules and optional isolated SiameseUIE worker."""
         entities: List[Entity] = []
         warnings: List[str] = []
 
         if not text:
             return entities, warnings
 
-        # 1. First run built-in high-precision semantic extractor
+        # 1. First run built-in high-precision zero-dependency semantic extractor
         for start, end, val, conf in self._builtin.extract_names(text):
             entities.append(
                 Entity(
@@ -296,92 +323,60 @@ class ChineseIEDetector:
                 )
             )
 
-        # 2. Check if optional SiameseUIE / UIE is ready
-        self._try_init_uie()
-        if self._model_available and self._uie_model is not None:
-            try:
-                uie_entities, uie_warn = self._infer_uie(text)
-                entities.extend(uie_entities)
-                warnings.extend(uie_warn)
-            except Exception as exc:
-                warnings.append(f"Chinese IE 模型推理失败，已使用内置语义引擎回退: {exc}")
+        # 2. Query isolated SiameseUIE worker if installed and ready
+        model_dir = self._get_model_dir()
+        from .model_catalog import check_model_integrity
+        installed, _ = check_model_integrity(self.active_model_id, model_dir)
+        if installed:
+            model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
+            if model_res.get("ready"):
+                profile = model_res.get("runtime_profile")
+                device = model_res.get("actual_device", "cpu")
+                if profile:
+                    try:
+                        from .worker_client import get_worker_client
+                        worker = get_worker_client(self.data_dir).get_worker(
+                            self.active_model_id, profile, device=device
+                        )
+                        res = worker.query({
+                            "action": "detect",
+                            "model_path": str(model_dir),
+                            "text": text,
+                        })
+                        if res.get("ok"):
+                            for ent in res.get("entities", []):
+                                s = int(ent.get("start", 0))
+                                e = int(ent.get("end", 0))
+                                ent_text = ent.get("text", "")
+                                raw_lbl = ent.get("label", "")
+                                score = float(ent.get("score", 0.9))
+
+                                # Map label accurately
+                                mapped_type = CHINESE_IE_LABEL_MAP.get(
+                                    raw_lbl,
+                                    "ORGANIZATION" if any(k in raw_lbl for k in ("机构", "公司", "学校", "院"))
+                                    else ("CN_NAME" if "名" in raw_lbl else "CN_ADDRESS")
+                                )
+
+                                if 0 <= s < e <= len(text) and text[s:e] == ent_text:
+                                    entities.append(
+                                        Entity(
+                                            entity_type=mapped_type,
+                                            start=s,
+                                            end=e,
+                                            text=ent_text,
+                                            confidence=score,
+                                            sources=(self.name, "siamese-uie"),
+                                            validated=False,
+                                        )
+                                    )
+                        else:
+                            err_msg = res.get("error") or "Worker query failed"
+                            warnings.append(f"SiameseUIE worker 推理未完成，保持内置规则抽取: {err_msg}")
+                    except Exception as exc:
+                        warnings.append(f"SiameseUIE worker 通信异常: {exc}")
 
         return entities, warnings
-
-    def _infer_uie(self, text: str, chunk_size: int = 512, overlap: int = 64) -> Tuple[List[Entity], List[str]]:
-        """Chunked execution with exact global span offset mapping."""
-        results: List[Entity] = []
-        warnings: List[str] = []
-
-        # Split text into chunks if long
-        chunks: List[Tuple[int, str]] = []
-        if len(text) <= chunk_size:
-            chunks.append((0, text))
-        else:
-            idx = 0
-            while idx < len(text):
-                end = min(len(text), idx + chunk_size)
-                chunks.append((idx, text[idx:end]))
-                if end == len(text):
-                    break
-                idx += chunk_size - overlap
-
-        for chunk_offset, chunk_text in chunks:
-            raw_predictions = self._uie_model(chunk_text)
-            for pred in raw_predictions:
-                if not isinstance(pred, dict):
-                    continue
-                for label, items in pred.items():
-                    entity_type = "CN_NAME" if "名" in label else "CN_ADDRESS"
-                    for item in items:
-                        item_text = item.get("text", "").strip()
-                        prob = float(item.get("probability", 0.85))
-                        if not item_text:
-                            continue
-
-                        # If model provides local start/end
-                        if "start" in item and "end" in item:
-                            local_s = int(item["start"])
-                            local_e = int(item["end"])
-                            global_s = chunk_offset + local_s
-                            global_e = chunk_offset + local_e
-                            if 0 <= global_s < global_e <= len(text) and text[global_s:global_e] == item_text:
-                                results.append(
-                                    Entity(
-                                        entity_type=entity_type,
-                                        start=global_s,
-                                        end=global_e,
-                                        text=item_text,
-                                        confidence=prob,
-                                        sources=(self.name, "uie"),
-                                        validated=False,
-                                    )
-                                )
-                                continue
-
-                        # Safe fallback alignment for identical names appearing multiple times:
-                        # Find all occurrences in chunk and match sequentially with cursor
-                        occurrences = [m.start() for m in re.finditer(re.escape(item_text), chunk_text)]
-                        if len(occurrences) == 1:
-                            global_s = chunk_offset + occurrences[0]
-                            global_e = global_s + len(item_text)
-                            results.append(
-                                Entity(
-                                    entity_type=entity_type,
-                                    start=global_s,
-                                    end=global_e,
-                                    text=item_text,
-                                    confidence=prob,
-                                    sources=(self.name, "uie"),
-                                    validated=False,
-                                )
-                            )
-                        elif len(occurrences) > 1:
-                            warnings.append(
-                                f"实体 '{item_text}' 在当前段落中出现多次，已避免错误猜测 offset。"
-                            )
-
-        return results, warnings
 
 
 def safe_sequential_span_alignment(

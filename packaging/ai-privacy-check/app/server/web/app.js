@@ -696,7 +696,16 @@ function updateModelUI(data) {
         row.style.border = "1px solid var(--line)";
 
         const info = document.createElement("div");
-        info.innerHTML = `<strong>${cand.display_name}</strong> <small style="color:var(--text-muted);">(${cand.folder_name} · ${cand.approx_size})</small><div style="font-size:11px; color:${cand.valid ? "var(--brand-green, #137333)" : "var(--danger, #d93025)"};">${cand.valid ? "格式校验通过" : cand.reason}</div>`;
+        const titleStrong = document.createElement("strong");
+        titleStrong.textContent = cand.display_name || "";
+        const folderSmall = document.createElement("small");
+        folderSmall.style.color = "var(--text-muted)";
+        folderSmall.textContent = ` (${cand.folder_name || ""} · ${cand.approx_size || ""})`;
+        const statusDiv = document.createElement("div");
+        statusDiv.style.fontSize = "11px";
+        statusDiv.style.color = cand.valid ? "var(--brand-green, #137333)" : "var(--danger, #d93025)";
+        statusDiv.textContent = cand.valid ? "格式校验通过" : (cand.reason || "校验失败");
+        info.append(titleStrong, " ", folderSmall, statusDiv);
 
         const btn = document.createElement("button");
         btn.className = "button button-secondary button-small";

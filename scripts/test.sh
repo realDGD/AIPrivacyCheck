@@ -16,7 +16,8 @@ $PYTHON_CMD scripts/benchmark.py
 env PYTHONPYCACHEPREFIX=/tmp/ai-privacy-check-pycache $PYTHON_CMD -m py_compile \
   packaging/ai-privacy-check/app/server/server.py \
   packaging/ai-privacy-check/app/server/model_installer.py \
-  packaging/ai-privacy-check/app/server/privacy/*.py
+  packaging/ai-privacy-check/app/server/privacy/*.py \
+  packaging/ai-privacy-check/app/server/privacy/workers/*.py
 node --check packaging/ai-privacy-check/app/server/web/app.js
 python3 -m json.tool packaging/ai-privacy-check/config/privilege >/dev/null
 python3 -m json.tool packaging/ai-privacy-check/config/resource >/dev/null

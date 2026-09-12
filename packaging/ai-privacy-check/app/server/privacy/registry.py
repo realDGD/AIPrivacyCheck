@@ -18,6 +18,9 @@ from .model_catalog import (
 )
 
 
+from .settings_store import get_settings_store
+
+
 class DetectorRegistry:
     """Registry managing pluggable detectors for:
     1. built_in: Multilingual deterministic rules
@@ -31,16 +34,18 @@ class DetectorRegistry:
         self._lock = threading.Lock()
         self._detectors: Dict[str, Detector] = {}
         self._slot_to_detector: Dict[str, str] = {}
+        self._settings_store = get_settings_store(self.data_dir)
+
         self._slot_enabled: Dict[str, bool] = {
             SLOT_BUILT_IN: True,
-            SLOT_CHINESE_IE: True,
-            SLOT_GENERAL_PII: False,
-            SLOT_SEMANTIC_PRIVACY: False,
+            SLOT_CHINESE_IE: self._settings_store.get_slot_enabled(SLOT_CHINESE_IE, True),
+            SLOT_GENERAL_PII: self._settings_store.get_slot_enabled(SLOT_GENERAL_PII, False),
+            SLOT_SEMANTIC_PRIVACY: self._settings_store.get_slot_enabled(SLOT_SEMANTIC_PRIVACY, False),
         }
         self._active_models: Dict[str, str] = {
-            SLOT_CHINESE_IE: "siamese-uie",
-            SLOT_GENERAL_PII: "gliner-pii-edge",
-            SLOT_SEMANTIC_PRIVACY: "memprivacy-1.7b-rl",
+            SLOT_CHINESE_IE: self._settings_store.get_active_model(SLOT_CHINESE_IE, "siamese-uie") or "siamese-uie",
+            SLOT_GENERAL_PII: self._settings_store.get_active_model(SLOT_GENERAL_PII, "gliner-pii-edge") or "gliner-pii-edge",
+            SLOT_SEMANTIC_PRIVACY: self._settings_store.get_active_model(SLOT_SEMANTIC_PRIVACY, "memprivacy-1.7b-rl") or "memprivacy-1.7b-rl",
         }
 
         # Initialize default detectors
@@ -85,6 +90,7 @@ class DetectorRegistry:
             return  # Builtin rules can never be disabled
         with self._lock:
             self._slot_enabled[slot] = bool(enabled)
+            self._settings_store.set_slot_enabled(slot, bool(enabled))
 
     def is_slot_enabled(self, slot: str) -> bool:
         with self._lock:
@@ -96,6 +102,7 @@ class DetectorRegistry:
             return False
         with self._lock:
             self._active_models[slot] = model_id
+            self._settings_store.set_active_model(slot, model_id)
             detector_id = self._slot_to_detector.get(slot)
             if detector_id and detector_id in self._detectors:
                 det = self._detectors[detector_id]

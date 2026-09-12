@@ -1,4 +1,4 @@
-# 安全说明 (v0.4.1)
+# 安全说明 (v0.5.0)
 
 ## 不保存的数据
 
@@ -12,7 +12,8 @@
 ## 会保存的数据
 
 - 可选神经网络模型权重（来自 ModelScope 的 GLiNER、MemPrivacy 或 SiameseUIE 权重，存放于 `${DATA_DIR}/models/`）。
-- 隔离运行时虚拟环境（存放于 `${DATA_DIR}/runtimes/`）。
+- 隔离运行时虚拟环境（统一基于 PyTorch，存放于 `${DATA_DIR}/runtimes/`）。
+- 应用配置与偏好（持久化于 `${DATA_DIR}/settings.json`，原子文件写入）。
 - 不含任何用户文本的模型安装状态与运行日志。
 
 ## 攻击面与缓解措施

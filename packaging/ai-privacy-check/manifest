@@ -1,7 +1,7 @@
 appname               = ai-privacy-check
-version               = 0.4.1
+version               = 0.5.0
 display_name          = AI 脱敏器
-desc                  = 在 fnOS 本地检测、脱敏并恢复中英文及多语言隐私字段。高置信规则与中文语义开箱即用，支持魔搭 ModelScope 共享模型中心、NVIDIA GPU 隔离运行环境与三档安全卸载保留。
+desc                  = 在 fnOS 本地检测、脱敏并恢复中英文及多语言隐私字段。高置信规则与中文语义开箱即用，支持魔搭 ModelScope 社区模型、NVIDIA GPU 隔离运行环境与三档安全卸载保留。
 platform              = all
 source                = thirdparty
 maintainer            = AI Privacy Check Contributors
@@ -13,4 +13,4 @@ desktop_applaunchname = ai-privacy-check.main
 ctl_stop              = true
 checkport              = false
 disable_authorization_path = false
-changelog             = 0.4.1: 改名为「AI 脱敏器」，重构硬件探测与隔离运行时（彻底解耦 HardwareProbe 与 PyTorch/Paddle 框架 probe，修复 CUDA 检测），新增 fnOS data-share 共享模型目录扫描与授权边界保护，新增三档卸载保留向导，落地 MemPrivacy 真实系统 Prompt 与容错推理；0.4.0: 架构重构支持可插拔检测器槽位、魔搭 ModelScope 模型库与 PL1-PL4 分级。
+changelog             = 0.5.0: 架构彻底解耦主控控制面与模型推理执行面（零 ML 库侵入 Python 3.12 主控进程），引入基于 JSONL IPC 的隔离 Worker 架构（GLiNER、SiameseUIE、MemPrivacy），废弃 Paddle 运行时统一至 PyTorch 体系；对齐真实 ModelScope 社区模型元数据；新增 settings.json 原子持久化与极速健康检查；0.4.1: 改名为「AI 脱敏器」，重构硬件探测与隔离运行时，新增 fnOS data-share 共享模型目录扫描与授权边界保护，新增三档卸载保留向导，落地 MemPrivacy 真实推理；0.4.0: 架构重构支持可插拔检测器槽位、魔搭 ModelScope 模型库与 PL1-PL4 分级。

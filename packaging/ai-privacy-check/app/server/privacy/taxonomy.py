@@ -93,6 +93,8 @@ DETERMINISTIC_PL_MAPPING: Dict[str, str] = {
     "ORGANIZATION": PL2,
     "RELATIONSHIP": PL2,
     "COMMUNICATION": PL2,
+    "JOB_TITLE": PL2,
+    "IDENTITY_BACKGROUND": PL2,
 }
 
 # Semantic type to default PL level mapping (used by semantic / generative privacy models)

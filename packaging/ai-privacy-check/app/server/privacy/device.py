@@ -1,10 +1,10 @@
 """Compute device and runtime diagnostics for AI Privacy Check.
 
 Completely decouples Hardware Probe (NVIDIA GPU / driver via nvidia-smi)
-from Framework Runtime Probes (isolated PyTorch / Paddle virtual environments).
+from Framework Runtime Probes (isolated PyTorch virtual environments).
 
-Does not import torch or paddle into the control plane Python process.
-Supports per-model / per-framework device arbitration with graceful CPU fallback.
+Does not import torch/transformers/gliner into the control plane Python process.
+Supports persistent device preferences via SettingsStore and per-model capability resolution.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .hardware import HARDWARE_PROBE, HardwareProbe
+from .model_catalog import resolve_for_model as catalog_resolve_for_model
 from .runtime_manager import (
-    PROFILE_PADDLE_CPU,
-    PROFILE_PADDLE_CUDA,
     PROFILE_TORCH_CPU,
     PROFILE_TORCH_CUDA,
     RuntimeManager,
     get_runtime_manager,
 )
+from .settings_store import SettingsStore, get_settings_store
 
 
 class DeviceManager:
@@ -37,6 +37,7 @@ class DeviceManager:
         self.data_dir = data_dir or Path(os.environ.get("TRIM_PKGVAR", "/tmp")) / "data"
         self._hw_probe = hardware_probe or HARDWARE_PROBE
         self._rt_manager = runtime_manager or get_runtime_manager(self.data_dir)
+        self._settings_store = get_settings_store(self.data_dir)
         self._lock = threading.Lock()
         self._diagnostics_cache: Optional[Dict[str, Any]] = None
 
@@ -44,20 +45,21 @@ class DeviceManager:
         with self._lock:
             self.data_dir = data_dir
             self._rt_manager = get_runtime_manager(data_dir)
+            self._settings_store = get_settings_store(data_dir)
             self._diagnostics_cache = None
 
     def get_requested_device(self) -> str:
-        device = os.environ.get("AI_PRIVACY_DEVICE") or "auto"
-        device = device.strip().lower()
-        if device not in ("auto", "cpu", "cuda"):
-            return "auto"
-        return device
+        env_dev = os.environ.get("AI_PRIVACY_DEVICE")
+        if env_dev and env_dev.strip().lower() in ("auto", "cpu", "cuda"):
+            return env_dev.strip().lower()
+        return self._settings_store.get_requested_device()
 
     def set_requested_device(self, device: str) -> str:
         device = device.strip().lower()
         if device not in ("auto", "cpu", "cuda"):
             device = "auto"
         os.environ["AI_PRIVACY_DEVICE"] = device
+        self._settings_store.set_requested_device(device)
         with self._lock:
             self._diagnostics_cache = None
         return device
@@ -75,21 +77,19 @@ class DeviceManager:
         rt_info = self._rt_manager.probe_all(force_refresh=force_refresh)
         torch_cpu = rt_info.get(PROFILE_TORCH_CPU, {})
         torch_cuda = rt_info.get(PROFILE_TORCH_CUDA, {})
-        paddle_cpu = rt_info.get(PROFILE_PADDLE_CPU, {})
-        paddle_cuda = rt_info.get(PROFILE_PADDLE_CUDA, {})
 
         warnings: List[str] = []
 
         # Overall CUDA availability across any runtime
-        any_cuda_ready = (
-            torch_cuda.get("installed", False) and torch_cuda.get("verified", False) and torch_cuda.get("cuda_available", False)
-        ) or (
-            paddle_cuda.get("installed", False) and paddle_cuda.get("verified", False) and paddle_cuda.get("cuda_available", False)
+        any_cuda_ready = bool(
+            torch_cuda.get("installed", False)
+            and torch_cuda.get("verified", False)
+            and torch_cuda.get("cuda_available", False)
         )
 
         if requested == "cuda" and not any_cuda_ready:
             if has_nvidia:
-                warnings.append("用户显式配置使用 NVIDIA CUDA，但未安装或未就绪任何 CUDA 运行时，已安全回退到 CPU。")
+                warnings.append("用户显式配置使用 NVIDIA CUDA，但 PyTorch CUDA 隔离环境未安装或驱动未就绪，已安全回退到 CPU。")
             else:
                 warnings.append("用户显式配置使用 NVIDIA CUDA，但主机未检测到可用 NVIDIA GPU 或驱动，已安全回退到 CPU。")
 
@@ -102,18 +102,18 @@ class DeviceManager:
             actual_device = "cpu"
 
         # Model / framework specific device decisions
-        model_devices: Dict[str, Dict[str, Any]] = {}
-        for fw in ("torch", "paddle"):
-            chosen_profile = self._rt_manager.best_runtime_for_framework(
-                fw,
-                prefer_cuda=(requested in ("auto", "cuda")),
-                hardware_nvidia_available=has_nvidia,
-            )
-            model_devices[fw] = {
+        chosen_profile = self._rt_manager.best_runtime_for_framework(
+            "torch",
+            prefer_cuda=(requested in ("auto", "cuda")),
+            hardware_nvidia_available=has_nvidia,
+        )
+        model_devices: Dict[str, Dict[str, Any]] = {
+            "torch": {
                 "profile": chosen_profile,
                 "device": "cuda" if (chosen_profile and chosen_profile.endswith("-cuda")) else "cpu",
                 "ready": chosen_profile is not None,
             }
+        }
 
         diag = {
             "requested_device": requested,
@@ -122,8 +122,6 @@ class DeviceManager:
             "runtimes": {
                 "torch_cpu": torch_cpu,
                 "torch_cuda": torch_cuda,
-                "paddle_cpu": paddle_cpu,
-                "paddle_cuda": paddle_cuda,
             },
             "model_devices": model_devices,
             # Legacy compatibility fields for existing consumers
@@ -139,8 +137,20 @@ class DeviceManager:
             self._diagnostics_cache = diag
         return dict(diag)
 
-    def resolve_for_framework(self, framework: str) -> Tuple[str, Optional[str], List[str]]:
-        """Resolves target device ('cuda' or 'cpu'), active runtime profile, and warnings for a specific framework."""
+    def resolve_for_model(self, model_id: str) -> Dict[str, Any]:
+        """Resolves runtime profile, target device, and readiness for a specific model."""
+        hw_info = self._hw_probe.probe_nvidia()
+        has_nvidia = bool(hw_info.get("nvidia_available", False))
+        requested = self.get_requested_device()
+        return catalog_resolve_for_model(
+            model_id=model_id,
+            requested_device=requested,
+            runtime_manager=self._rt_manager,
+            hardware_nvidia_available=has_nvidia,
+        )
+
+    def resolve_for_framework(self, framework: str = "torch") -> Tuple[str, Optional[str], List[str]]:
+        """Resolves target device ('cuda' or 'cpu'), active runtime profile, and warnings."""
         diag = self.probe_diagnostics()
         requested = str(diag["requested_device"])
         has_nvidia = bool(diag["hardware"].get("nvidia_available", False))
@@ -148,13 +158,16 @@ class DeviceManager:
 
         fw_info = diag["model_devices"].get(framework, {})
         profile = fw_info.get("profile")
-        dev = fw_info.get("device", "cpu")
 
-        if requested == "cuda" and dev != "cuda":
-            warnings.append(f"框架 {framework} 请求 CUDA 但无可用 CUDA 运行时，使用 CPU 运行。")
-
-        return dev, profile, warnings
-
+        if requested == "cuda":
+            if profile == PROFILE_TORCH_CUDA:
+                return "cuda", profile, warnings
+            warnings.append("CUDA 运行时未就绪，自动降级至 CPU 运行。")
+            return "cpu", profile, warnings
+        elif requested == "auto":
+            if has_nvidia and profile == PROFILE_TORCH_CUDA:
+                return "cuda", profile, warnings
+            return "cpu", profile, warnings
     def resolve(self, requested: Optional[str] = None) -> Tuple[str, List[str]]:
         """Generic resolve method for backward compatibility."""
         if requested:

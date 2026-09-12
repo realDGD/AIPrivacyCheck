@@ -1,13 +1,15 @@
-# 架构说明 (v0.4.1)
+# 架构说明 (v0.5.0)
 
 ## 设计目标
 
 1. **绝对本地化**：原文、实体与可逆映射不离开用户控制的 fnOS 存储与浏览器运行内存，严格杜绝数据向任何外网服务器泄露。
 2. **轻量多级级联**：即使没有大模型、无外网或设备硬件资源受限，基础多语言与中文强规则（Tier 1）及中文信息抽取（Tier 2）也能即开即用、零额外内存驻留；神经网络模型（Tier 3 & Tier 4）按需加载。
-3. **硬件与运行时解耦**：物理 GPU 检测（`HardwareProbe`）与框架运行时探测（`RuntimeManager`）彻底分离，控制面零框架依赖，消除 CUDA 探测失真；智能利用 NAS 上的 NVIDIA GPU（CUDA）或安全降级至 CPU。
-4. **隔离式模型运行时 (Isolated Runtimes)**：不同深度学习框架（PyTorch 与 PaddlePaddle）运行在各自独立的隔离虚拟环境中（`${DATA_DIR}/runtimes/{profile}/venv`），杜绝依赖冲突与主进程污染。
-5. **安全受限的原生集成**：依托 fnOS 官方 Python 3.12 运行时与统一网关 Unix Socket 机制，不暴露多余端口，权限采用 package 独立用户。
-6. **用户可见模型共享与安全导入**：提供用户级共享目录（`ai-privacy-check/models`），支持本地模型离线导入与严格的 `realpath` 越权防护；卸载时提供三档数据保留选项，绝对不删除用户共享模型源文件。
+3. **控制面与执行面彻底隔离 (Zero ML Control Plane)**：主控进程（Python 3.12）严格不直接 import 任何深度学习框架（`torch`, `transformers`, `gliner`, `modelscope`, `paddle`）。所有模型推理执行于独立的 Worker 子进程中，通过标准输入输出行式 JSONL 进行进程间通信（IPC）。
+4. **硬件与运行时解耦**：物理 GPU 检测（`HardwareProbe`）与框架运行时探测（`RuntimeManager`）彻底分离，控制面零框架依赖，消除 CUDA 探测失真；智能利用 NAS 上的 NVIDIA GPU（CUDA）或安全降级至 CPU。
+5. **统一且隔离的模型运行时 (Isolated PyTorch Runtimes)**：全系模型统一基于 PyTorch 体系（`torch-cpu` 与 `torch-cuda`），运行在各自独立的隔离虚拟环境中（`${DATA_DIR}/runtimes/{profile}/venv`），杜绝依赖冲突与主进程污染。
+6. **配置原子持久化 (SettingsStore)**：通过 `${DATA_DIR}/settings.json` 保证设备偏好、槽位开关与激活模型选择在重启后不丢失。
+7. **安全受限的原生集成**：依托 fnOS 官方 Python 3.12 运行时与统一网关 Unix Socket 机制，不暴露多余端口，权限采用 package 独立用户。
+8. **用户可见模型共享与安全导入**：提供用户级共享目录（`ai-privacy-check/models`），支持本地模型离线导入与严格的 `realpath` 越权防护；卸载时提供三档数据保留选项，绝对不删除用户共享模型源文件。
 
 ## 系统架构拓扑
 
@@ -18,15 +20,19 @@ fnOS 桌面 / 浏览器新标签页
 fnOS 统一网关 (/app/ai-privacy-check)
   │ Unix Stream Socket: ai-privacy-check.sock
   ▼
-fnOS Native Python 3.12 控制进程 (package 用户: AI 脱敏器)
+fnOS Native Python 3.12 控制进程 (package 用户: AI 脱敏器, 零 ML 库侵入)
+  ├── SettingsStore (原子配置存储)
+  │     └── ${DATA_DIR}/settings.json (设备偏好 / 槽位启闭 / 激活模型)
   ├── HardwareProbe (物理硬件探测器)
   │     └── nvidia-smi 独立子进程探测 (GPU 型号 / 驱动版本 / 显存)，零框架依赖
   ├── RuntimeManager (隔离虚拟环境管理器)
-  │     ├── torch-cpu / torch-cuda venv 隔离运行时
-  │     ├── paddle-cpu / paddle-cuda venv 隔离运行时
-  │     └── 框架级独立验证探针 (is_compiled_with_cuda / cuda.is_available)
-  ├── DeviceManager (多框架设备协调器)
-  │     └── auto / cpu / cuda 决策与智能降级
+  │     ├── torch-cpu / torch-cuda venv 隔离运行时 (uv 管理)
+  │     └── 框架级独立验证探针 (cuda.is_available / version)
+  ├── WorkerClient & RuntimeWorkerProcess (子进程 IPC 客户端)
+  │     ├── GLiNER Worker (privacy/workers/gliner_worker.py)
+  │     ├── SiameseUIE Worker (privacy/workers/siamese_uie_worker.py)
+  │     ├── MemPrivacy Worker (privacy/workers/memprivacy_worker.py)
+  │     └── ModelScope Downloader (privacy/workers/modelscope_downloader.py)
   ├── DetectorRegistry (插拔式检测器管理器)
   │     ├── BuiltInRuleDetector (Tier 1, 槽位 built_in, 始终就绪)
   │     │     ├── 20+ 种格式正则与跨语言上下文约束 (中文/英/德/法/西/俄/日/韩/阿/泰)
@@ -34,20 +40,20 @@ fnOS Native Python 3.12 控制进程 (package 用户: AI 脱敏器)
   │     ├── ChineseIEDetector (Tier 2, 槽位 chinese_ie, 始终就绪)
   │     │     ├── 内置零依赖语言学启发式信息抽取 (百家姓/动词锚点/行政拓扑)
   │     │     ├── safe_sequential_span_alignment 游标防重定位
-  │     │     └── 可选 ModelScope SiameseUIE 适配器 (Paddle runtime)
-  │     ├── GLiNERDetector (Tier 3, 槽位 general_pii, ModelScope: gliner-pii-edge / base, Torch runtime)
+  │     │     └── 可选 ModelScope SiameseUIE 适配 (Torch runtime, Worker IPC)
+  │     ├── GLiNERDetector (Tier 3, 槽位 general_pii, ModelScope: gliner-pii-edge / base, Torch runtime, Worker IPC)
   │     │     └── 原生 token-level span extraction, 零偏移漂移
-  │     └── MemPrivacyDetector (Tier 4, 槽位 semantic_privacy, ModelScope: memprivacy-1.7b-rl / 4b-rl, Torch runtime)
+  │     └── MemPrivacyDetector (Tier 4, 槽位 semantic_privacy, ModelScope: memprivacy-1.7b-rl / 4b-rl, Torch runtime, Worker IPC)
   │           ├── 官方 System Prompt + Qwen Chat 模板 + 贪婪解码 (temperature=0.0)
   │           ├── 容错 JSON 实体数组提取与清洗 (parse_memprivacy_json)
   │           └── 深度隐私逻辑推理与安全跨度对齐 (resolve_semantic_spans)
   ├── ModelLifecycleController & 安全导入
   │     ├── fnOS data-share 用户共享目录 (ai-privacy-check/models) 扫描
   │     ├── validate_import_source_path (realpath 穿透与目录越界防护)
-  │     └── 临时暂存区 + os.replace 原子导入
+  │     └── 临时暂存区 + os.replace 原子导入 + 合成冒烟测试验证
   └── 静态 Web UI
         ├── 人工复核与稳定占位符
-        ├── PL2 / PL3 / PL4 策略级联筛选
+        ├── PL1 - PL4 策略级联筛选
         ├── 实时脱敏与本地精确还原
         └── Web Crypto PBKDF2 + AES-256-GCM 本地加密保险箱
 ```
@@ -78,11 +84,11 @@ fnOS Native Python 3.12 控制进程 (package 用户: AI 脱敏器)
 
 - **硬件探测完全解耦 (`HardwareProbe`)**：不再依赖 Python 内核或在主进程加载 PyTorch。通过调用 `nvidia-smi` 独立查询驱动、设备名称及显存，彻底解决未安装 PyTorch 时错误报告“未检测到 NVIDIA CUDA 环境”的问题。
 - **隔离虚拟环境 (`RuntimeManager`)**：
-  - 为 PyTorch 和 PaddlePaddle 分别维护隔离的 venv（`${DATA_DIR}/runtimes/{profile}/venv`）。
-  - 安装依赖时采用 `uv` 或独立虚拟环境管理，杜绝包依赖冲突。
+  - 为 PyTorch 统一维护隔离的 venv（`${DATA_DIR}/runtimes/{profile}/venv`）。
+  - 安装依赖时优先采用 `uv`，杜绝包依赖冲突。
   - 每个 runtime 在安装后通过独立的子进程探针验证 `cuda.is_available()`，并输出持久化的 `installed.json` 元数据。
 - **设备多框架路由 (`DeviceManager`)**：
-  - 提供 `resolve_for_framework("torch")` 与 `resolve_for_framework("paddle")`，分别匹配各自 runtime 的实际可用状态。
+  - 提供 `resolve_for_framework("torch")`，匹配 runtime 的实际可用状态。
   - 支持 `auto / cpu / cuda` 设备策略，自动优雅降级。
 
 ## 模型生命周期管理与安全导入

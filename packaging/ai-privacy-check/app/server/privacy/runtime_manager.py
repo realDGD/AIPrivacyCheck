@@ -1,12 +1,10 @@
 """Isolated Model Runtime Manager for AI Privacy Check.
 
-Manages isolated virtual environments (venv) for CPU and CUDA profiles across frameworks:
+Manages isolated virtual environments (venv) for PyTorch CPU and CUDA profiles:
   - torch-cpu
   - torch-cuda
-  - paddle-cpu
-  - paddle-cuda
 
-Decoupled from control-plane Python. Control plane does not import torch/paddle.
+Decoupled from control-plane Python. Control plane does not import torch/transformers/gliner/modelscope.
 Workers and framework verification run exclusively within the profile's isolated interpreter.
 """
 
@@ -27,26 +25,20 @@ PYPI_MIRROR_URL = "https://mirrors.aliyun.com/pypi/simple/"
 PYPI_OFFICIAL_URL = "https://pypi.org/simple"
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
-PADDLE_CPU_INDEX = "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
-PADDLE_CUDA_INDEX = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
 
 PROFILE_TORCH_CPU = "torch-cpu"
 PROFILE_TORCH_CUDA = "torch-cuda"
-PROFILE_PADDLE_CPU = "paddle-cpu"
-PROFILE_PADDLE_CUDA = "paddle-cuda"
 
 ALL_PROFILES = (
     PROFILE_TORCH_CPU,
     PROFILE_TORCH_CUDA,
-    PROFILE_PADDLE_CPU,
-    PROFILE_PADDLE_CUDA,
 )
 
 
 @dataclass(frozen=True)
 class RuntimeProfileDescriptor:
     profile: str
-    framework: str  # "torch" or "paddle"
+    framework: str  # "torch"
     device_target: str  # "cpu" or "cuda"
     display_name: str
     description: str
@@ -58,28 +50,14 @@ RUNTIME_PROFILES: Dict[str, RuntimeProfileDescriptor] = {
         framework="torch",
         device_target="cpu",
         display_name="PyTorch CPU 运行时",
-        description="适用于 GLiNER 与 MemPrivacy 模型的纯 CPU 轻量级推理环境。",
+        description="适用于 SiameseUIE、GLiNER 与 MemPrivacy 模型的纯 CPU 轻量级推理环境。",
     ),
     PROFILE_TORCH_CUDA: RuntimeProfileDescriptor(
         profile=PROFILE_TORCH_CUDA,
         framework="torch",
         device_target="cuda",
         display_name="PyTorch CUDA 运行时",
-        description="基于 NVIDIA CUDA 加速的 PyTorch 环境，提供高吞吐大模型推理能力。",
-    ),
-    PROFILE_PADDLE_CPU: RuntimeProfileDescriptor(
-        profile=PROFILE_PADDLE_CPU,
-        framework="paddle",
-        device_target="cpu",
-        display_name="PaddlePaddle CPU 运行时",
-        description="专用于 SiameseUIE 中文信息抽取模型的 CPU 推理环境。",
-    ),
-    PROFILE_PADDLE_CUDA: RuntimeProfileDescriptor(
-        profile=PROFILE_PADDLE_CUDA,
-        framework="paddle",
-        device_target="cuda",
-        display_name="PaddlePaddle CUDA 运行时",
-        description="基于 NVIDIA CUDA 加速的 Paddle 环境，优化中文 UIE 批量抽取延时。",
+        description="基于 NVIDIA CUDA 加速的 PyTorch 环境，提供高吞吐深度模型推理能力。",
     ),
 }
 
@@ -133,14 +111,20 @@ class RuntimeManager:
         return self.profile_dir(profile) / "venv"
 
     def interpreter_path(self, profile: str) -> Optional[Path]:
-        venv_python = self.venv_dir(profile) / "bin" / "python"
-        if venv_python.is_file() and os.access(venv_python, os.X_OK):
-            return venv_python
-        # Check Windows fallback just in case
-        venv_python_win = self.venv_dir(profile) / "Scripts" / "python.exe"
-        if venv_python_win.is_file():
-            return venv_python_win
+        for cand in (
+            self.venv_dir(profile) / "bin" / "python3",
+            self.venv_dir(profile) / "bin" / "python",
+            self.venv_dir(profile) / "Scripts" / "python.exe",
+        ):
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return cand
         return None
+
+    def get_python_bin(self, profile: str) -> Path:
+        interp = self.interpreter_path(profile)
+        if interp:
+            return interp
+        return self.venv_dir(profile) / "bin" / "python3"
 
     def is_installed(self, profile: str) -> bool:
         interp = self.interpreter_path(profile)
@@ -159,9 +143,6 @@ class RuntimeManager:
 
         interp = self.interpreter_path(profile)
         if not interp:
-            # Check 0.4.0 legacy unmigrated path
-            legacy_dir = self.runtimes_dir / descriptor.framework
-            legacy_hint = legacy_dir.is_dir()
             status: Dict[str, Any] = {
                 "profile": profile,
                 "framework": descriptor.framework,
@@ -175,39 +156,25 @@ class RuntimeManager:
                 "device_name": None,
                 "device_count": 0,
                 "interpreter": None,
-                "error": "运行时未安装" + ("（检测到旧版非隔离运行时，请重新安装以升级隔离环境）" if legacy_hint else ""),
-                "legacy_unmigrated": legacy_hint,
+                "error": "运行时未安装",
             }
             with self._lock:
                 self._probe_cache[profile] = status
             return status
 
         # Execute framework-specific verification probe in isolated subprocess
-        if descriptor.framework == "torch":
-            probe_code = (
-                "import json, sys, torch\n"
-                "is_cuda = bool(torch.cuda.is_available())\n"
-                "res = {\n"
-                "  'framework_version': torch.__version__,\n"
-                "  'cuda_version': getattr(torch.version, 'cuda', None),\n"
-                "  'cuda_available': is_cuda,\n"
-                "  'device_count': torch.cuda.device_count() if is_cuda else 0,\n"
-                "  'device_name': torch.cuda.get_device_name(0) if is_cuda and torch.cuda.device_count() > 0 else None\n"
-                "}\n"
-                "print(json.dumps(res))\n"
-            )
-        else:
-            probe_code = (
-                "import json, sys, paddle\n"
-                "is_cuda = bool(paddle.is_compiled_with_cuda())\n"
-                "res = {\n"
-                "  'framework_version': paddle.__version__,\n"
-                "  'cuda_available': is_cuda,\n"
-                "  'device_count': paddle.device.cuda.device_count() if is_cuda else 0,\n"
-                "  'device_name': paddle.device.cuda.get_device_name() if is_cuda and paddle.device.cuda.device_count() > 0 else None\n"
-                "}\n"
-                "print(json.dumps(res))\n"
-            )
+        probe_code = (
+            "import json, sys, torch\n"
+            "is_cuda = bool(torch.cuda.is_available())\n"
+            "res = {\n"
+            "  'framework_version': torch.__version__,\n"
+            "  'cuda_version': getattr(torch.version, 'cuda', None),\n"
+            "  'cuda_available': is_cuda,\n"
+            "  'device_count': torch.cuda.device_count() if is_cuda else 0,\n"
+            "  'device_name': torch.cuda.get_device_name(0) if is_cuda and torch.cuda.device_count() > 0 else None\n"
+            "}\n"
+            "print(json.dumps(res))\n"
+        )
 
         cmd = [str(interp), "-c", probe_code]
         retcode, stdout, stderr = self._runner(cmd, timeout=10)
@@ -232,7 +199,6 @@ class RuntimeManager:
             try:
                 data = json.loads(stdout.strip())
                 cuda_avail = bool(data.get("cuda_available", False))
-                # For CUDA profile, verified requires cuda_available is True
                 if descriptor.device_target == "cuda":
                     verified = cuda_avail
                     err = None if cuda_avail else "框架已安装，但未检测到可用 CUDA 驱动与硬件。"
@@ -284,13 +250,13 @@ class RuntimeManager:
 
     def best_runtime_for_framework(
         self,
-        framework: str,
+        framework: str = "torch",
         prefer_cuda: bool = True,
         hardware_nvidia_available: bool = False,
     ) -> Optional[str]:
-        """Resolves the best available runtime profile for a given framework."""
-        cuda_profile = f"{framework}-cuda"
-        cpu_profile = f"{framework}-cpu"
+        """Resolves the best available runtime profile."""
+        cuda_profile = PROFILE_TORCH_CUDA
+        cpu_profile = PROFILE_TORCH_CPU
 
         cuda_status = self.probe_profile(cuda_profile)
         cpu_status = self.probe_profile(cpu_profile)
@@ -305,6 +271,15 @@ class RuntimeManager:
         if cuda_status.get("installed") and cuda_status.get("verified") and cuda_status.get("cuda_available"):
             return cuda_profile
 
+        return None
+
+    def get_modelscope_capable_runtime(self, preferred_profile: Optional[str] = None) -> Optional[str]:
+        """Returns any installed runtime that can execute ModelScope downloads."""
+        if preferred_profile and self.is_installed(preferred_profile):
+            return preferred_profile
+        for prof in (PROFILE_TORCH_CUDA, PROFILE_TORCH_CPU):
+            if self.is_installed(prof):
+                return prof
         return None
 
     def run_in_runtime(
