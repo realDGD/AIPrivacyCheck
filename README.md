@@ -2,10 +2,15 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.0`（fnOS Native 原生应用）
+当前版本：`0.6.1`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **Unicode 字符契约加固与安全副本保障 (v0.6.1)**：
+  - **统一 Unicode / UTF-16 契约**：后端实体序列化直接输出精确的 `start_utf16` 与 `end_utf16`，前端统一使用 UTF-16 code units 字符切片，彻底根除包含 Emoji、生僻字、合字及复杂多语言文本时的占位符偏移错位与尾部字符残留缺陷。
+  - **占位符统一分配与同值复用**：自动检测与手动划词标注统一使用 `allocateReplacementToken`，相同文本与实体类型严格复用同一个脱敏占位符与保险箱映射，彻底消除同值多 token 冲突。
+  - **安全副本校验与故障失效阻断**：安全副本生成时执行严格的占位符跨越重叠与原文碰撞校验，一旦检测到异常立即失效脱敏状态并禁用“复制脱敏文本”与“复制 Prompt”，绝不让损坏的脱敏文本流出。
+  - **交互状态机与重选健全性**：重新检测、清空、切换视图时全局重置重选（retargeting）、悬浮操作栏（popover）与划词选区；支持在已禁用（`enabled: false`）的实体范围上重新划词标注；模型安装与导入流程在异常分支下依然可靠重置检测器。
 - **四级插拔式检测与策略引擎**：
   1. **确定性多语言与中文规则（Tier 1，`BuiltInRuleDetector`）**：身份证号、手机号、国际电话（E.164）、固定电话、银行卡、护照、统一社会信用代码、车牌、姓名、地址、邮箱、账号/单号、出生日期、社交账号、IPv4、完整 IPv6、MAC、BIC/SWIFT、IBAN、US SSN、数据库连接串（`DATABASE_URI`）、私钥与各类 API Token/凭证。内置严格静态敏感度等级（PL4/PL3/PL2），不可被模型随意降级。
   2. **中文信息抽取引擎（Tier 2，`ChineseIEDetector`）**：针对中文姓名、复杂行政区划拓扑与建筑地址进行基于语言学特征和安全跨度对齐的抽取（`safe_sequential_span_alignment`，彻底杜绝同名多次出现时的偏移碰撞）；内置零依赖启发式抽取，支持可选适配 ModelScope 社区模型 `siamese-uie`（PyTorch 架构）。
@@ -89,7 +94,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.0_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.1_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 
