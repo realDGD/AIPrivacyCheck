@@ -246,11 +246,48 @@ function normalizeSourceSelection(source, start, end, entities, excludedEntity =
   return { start: sourceStart, end: sourceEnd, text };
 }
 
+function scrollElementIntoContainer(container, target, behavior = "smooth") {
+  if (!container || !target) return;
+  if (typeof container.getBoundingClientRect === "function" && typeof target.getBoundingClientRect === "function") {
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const targetHeight = typeof targetRect.height === "number" ? targetRect.height : (typeof targetRect.bottom === "number" && typeof targetRect.top === "number" ? targetRect.bottom - targetRect.top : (target.clientHeight || 0));
+    const containerHeight = typeof containerRect.height === "number" ? containerRect.height : (container.clientHeight || 0);
+    const delta = targetRect.top - containerRect.top - (containerHeight - targetHeight) / 2;
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({
+        top: Math.max(0, container.scrollTop + delta),
+        behavior,
+      });
+    }
+  } else if (typeof container.scrollTo === "function" && typeof target.offsetTop === "number") {
+    const targetHeight = target.offsetHeight || 0;
+    const containerHeight = container.clientHeight || 0;
+    container.scrollTo({
+      top: Math.max(0, target.offsetTop - (containerHeight - targetHeight) / 2),
+      behavior,
+    });
+  }
+}
+
 function activateLinkedElement(container, selector, moveFirst = false) {
   if (!container || typeof container.querySelector !== "function") return false;
   const target = container.querySelector(selector);
   if (!target || !target.classList) return false;
-  if (moveFirst && typeof container.prepend === "function") container.prepend(target);
+
+  const reduceMotion = typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const behavior = reduceMotion ? "auto" : "smooth";
+
+  if (moveFirst && typeof container.prepend === "function") {
+    container.prepend(target);
+    if (typeof container.scrollTo === "function") {
+      container.scrollTo({ top: 0, behavior });
+    }
+  } else if (typeof scrollElementIntoContainer === "function") {
+    scrollElementIntoContainer(container, target, behavior);
+  }
 
   target.classList.remove("is-link-target");
   void target.offsetWidth;
@@ -259,13 +296,13 @@ function activateLinkedElement(container, selector, moveFirst = false) {
     target.addEventListener("animationend", () => target.classList.remove("is-link-target"), { once: true });
   }
 
-  const reduceMotion = typeof window !== "undefined"
-    && typeof window.matchMedia === "function"
-    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (typeof target.scrollIntoView === "function") {
-    target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center", inline: "nearest" });
+  if (typeof target.focus === "function") {
+    try {
+      target.focus({ preventScroll: true });
+    } catch (_) {
+      target.focus();
+    }
   }
-  if (typeof target.focus === "function") target.focus({ preventScroll: true });
   return true;
 }
 
@@ -616,8 +653,19 @@ function startEntityRetarget(target) {
   updateRedactedActionAvailability();
   const original = elements.redactedPreview.querySelector(".redacted-retarget-source");
   if (original) {
-    original.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    original.focus({ preventScroll: true });
+    const reduceMotion = typeof window !== "undefined"
+      && typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (typeof scrollElementIntoContainer === "function") {
+      scrollElementIntoContainer(elements.redactedPreview, original, reduceMotion ? "auto" : "smooth");
+    }
+    if (typeof original.focus === "function") {
+      try {
+        original.focus({ preventScroll: true });
+      } catch (_) {
+        original.focus();
+      }
+    }
   }
   toast(`请重新划选“${entity.label}”的准确范围，Esc 可取消`);
 }
@@ -1708,7 +1756,8 @@ if ($("importVaultButton")) $("importVaultButton").addEventListener("click", imp
 if (elements.installModelButton) elements.installModelButton.addEventListener("click", installModel);
 
 if (elements.redactedPreview) {
-  elements.redactedPreview.addEventListener("mouseup", () => {
+  elements.redactedPreview.addEventListener("mouseup", (event) => {
+    if (event.button !== 0) return;
     setTimeout(handlePreviewSelection, 20);
   });
   elements.redactedPreview.addEventListener("touchend", () => {
@@ -1777,5 +1826,6 @@ if (typeof module !== "undefined" && module.exports) {
     buildRedactedSegments,
     buildRetargetSegments,
     createManualEntity,
+    scrollElementIntoContainer,
   };
 }

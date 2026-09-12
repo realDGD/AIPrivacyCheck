@@ -109,6 +109,7 @@ class FrontendEntityLinkingTests(unittest.TestCase):
 
     def test_link_activation_moves_focuses_scrolls_and_pulses(self):
         result = self.run_node("""
+        eval(extractFunction('scrollElementIntoContainer'));
         eval(extractFunction('activateLinkedElement'));
         const events = [];
         const classList = {
@@ -118,25 +119,34 @@ class FrontendEntityLinkingTests(unittest.TestCase):
         const target = {
           classList,
           offsetWidth: 20,
-          scrollIntoView: (options) => events.push(`scroll:${options.block}`),
-          focus: () => events.push('focus'),
+          scrollIntoView: (options) => events.push(`scrollIntoView:called`),
+          focus: (opts) => events.push(`focus:preventScroll=${opts && opts.preventScroll}`),
           addEventListener: (name) => events.push(`listen:${name}`),
+          getBoundingClientRect: () => ({ top: 120, height: 30 }),
         };
         const container = {
+          clientHeight: 200,
+          scrollTop: 0,
+          getBoundingClientRect: () => ({ top: 0, height: 200 }),
           querySelector: (selector) => {
             events.push(`query:${selector}`);
             return target;
           },
           prepend: (node) => events.push(`prepend:${node === target}`),
+          scrollTo: (options) => events.push(`scrollTo:${options.top}`),
         };
+        // Case 1: moveFirst = true (prepend and scroll to 0)
         const found = activateLinkedElement(container, '[data-entity-index="2"]', true);
+        // Case 2: moveFirst = false (internal scrollElementIntoContainer)
+        activateLinkedElement(container, '[data-entity-index="2"]', false);
         console.log(JSON.stringify({ found, events }));
         """)
 
         self.assertTrue(result["found"])
         self.assertIn("prepend:true", result["events"])
-        self.assertIn("scroll:center", result["events"])
-        self.assertIn("focus", result["events"])
+        self.assertIn("scrollTo:0", result["events"])
+        self.assertNotIn("scrollIntoView:called", result["events"])
+        self.assertIn("focus:preventScroll=true", result["events"])
         self.assertIn("add:is-link-target", result["events"])
 
     def test_source_selection_rejects_empty_whitespace_and_crossing_entities(self):
@@ -419,8 +429,10 @@ class FrontendEntityLinkingTests(unittest.TestCase):
             append: (...nodes) => children.push(...nodes),
             prepend: (node) => { children.unshift(node); domEvents.push("dom:prepend"); },
             querySelector: (sel) => makeElement("div"),
+            scrollTo: (opts) => domEvents.push(`scrollTo:${opts && opts.top}`),
+            getBoundingClientRect: () => ({ top: 100, bottom: 120, height: 20, left: 0, right: 100, width: 100 }),
             scrollIntoView: (opts) => domEvents.push(`scroll:${opts.block}`),
-            focus: () => domEvents.push("dom:focus"),
+            focus: (opts) => domEvents.push(`dom:focus:preventScroll=${opts && opts.preventScroll}`),
             addEventListener: (ev, fn) => {},
             setAttribute: () => {}
           };
@@ -473,6 +485,7 @@ class FrontendEntityLinkingTests(unittest.TestCase):
         eval(extractFunction("maskPreview"));
         eval(extractFunction("buildRedactedSegments"));
         eval(extractFunction("normalizeSourceSelection"));
+        eval(extractFunction("scrollElementIntoContainer"));
         eval(extractFunction("activateLinkedElement"));
         eval(extractFunction("focusReviewEntity"));
         eval(extractFunction("focusRedactedEntity"));
@@ -1060,6 +1073,114 @@ class FrontendEntityLinkingTests(unittest.TestCase):
 
         # When enabled: selection over 3..5 is rejected as overlap
         self.assertIsNone(result["resB"])
+
+    def test_right_click_mouseup_does_not_close_context_menu(self):
+        """Right click mouseup (button !== 0) must not trigger selection handling or dismiss context menu."""
+        app_code = self.app_js.read_text(encoding="utf-8")
+        self.assertIn("if (event.button !== 0) return;", app_code)
+
+        result = self.run_node("""
+        let selectionHandled = false;
+        function handlePreviewSelection() { selectionHandled = true; }
+
+        let mouseUpHandler = null;
+        const mockPreview = {
+          addEventListener: (event, handler) => {
+            if (event === 'mouseup') mouseUpHandler = handler;
+          }
+        };
+
+        // Simulate app.js listener registration logic
+        mockPreview.addEventListener('mouseup', (event) => {
+          if (event.button !== 0) return;
+          handlePreviewSelection();
+        });
+
+        // Test right-click (button === 2)
+        mouseUpHandler({ button: 2 });
+        const rightClickIgnored = !selectionHandled;
+
+        // Test left-click (button === 0)
+        mouseUpHandler({ button: 0 });
+        const leftClickHandled = selectionHandled;
+
+        console.log(JSON.stringify({ rightClickIgnored, leftClickHandled }));
+        """)
+        self.assertTrue(result["rightClickIgnored"])
+        self.assertTrue(result["leftClickHandled"])
+
+    def test_review_highlight_has_no_horizontal_translation(self):
+        """Keyframe entity-link-pulse must not use horizontal translateX, preventing card overflow."""
+        pulse_start = self.styles.find("@keyframes entity-link-pulse")
+        self.assertNotEqual(pulse_start, -1)
+        pulse_end = self.styles.find("}", self.styles.find("70%", pulse_start)) + 1
+        pulse_css = self.styles[pulse_start:pulse_end]
+        self.assertNotIn("transform", pulse_css)
+        self.assertNotIn("translateX", pulse_css)
+        self.assertIn("border-color", pulse_css)
+        self.assertIn("box-shadow", pulse_css)
+
+    def test_retarget_source_has_no_dashed_outline(self):
+        """Range retarget source marker must not have misleading dashed outline."""
+        retarget_start = self.styles.find(".redacted-retarget-source")
+        self.assertNotEqual(retarget_start, -1)
+        retarget_end = self.styles.find("}", retarget_start) + 1
+        retarget_css = self.styles[retarget_start:retarget_end]
+        self.assertNotIn("dashed", retarget_css)
+        self.assertNotIn("outline", retarget_css)
+        self.assertIn("#ffe999", retarget_css)
+
+    def test_mask_workspace_has_fixed_desktop_height(self):
+        """Workspace 3 columns in #maskView must share equal desktop fixed height of 640px and responsive reset."""
+        self.assertIn("#maskView .workspace-grid > .panel { height: 640px; min-height: 0; }", self.styles)
+        self.assertIn("#maskView #sourceText { min-height: 0; flex: 1 1 0; overflow: auto; resize: none; }", self.styles)
+        self.assertIn("#maskView .redacted-preview { min-height: 0; flex: 1 1 0; overflow-y: auto; overflow-x: hidden; }", self.styles)
+        # Verify responsive overrides reset height
+        self.assertIn("#maskView .workspace-grid > .panel { height: auto; min-height: 480px; }", self.styles)
+        self.assertIn("#maskView .workspace-grid > .panel { height: auto; min-height: 440px; }", self.styles)
+
+    def test_restore_workspace_not_forced_to_fixed_height(self):
+        """Restore workspace (.restore-grid) must NOT be locked to height: 640px."""
+        self.assertNotIn("#restoreView .restore-grid > .panel { height: 640px", self.styles)
+        self.assertNotIn(".restore-grid .panel { height: 640px", self.styles)
+        self.assertIn(".restore-grid .panel { min-height: 490px;", self.styles)
+
+    def test_entity_list_uses_vertical_only_overflow(self):
+        """Review panel entity list must strictly use overflow-y: auto and overflow-x: hidden."""
+        self.assertIn(".entity-list { display: flex; flex-direction: column; gap: 9px; overflow-y: auto; overflow-x: hidden; max-height: 435px;", self.styles)
+        self.assertIn("#maskView .entity-list { flex: 1 1 0; min-height: 0; max-height: none; }", self.styles)
+
+    def test_link_navigation_does_not_use_scroll_into_view(self):
+        """Bi-directional linking and retargeting must use scrollElementIntoContainer without scrollIntoView."""
+        app_code = self.app_js.read_text(encoding="utf-8")
+        self.assertFalse(any("scrollIntoView" in line for line in app_code.splitlines() if not line.strip().startswith("//")))
+        self.assertIn("function scrollElementIntoContainer(container, target, behavior", app_code)
+
+        result = self.run_node("""
+        eval(extractFunction('scrollElementIntoContainer'));
+
+        let scrolledTo = null;
+        const container = {
+          scrollTop: 100,
+          clientHeight: 500,
+          getBoundingClientRect: () => ({ top: 50, bottom: 550 }),
+          scrollTo: (opts) => { scrolledTo = opts; }
+        };
+        const target = {
+          clientHeight: 80,
+          getBoundingClientRect: () => ({ top: 250, bottom: 330 })
+        };
+
+        scrollElementIntoContainer(container, target, 'smooth');
+
+        console.log(JSON.stringify({
+          scrolledTo,
+          expectedTop: 100 + (250 - 50) - (500 / 2) + 40
+        }));
+        """)
+        self.assertIsNotNone(result["scrolledTo"])
+        self.assertEqual(result["scrolledTo"]["behavior"], "smooth")
+        self.assertEqual(result["scrolledTo"]["top"], result["expectedTop"])
 
 
 if __name__ == "__main__":
