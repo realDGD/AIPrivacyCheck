@@ -57,6 +57,11 @@ class ModelDescriptor:
     supports_cuda: bool
     recommended: bool
     description: str
+    # Model-specific pip requirements installed into the shared runtime venv
+    # BEFORE download/smoke verification. Only declare packages empirically
+    # proven to be required by the model's actual inference import chain
+    # (verify against upstream metadata and a real pipeline load; never guess).
+    runtime_dependencies: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -74,6 +79,7 @@ class ModelDescriptor:
             "supports_cuda": self.supports_cuda,
             "recommended": self.recommended,
             "description": self.description,
+            "runtime_dependencies": list(self.runtime_dependencies),
         }
 
 
@@ -93,6 +99,20 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         supports_cuda=True,
         recommended=True,
         description="面向中文信息抽取的通用 UIE 深度模型，针对人名、地址、机构、学校、职位等实体具有高泛化跨度抽取能力。",
+        # Empirically verified against modelscope 1.40: loading the
+        # siamese-uie pipeline imports modelscope.utils.config (addict),
+        # modelscope.msdatasets (datasets), scipy.special.softmax,
+        # modelscope.pipeline_inputs (PIL), and the pipeline builder chain
+        # (simplejson, sortedcontainers). None of these are core deps of a
+        # bare `modelscope` install - they only ship in its extras.
+        runtime_dependencies=(
+            "addict",
+            "datasets",
+            "scipy",
+            "Pillow",
+            "simplejson",
+            "sortedcontainers",
+        ),
     ),
     "gliner-pii-edge": ModelDescriptor(
         id="gliner-pii-edge",
@@ -140,7 +160,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         supports_cpu=True,
         supports_cuda=True,
         recommended=True,
-        description="基于强化学习对齐的语义级隐私理解模型，专精于医疗、财务、行踪、社会关系等长难句深层隐私提取与分级。支持 CUDA（建议显存 >=6GB）或 CPU 模式（CPU 推理耗时较长且内存占用约 8-10GB，单请求有时间预算限制）。",
+        description="可选的深度语义隐私模型（深度扫描模式，用户主动开启）。Benchmark v2 证实其为唯一具备语义级召回的候选（语义切片跨度覆盖召回 90%，小参数 Qwen 挑战者要么高误报要么漏检），但 3.4GB 权重 + CPU 约 9GB RAM / 数百秒延迟 + 受限显存设备 CUDA OOM 压力 + CC BY-NC-ND 非商业许可，不适合作为 NAS 默认推荐；生产默认检测由内置规则与 NER 承担。支持 CUDA（建议显存 >=6GB）或 CPU 模式（CPU 推理耗时较长且内存占用约 8-10GB，单请求有时间预算限制）。",
     ),
     "memprivacy-4b-rl": ModelDescriptor(
         id="memprivacy-4b-rl",

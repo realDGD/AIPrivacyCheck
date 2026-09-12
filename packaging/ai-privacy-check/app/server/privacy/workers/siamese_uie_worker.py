@@ -36,6 +36,11 @@ def get_pipeline(model_path: str, device: str = "cpu"):
     from modelscope.pipelines import pipeline  # type: ignore
     from modelscope.utils.constant import Tasks  # type: ignore
 
+    # Deliberately NO trust_remote_code here: AIPrivacyCheck refuses to import
+    # or execute code shipped inside model directories. The installer strips
+    # `allow_remote`/`plugins` from configuration.json at install time, so the
+    # catalog siamese-uie checkpoint loads through ModelScope built-in
+    # pipeline/model/preprocessor classes only.
     pipe = pipeline(
         Tasks.siamese_uie,
         model=model_path,
@@ -51,13 +56,21 @@ def extract_entities_from_output(raw_output, text: str) -> list:
     """Normalizes ModelScope SiameseUIE output into standard span objects."""
     entities = []
     # Output can be:
-    # 1. [{'type': '人物', 'span': '张三', 'start': 0, 'end': 2, 'probability': 0.98}]
-    # 2. {'output': [{'type': '人物', 'span': '张三', ...}]}
-    # 3. {'人物': [{'span': '张三', 'start': 0, 'end': 2}]}
+    # 1. {'output': [[{'type': '地理位置', 'span': '...', 'offset': [7, 19]}]]}
+    #    (newer ModelScope: one inner list per schema key, half-open offsets)
+    # 2. [{'type': '人物', 'span': '张三', 'start': 0, 'end': 2, 'probability': 0.98}]
+    # 3. {'output': [{'type': '人物', 'span': '张三', ...}]}
+    # 4. {'人物': [{'span': '张三', 'start': 0, 'end': 2}]}
     items = []
     if isinstance(raw_output, dict):
         if "output" in raw_output and isinstance(raw_output["output"], list):
-            items = raw_output["output"]
+            flattened = []
+            for group in raw_output["output"]:
+                if isinstance(group, list):
+                    flattened.extend(group)
+                else:
+                    flattened.append(group)
+            items = flattened
         else:
             for label, val_list in raw_output.items():
                 if isinstance(val_list, list):
@@ -84,6 +97,8 @@ def extract_entities_from_output(raw_output, text: str) -> list:
 
         start = item.get("start")
         end = item.get("end")
+        if start is None and isinstance(item.get("offset"), (list, tuple)) and len(item["offset"]) == 2:
+            start, end = item["offset"]
 
         if start is not None and end is not None:
             s = int(start)

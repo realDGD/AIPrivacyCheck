@@ -37,6 +37,7 @@ from privacy.runtime_manager import (
     PYPI_MIRROR_URL,
     PYTORCH_CPU_INDEX,
     PYTORCH_CUDA_INDEX,
+    RuntimeManager,
     get_runtime_manager,
 )
 from privacy.runtime_env import build_runtime_env, prepare_runtime_dirs
@@ -45,6 +46,76 @@ from privacy.worker_client import get_worker_client
 _LOCK_STATE = threading.local()
 
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+# Shared torch runtime transformers constraint:
+#   >=4.51 - floor required by Qwen3ForCausalLM (MemPrivacy catalog models and
+#            Qwen3 challenger weights fail to load on older releases).
+#   <5     - ceiling required by ModelScope legacy pipelines/models: their NLP
+#            configuration modules import `transformers.onnx`, which was
+#            removed in transformers 5.x.
+TRANSFORMERS_REQUIREMENT = "transformers>=4.51,<5"
+
+# Distinguishes the dependency probe subprocess from other interpreter calls.
+DEPENDENCY_PROBE_MARKER = "AIPRIVACY_DEPENDENCY_PROBE"
+
+# Minimal spec evaluation running inside the isolated runtime interpreter.
+# Uses only the stdlib: importlib for presence/version probing.
+_DEPENDENCY_PROBE_SCRIPT = r'''
+import importlib.metadata
+import importlib.util
+import json
+import re
+import sys
+
+IMPORT_ALIASES = {
+    "pillow": "PIL",
+}
+
+def dist_name(spec):
+    return re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", spec).group(0)
+
+def version_tuple(value):
+    parts = []
+    for chunk in re.split(r"[.+]", value.strip()):
+        digits = re.match(r"\d+", chunk)
+        if not digits:
+            break
+        parts.append(int(digits.group(0)))
+    return tuple(parts) or (0,)
+
+def satisfies(installed, constraints):
+    for op, expected in constraints:
+        a, b = version_tuple(installed), version_tuple(expected)
+        ok = {
+            ">=": a >= b, "<=": a <= b, "==": a == b,
+            ">": a > b, "<": a < b, "!=": a != b,
+        }[op]
+        if not ok:
+            return False
+    return True
+
+specs = json.loads(sys.argv[1])
+missing = []
+for spec in specs:
+    name = dist_name(spec)
+    constraints = re.findall(r"(>=|<=|==|!=|>|<)\s*([0-9A-Za-z.]+)", spec[len(name):])
+    try:
+        installed_version = importlib.metadata.version(name)
+    except Exception:
+        missing.append(spec)
+        continue
+    if constraints and not satisfies(installed_version, constraints):
+        missing.append(spec)
+        continue
+    import_name = IMPORT_ALIASES.get(name.lower(), name.lower())
+    try:
+        if importlib.util.find_spec(import_name) is None:
+            missing.append(spec)
+    except Exception:
+        missing.append(spec)
+
+print(json.dumps({"ok": True, "missing": missing, "error": None}))
+'''
 
 
 def validate_model_id(model_id: str):
@@ -336,6 +407,175 @@ def verify_model_integrity(model_dir: Path, model_id: str) -> Tuple[bool, str]:
     return check_model_integrity(model_id, model_dir)
 
 
+def sanitize_model_config(model_dir: Path) -> Tuple[bool, str]:
+    """Strips remote-code triggers from a model's ModelScope configuration.json.
+
+    ModelScope configs may declare `allow_remote` / `plugins`, which make newer
+    ModelScope runtimes pip-install requirements.txt pins and import arbitrary
+    .py files from the model directory. AIPrivacyCheck loads catalog models
+    exclusively through built-in pipeline/model classes and refuses remote-code
+    execution (and the uncontrolled dependency downgrades that come with it),
+    so those two fields are removed in-place during install/import before the
+    model is activated. The operation is idempotent.
+    """
+    config_path = model_dir / "configuration.json"
+    if not config_path.is_file():
+        return False, "no configuration.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"configuration.json 解析失败: {exc}"
+    if not isinstance(config, dict):
+        return False, "configuration.json 不是对象"
+
+    removed = [key for key in ("allow_remote", "plugins") if key in config]
+    if not removed:
+        return False, "already clean"
+    for key in removed:
+        config.pop(key, None)
+
+    temporary = config_path.with_suffix(".json.sanitize.tmp")
+    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, config_path)
+    emit(f"已从模型配置中移除远程代码声明 ({', '.join(removed)}): {config_path}")
+    return True, f"removed {', '.join(removed)}"
+
+
+def _find_uv() -> Optional[str]:
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        return uv_bin
+    for p in ("/usr/local/bin/uv", "/opt/homebrew/bin/uv", os.path.expanduser("~/.cargo/bin/uv")):
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def _pip_install_command(uv_bin: Optional[str], interp: Path, venv_dir: Path, args: List[str]) -> List[str]:
+    """Builds a pip/uv install command targeting the isolated venv interpreter."""
+    if uv_bin:
+        return [uv_bin, "pip", "install", "--python", str(interp), *args]
+    pip_bin = str(venv_dir / "bin" / "pip")
+    return [pip_bin, "install", "--disable-pip-version-check", "--no-input", "--upgrade", *args]
+
+
+def _default_dependency_runner(
+    cmd: List[str],
+    cwd: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+    timeout: int = 15,
+) -> Tuple[int, str, str]:
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return res.returncode, res.stdout, res.stderr
+    except FileNotFoundError:
+        return 127, "", f"command not found: {cmd[0] if cmd else ''}"
+    except subprocess.TimeoutExpired:
+        return 124, "", "dependency command timed out"
+    except Exception as exc:
+        return 1, "", str(exc)
+
+
+def ensure_model_runtime_dependencies(
+    data_dir: Path,
+    model_id: str,
+    profile: str,
+    command_runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+) -> Dict[str, Any]:
+    """Resolves the model-specific runtime dependency contract inside an existing profile venv.
+
+    Runs AFTER install_isolated_runtime (including its "already installed and
+    verified, skip" fast path) and BEFORE model download / smoke inference.
+    Idempotent: probes the target interpreter for declared requirements and
+    installs ONLY what is missing; the shared runtime and PyTorch itself are
+    never reinstalled.
+
+    Raises RuntimeError when the venv cannot be probed or missing dependencies
+    cannot be installed, which must prevent the model from reaching ready state.
+    """
+    descriptor = get_model_descriptor(model_id)
+    if not descriptor:
+        raise ValueError(f"未知的 ModelScope 模型标识: {model_id}")
+
+    required = tuple(descriptor.runtime_dependencies)
+    runner = command_runner or _default_dependency_runner
+    summary: Dict[str, Any] = {
+        "model_id": model_id,
+        "profile": profile,
+        "required": required,
+        "missing_initial": [],
+        "installed": [],
+        "satisfied": True,
+    }
+    if not required:
+        return summary
+
+    rt_manager = get_runtime_manager(data_dir)
+    python_bin = rt_manager.get_python_bin(profile)
+    if not python_bin.is_file():
+        raise RuntimeError(f"运行时 [{profile}] 解释器不存在，无法校验模型专属依赖: {python_bin}")
+
+    def probe() -> Tuple[Optional[List[str]], Optional[str]]:
+        cmd = [
+            str(python_bin),
+            "-c",
+            f'"""{DEPENDENCY_PROBE_MARKER}"""' + "\n" + _DEPENDENCY_PROBE_SCRIPT,
+            json.dumps(list(required)),
+        ]
+        retcode, stdout, stderr = runner(cmd, timeout=120)
+        if retcode != 0:
+            return None, stderr.strip() or stdout.strip() or f"依赖探测退出码 {retcode}"
+        try:
+            parsed = json.loads(stdout.strip().splitlines()[-1])
+            if not parsed.get("ok"):
+                return None, parsed.get("error") or "依赖探测返回失败"
+            return list(parsed.get("missing") or []), None
+        except Exception as exc:
+            return None, f"无法解析依赖探测输出: {exc}"
+
+    emit(f"正在校验模型 [{descriptor.display_name}] 的专属运行依赖 ({len(required)} 项)...")
+    missing, probe_err = probe()
+    if probe_err is not None:
+        raise RuntimeError(f"模型 [{model_id}] 依赖探测失败: {probe_err}")
+    summary["missing_initial"] = list(missing or [])
+
+    if not missing:
+        emit(f"模型 [{model_id}] 专属运行依赖已满足，跳过安装。")
+        return summary
+
+    emit(f"模型 [{model_id}] 缺少专属运行依赖: {', '.join(missing)}，开始增量安装...")
+    uv_bin = _find_uv()
+    venv_dir = rt_manager.venv_dir(profile)
+    install_cmd = _pip_install_command(uv_bin, python_bin, venv_dir, [*missing, "-i", PYPI_MIRROR_URL])
+    env_pip = build_runtime_env(data_dir)
+    retcode, stdout, stderr = runner(install_cmd, env=env_pip, timeout=1800)
+    if retcode != 0:
+        err_msg = stderr.strip() or stdout.strip() or f"依赖安装退出码 {retcode}"
+        raise RuntimeError(f"模型 [{model_id}] 专属依赖安装失败 ({', '.join(missing)}): {err_msg}")
+
+    missing_after, probe_err = probe()
+    if probe_err is not None:
+        raise RuntimeError(f"模型 [{model_id}] 依赖复核失败: {probe_err}")
+    if missing_after:
+        raise RuntimeError(
+            f"模型 [{model_id}] 依赖安装后仍缺失: {', '.join(missing_after)}"
+        )
+
+    summary["installed"] = list(missing)
+    summary["satisfied"] = True
+    emit(f"模型 [{model_id}] 专属运行依赖安装完成: {', '.join(missing)}")
+    return summary
+
+
 def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
     """Creates isolated Python virtual environment for a runtime profile and verifies it."""
     if profile not in (PROFILE_TORCH_CPU, PROFILE_TORCH_CUDA):
@@ -357,13 +597,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
 
     emit(f"正在为 [{profile}] 创建隔离 Python 运行环境: {venv_dir}...")
 
-    # Locate uv tool as required by environment rules
-    uv_bin = shutil.which("uv")
-    if not uv_bin:
-        for p in ("/usr/local/bin/uv", "/opt/homebrew/bin/uv", os.path.expanduser("~/.cargo/bin/uv")):
-            if os.path.isfile(p) and os.access(p, os.X_OK):
-                uv_bin = p
-                break
+    uv_bin = _find_uv()
 
     if not interp.is_file():
         env_init = build_runtime_env(data_dir)
@@ -374,11 +608,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
             subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, env=env_init)
 
     def run_install(*args: str) -> None:
-        if uv_bin:
-            cmd = [uv_bin, "pip", "install", "--python", str(interp), *args]
-        else:
-            pip_bin = str(venv_dir / "bin" / "pip")
-            cmd = [pip_bin, "install", "--disable-pip-version-check", "--no-input", "--upgrade", *args]
+        cmd = _pip_install_command(uv_bin, interp, venv_dir, list(args))
         env_pip = build_runtime_env(data_dir)
         subprocess.run(cmd, check=True, env=env_pip)
 
@@ -388,11 +618,11 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
     if profile == PROFILE_TORCH_CPU:
         emit(f"正在安装 [{profile}] PyTorch CPU 官方轮子...")
         run_install("torch", "--index-url", PYTORCH_CPU_INDEX)
-        run_install("transformers", "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+        run_install(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
     elif profile == PROFILE_TORCH_CUDA:
         emit(f"正在安装 [{profile}] PyTorch CUDA (cu124) 官方轮子...")
         run_install("torch", "--index-url", PYTORCH_CUDA_INDEX)
-        run_install("transformers", "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+        run_install(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
 
     # Run genuine probe verification via isolated interpreter
     emit(f"正在对 [{profile}] 运行环境执行真实子进程 Probe 验证...")
@@ -406,6 +636,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "profile": profile,
         "installed_at": int(time.time()),
         "probe": probe_result,
+        "transformers_requirement": TRANSFORMERS_REQUIREMENT,
     }
     installed_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     emit(f"运行时 [{profile}] 环境部署完成。")
@@ -423,6 +654,9 @@ def download_modelscope_model(data_dir: Path, model_id: str) -> Path:
         ok, _ = verify_model_integrity(target_dir, model_id)
         if ok:
             emit(f"模型 [{model_id}] 已存在且完整，跳过下载。")
+            # Re-sanitize pre-existing weights so upgrades of the app also
+            # neutralize configs downloaded by older versions.
+            sanitize_model_config(target_dir)
             return target_dir
 
         staging_dir = get_staging_dir(data_dir, model_id)
@@ -468,6 +702,8 @@ def download_modelscope_model(data_dir: Path, model_id: str) -> Path:
         if not ok:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise RuntimeError(f"ModelScope 模型完整性校验未通过: {reason}")
+
+        sanitize_model_config(staging_dir)
 
         metadata = {
             "provider": "modelscope",
@@ -523,6 +759,8 @@ def import_local_model(data_dir: Path, model_id: str, source_path: Path) -> Tupl
         if not ok:
             shutil.rmtree(staging_dir, ignore_errors=True)
             return False, f"模型导入格式校验失败: {reason}"
+
+        sanitize_model_config(staging_dir)
 
         descriptor = get_model_descriptor(model_id)
         metadata = {
@@ -584,6 +822,9 @@ def import_local_model(data_dir: Path, model_id: str, source_path: Path) -> Tupl
                 else:
                     write_state(data_dir, "error", f"隔离运行环境准备失败: {rt_exc}", model_id)
                     return False, f"隔离运行环境准备失败: {rt_exc}"
+
+        write_state(data_dir, "installing", f"正在校验模型 [{model_id}] 专属运行依赖...", model_id)
+        ensure_model_runtime_dependencies(data_dir, model_id, profile)
 
         write_state(data_dir, "testing", "正在执行端到端合成冒烟推理验证...", model_id)
         client = get_worker_client(data_dir)
@@ -691,6 +932,11 @@ def main() -> int:
                         target_device = "cpu"
                         write_state(data_dir, "installing", f"正在准备 [{PROFILE_TORCH_CPU}] 隔离运行环境...", model_id)
                         install_isolated_runtime(data_dir, PROFILE_TORCH_CPU)
+
+                # Model-specific runtime dependency contract: resolve extras
+                # even when the shared runtime above was skipped as ready.
+                write_state(data_dir, "installing", f"正在校验模型 [{model_id}] 专属运行依赖...", model_id)
+                ensure_model_runtime_dependencies(data_dir, model_id, target_profile)
 
                 target_dir = get_model_dir(data_dir, model_id)
                 weights_ok, _ = verify_model_integrity(target_dir, model_id)
