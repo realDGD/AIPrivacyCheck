@@ -251,7 +251,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.6.2",
+                    "version": "0.6.3",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },

@@ -2,10 +2,17 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.2`（fnOS Native 原生应用）
+当前版本：`0.6.3`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **MemPrivacy 语义隐私推理加固与显存/超时治理 (v0.6.3)**：
+  - **Exclusive CUDA 独占显存调度**：在显存受限的 GPU 设备（如 Tesla P4 8GB）上运行 MemPrivacy 推理前，自动驱逐并终止其他处于常驻状态的 CUDA worker（如 GLiNER），推理完成后即刻通过 `finally` 释放 MemPrivacy 进程及其占用的全部 GPU 显存，彻底根治顺序推理累积导致的 CUDA OOM。
+  - **CUDA OOM 优雅降级与自愈释放**：捕获 Worker 进程报告的致命 CUDA OOM（`OutOfMemoryError` / `CUDA error: out of memory`），立即物理终止 worker 释放显存并将状态置为 FAILED，同时以温和 warning 降级提醒用户（“MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响”），绝不阻断基础规则或普通模型的检测结果。
+  - **设备感知自适应超时**：将推理超时与计算设备解耦，针对 CPU 模式推理耗时特点将 MemPrivacy 超时由 180 秒放宽至 360 秒（启动超时 150 秒），CUDA 模式保持 180 秒超时（启动超时 120 秒），根除 CPU 环境慢速推理被 180 秒硬超时中断的缺陷。
+  - **有界生成 Token 预算控制**：根据文本长度动态分配有界生成预算（短文本 256 tokens、中长文本 384 tokens、长文本 512 tokens，严格上限 <=512 tokens），彻底消除 2048 tokens 默认过度分配带来的 KV 缓存膨胀与推理超时风险。
+  - **长文本平滑重叠分块与全局坐标映射**：对超过 3500 字符的长文本自动采用 3000 字符分块与 200 字符平滑重叠切分，并优先在自然语句边界切分；分块抽取结果通过全局坐标准确回贴并进行跨块实体去重，杜绝长文本内存耗尽与跨块坐标错位。
+  - **模型目录规范与 CPU 慢速模式温和提示**：明确标注 MemPrivacy 1.7B 在 GPU（>=6GB）与 CPU 下的运行特性，4B 模型明确标注需要最低 >=12GB（推荐 16GB+）显存并警示 <=8GB 显卡上的极高 OOM 风险；在 Web 前端为处于 CPU 模式下的语义隐私槽位提供温和 inline 提示，禁止弹窗阻断。
 - **GLiNER 中文误报抑制与前端交互布局加固 (v0.6.2)**：
   - **降低 GLiNER 中文 USERNAME 误报**：增加严格的用户名形态学与上下文环境过滤（`_is_plausible_username`），针对中文自然语言叙述默认拒绝提取为 USERNAME，杜绝整句自然语言与标点被错误遮盖；仅允许标准 ASCII token 或具有显式账号上下文的合规 span（reduce GLiNER username false positives in Chinese narrative text）。
   - **修复 marker 右键菜单生命周期**：在脱敏预览 `mouseup` 事件中严格限定仅左键生效（`event.button === 0`），彻底修复安全副本 marker 右键点击弹出菜单后、松开按键菜单立即误关闭的交互缺陷（fix marker context-menu lifecycle）。
