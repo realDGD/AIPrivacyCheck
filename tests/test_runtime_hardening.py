@@ -2127,6 +2127,95 @@ class MemPrivacyRuntimeHardeningV063Tests(unittest.TestCase):
         self.assertEqual(client.get_timeout_for_model("gliner-pii-edge", device="cuda"), (30, 45))
         self.assertEqual(client.get_timeout_for_model("gliner-pii-edge", device="cpu"), (30, 45))
 
+    def test_choose_memprivacy_generation_budget(self):
+        """Generation budget scales safely with text length and is strictly bounded <= 512."""
+        from privacy.detectors import choose_memprivacy_generation_budget
+
+        self.assertEqual(choose_memprivacy_generation_budget("short text"), 256)
+        self.assertEqual(choose_memprivacy_generation_budget("a" * 1000), 256)
+        self.assertEqual(choose_memprivacy_generation_budget("a" * 1001), 384)
+        self.assertEqual(choose_memprivacy_generation_budget("a" * 4000), 384)
+        self.assertEqual(choose_memprivacy_generation_budget("a" * 4001), 512)
+        self.assertEqual(choose_memprivacy_generation_budget("a" * 20000), 512)
+        self.assertLessEqual(choose_memprivacy_generation_budget("a" * 50000), 512)
+
+    def test_chunk_memprivacy_text_and_offset_reconciliation(self):
+        """Texts <= 3500 chars stay single-chunk; long texts chunk with exact text mapping and deduplication."""
+        from privacy.detectors import chunk_memprivacy_text, MemPrivacyDetector
+
+        # Case 1: Short text <= 3500 chars
+        text_short = "Hello world! This is a test."
+        chunks_short = chunk_memprivacy_text(text_short)
+        self.assertEqual(len(chunks_short), 1)
+        self.assertEqual(chunks_short[0], (0, len(text_short), text_short))
+
+        # Case 2: Long text > 3500 chars
+        paragraph = "测试句子。" * 200  # 1000 chars per 200 repetitions
+        text_long = (paragraph + "\n") * 5  # > 5000 chars
+        chunks = chunk_memprivacy_text(text_long, max_chunk_chars=3000, overlap_chars=200)
+        self.assertGreater(len(chunks), 1)
+
+        # Every chunk text must strictly match text[start:end]
+        for c_start, c_end, c_text in chunks:
+            self.assertEqual(text_long[c_start:c_end], c_text)
+            self.assertLessEqual(len(c_text), 3000)
+
+        # Adjacent chunks must overlap
+        for i in range(len(chunks) - 1):
+            curr_end = chunks[i][1]
+            next_start = chunks[i + 1][0]
+            self.assertLess(next_start, curr_end, "Adjacent chunks must overlap")
+
+        # Case 3: End-to-end offset reconciliation and deduplication across chunks
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            self._create_mock_memprivacy_model(data_dir)
+            det = MemPrivacyDetector(data_dir=data_dir, active_model_id="memprivacy-1.7b-rl")
+
+            sentence_a = "患者张晓华（身份证号 110101199003072345）于今日入院。"
+            padding = "日常巡检记录正常。" * 300  # ~2700 chars
+            sentence_b = "主治医生联系电话为 13800138000。"
+            doc = sentence_a + "\n" + padding + "\n" + sentence_b
+
+            with patch("privacy.detectors.DEVICE_MANAGER.resolve_for_model") as mock_resolve, \
+                 patch("privacy.detectors.get_worker_client") as mock_gwc:
+                mock_resolve.return_value = {
+                    "ready": True,
+                    "actual_device": "cpu",
+                    "runtime_profile": "torch-cpu",
+                }
+                mock_client = MagicMock()
+                mock_worker = MagicMock()
+
+                def mock_query(payload, timeout=None):
+                    c_text = payload.get("text", "")
+                    entities = []
+                    if "张晓华" in c_text:
+                        entities.append({"original_text": "张晓华", "privacy_type": "name", "privacy_level": "PL2"})
+                    if "110101199003072345" in c_text:
+                        entities.append({"original_text": "110101199003072345", "privacy_type": "id card", "privacy_level": "PL3"})
+                    if "13800138000" in c_text:
+                        entities.append({"original_text": "13800138000", "privacy_type": "phone", "privacy_level": "PL2"})
+                    return {"ok": True, "entities": entities}
+
+                mock_worker.query.side_effect = mock_query
+                mock_client.get_worker.return_value = mock_worker
+                mock_client.get_timeout_for_model.return_value = (150, 360)
+                mock_gwc.return_value = mock_client
+
+                found_entities, warns = det.detect(doc)
+                found_texts = [e.text for e in found_entities]
+                self.assertIn("张晓华", found_texts)
+                self.assertIn("110101199003072345", found_texts)
+                self.assertIn("13800138000", found_texts)
+
+                # Every entity offset must match document text exactly
+                for ent in found_entities:
+                    self.assertEqual(doc[ent.start:ent.end], ent.text)
+
+                # No duplicates
+                self.assertEqual(len(found_entities), len(set((e.start, e.end, e.text) for e in found_entities)))
+
     def test_memprivacy_oom_fallback_and_warnings(self):
         """When CUDA OOM occurs during inference, worker terminates, resources are freed, and friendly warning is emitted."""
         from privacy.detectors import MemPrivacyDetector

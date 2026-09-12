@@ -493,6 +493,70 @@ def parse_memprivacy_json(
     return results
 
 
+def choose_memprivacy_generation_budget(text: str) -> int:
+    """Computes a bounded max_new_tokens generation budget for MemPrivacy based on text length.
+    Short text (<= 1000 chars): 256 tokens.
+    Medium text (1001 ~ 4000 chars): 384 tokens.
+    Long text (> 4000 chars): 512 tokens.
+    Hard upper bound: <= 512 tokens (avoids KV cache explosion and timeout).
+    """
+    length = len(text)
+    if length <= 1000:
+        budget = 256
+    elif length <= 4000:
+        budget = 384
+    else:
+        budget = 512
+    return min(budget, 512)
+
+
+def chunk_memprivacy_text(
+    text: str,
+    max_chunk_chars: int = 3000,
+    overlap_chars: int = 200,
+) -> List[Tuple[int, int, str]]:
+    """Splits long text into bounded overlapping chunks for semantic inference.
+    Returns a list of (start_offset, end_offset, chunk_text).
+    Texts <= 3500 chars are returned as a single chunk to preserve global context.
+    """
+    if not text:
+        return []
+    n = len(text)
+    if n <= 3500:
+        return [(0, n, text)]
+
+    chunks: List[Tuple[int, int, str]] = []
+    start = 0
+    delimiters = ("\n\n", "\n", "。", "！", "？", ".", "!", "?", "；", ";")
+
+    while start < n:
+        ideal_end = min(n, start + max_chunk_chars)
+        if ideal_end >= n:
+            chunks.append((start, n, text[start:n]))
+            break
+
+        search_start = max(start + 100, ideal_end - overlap_chars)
+        split_pos = -1
+        for delim in delimiters:
+            pos = text.rfind(delim, search_start, ideal_end)
+            if pos != -1:
+                split_pos = pos + len(delim)
+                break
+
+        if split_pos == -1 or split_pos <= start:
+            chunk_end = ideal_end
+        else:
+            chunk_end = split_pos
+
+        chunks.append((start, chunk_end, text[start:chunk_end]))
+        next_start = max(start + 1, chunk_end - overlap_chars)
+        if next_start >= n or next_start <= start:
+            break
+        start = next_start
+
+    return chunks
+
+
 class MemPrivacyDetector(Detector):
     """Tier 4: Deep semantic privacy inference model (ModelScope: MemTensor/MemPrivacy)."""
 
@@ -590,62 +654,89 @@ class MemPrivacyDetector(Detector):
             worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
             _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=dev)
 
-            try:
-                res = worker.query({
-                    "action": "detect",
-                    "model_path": str(model_dir),
-                    "text": text,
-                    "real_name": "unknown",
-                    "max_new_tokens": 2048,
-                }, timeout=infer_timeout)
-            except Exception as query_exc:
-                err_str = str(query_exc)
-                if "cuda out of memory" in err_str.lower() or "out of memory" in err_str.lower():
+            chunks = chunk_memprivacy_text(text)
+            seen_keys = set()
+
+            for chunk_start, chunk_end, chunk_text in chunks:
+                chunk_budget = choose_memprivacy_generation_budget(chunk_text)
+                try:
+                    res = worker.query({
+                        "action": "detect",
+                        "model_path": str(model_dir),
+                        "text": chunk_text,
+                        "real_name": "unknown",
+                        "max_new_tokens": chunk_budget,
+                    }, timeout=infer_timeout)
+                except Exception as query_exc:
+                    err_str = str(query_exc)
+                    if "cuda out of memory" in err_str.lower() or "out of memory" in err_str.lower():
+                        warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
+                        try:
+                            worker_client.stop_worker_for_model(self.active_model_id)
+                        except Exception:
+                            pass
+                        break
+                    else:
+                        warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {query_exc}")
+                        break
+
+                if is_cuda_oom_response(res):
                     warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
                     try:
                         worker_client.stop_worker_for_model(self.active_model_id)
                     except Exception:
                         pass
-                    return entities, warnings
-                else:
-                    warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {query_exc}")
-                    return entities, warnings
+                    break
 
-            if is_cuda_oom_response(res):
-                warnings.append("MemPrivacy 可用显存不足，已终止语义模型并释放显存，其他检测结果不受影响。")
-                try:
-                    worker_client.stop_worker_for_model(self.active_model_id)
-                except Exception:
-                    pass
-                return entities, warnings
+                if not res.get("ok"):
+                    err_msg = res.get("error") or "Worker returned ok=False"
+                    warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {err_msg}")
+                    break
 
-            if not res.get("ok"):
-                err_msg = res.get("error") or "Worker returned ok=False"
-                warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {err_msg}")
-                return entities, warnings
+                if res.get("truncated"):
+                    warnings.append("MemPrivacy 达到最大生成长度上限，长文本可能存在截断。")
 
-            if res.get("truncated"):
-                warnings.append("MemPrivacy 达到最大生成长度上限，长文本可能存在截断。")
+                extracted_items = []
+                for item in res.get("entities", []):
+                    snippet = item.get("original_text", "").strip()
+                    if not snippet or snippet not in chunk_text:
+                        continue
+                    raw_type = item.get("privacy_type", "PII")
+                    mapped_type, sem_type = MEMPRIVACY_TYPE_MAP.get(
+                        str(raw_type).lower(),
+                        (str(raw_type).upper().replace(" ", "_"), str(raw_type))
+                    )
+                    pl_val = item.get("privacy_level") or resolve_privacy_level(mapped_type, semantic_type=sem_type)
+                    ctx = item.get("context")
+                    extracted_items.append((mapped_type, snippet, 0.95, sem_type, pl_val, ctx))
 
-            extracted_items = []
-            for item in res.get("entities", []):
-                snippet = item.get("original_text", "").strip()
-                if not snippet or snippet not in text:
-                    continue
-                raw_type = item.get("privacy_type", "PII")
-                mapped_type, sem_type = MEMPRIVACY_TYPE_MAP.get(
-                    str(raw_type).lower(),
-                    (str(raw_type).upper().replace(" ", "_"), str(raw_type))
+                chunk_resolved, chunk_warns = resolve_semantic_spans(
+                    chunk_text, extracted_items, f"{self.name}:{self.active_model_id}"
                 )
-                pl_val = item.get("privacy_level") or resolve_privacy_level(mapped_type, semantic_type=sem_type)
-                ctx = item.get("context")
-                extracted_items.append((mapped_type, snippet, 0.95, sem_type, pl_val, ctx))
+                warnings.extend(chunk_warns)
 
-            resolved, resolve_warns = resolve_semantic_spans(
-                text, extracted_items, f"{self.name}:{self.active_model_id}"
-            )
-            entities.extend(resolved)
-            warnings.extend(resolve_warns)
+                for cent in chunk_resolved:
+                    g_start = chunk_start + cent.start
+                    g_end = chunk_start + cent.end
+                    if g_start < 0 or g_end > len(text) or text[g_start:g_end] != cent.text:
+                        continue
+                    dedup_key = (cent.entity_type, g_start, g_end, cent.text)
+                    if dedup_key in seen_keys:
+                        continue
+                    seen_keys.add(dedup_key)
+                    entities.append(
+                        Entity(
+                            entity_type=cent.entity_type,
+                            start=g_start,
+                            end=g_end,
+                            text=cent.text,
+                            confidence=cent.confidence,
+                            sources=cent.sources,
+                            validated=cent.validated,
+                            privacy_level=cent.privacy_level,
+                            semantic_type=cent.semantic_type,
+                        )
+                    )
         except Exception as exc:
             warnings.append(f"MemPrivacy 语义推理异常，已安全回退: {exc}")
         finally:

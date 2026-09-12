@@ -1507,6 +1507,23 @@ function updateModelUI(data) {
 
       controls.append(actions);
       item.append(header, desc, controls);
+
+      if (slotId === "semantic_privacy") {
+        const isCpuMode = dev.actual_device === "cpu" || (dev.requested_device || "").toLowerCase() === "cpu";
+        if (isCpuMode) {
+          const cpuNotice = document.createElement("div");
+          cpuNotice.className = "slot-item-notice";
+          cpuNotice.style.fontSize = "11px";
+          cpuNotice.style.color = "var(--muted, #64748b)";
+          cpuNotice.style.background = "rgba(0, 0, 0, 0.03)";
+          cpuNotice.style.padding = "6px 10px";
+          cpuNotice.style.borderRadius = "6px";
+          cpuNotice.style.lineHeight = "1.4";
+          cpuNotice.textContent = "提示：当前处于 CPU 模式，语义模型推理耗时较长（已放宽至 360 秒超时）。如有配备 NVIDIA GPU，推荐在设备设置中选择 CUDA 加速。";
+          item.append(cpuNotice);
+        }
+      }
+
       elements.slotListContainer.append(item);
     });
   }

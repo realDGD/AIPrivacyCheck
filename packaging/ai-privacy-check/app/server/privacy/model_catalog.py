@@ -140,7 +140,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         supports_cpu=True,
         supports_cuda=True,
         recommended=True,
-        description="基于强化学习对齐的语义级隐私理解模型，专精于医疗、财务、行踪、社会关系等长难句深层隐私提取与分级。",
+        description="基于强化学习对齐的语义级隐私理解模型，专精于医疗、财务、行踪、社会关系等长难句深层隐私提取与分级。支持 CUDA（建议显存 >=6GB）或 CPU 模式（CPU 推理耗时较长，已放宽至 360 秒超时）。",
     ),
     "memprivacy-4b-rl": ModelDescriptor(
         id="memprivacy-4b-rl",
@@ -156,7 +156,7 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         supports_cpu=False,
         supports_cuda=True,
         recommended=False,
-        description="高参数量语义隐私理解大模型，需要具备充足专用显存（>=8GB）的 NVIDIA CUDA GPU 环境运行。",
+        description="高参数量语义隐私理解大模型，需要具备充足专用显存（最低 >=12GB，推荐 16GB+）的 NVIDIA CUDA GPU 环境运行。在 <=8GB 显卡（如 Tesla P4）上存在极高 CUDA OOM 风险，不推荐在 <=8GB 设备运行。",
     ),
 }
 
