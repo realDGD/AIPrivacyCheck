@@ -175,6 +175,14 @@ def list_all_models() -> List[ModelDescriptor]:
 
 def check_model_integrity(model_id: str, model_dir: Path) -> Tuple[bool, Optional[str]]:
     """Strictly validates model directory contents according to model architecture contract."""
+    if not isinstance(model_id, str):
+        return False, f"model_id 类型无效: {type(model_id).__name__}"
+    if not isinstance(model_dir, Path):
+        try:
+            model_dir = Path(model_dir)
+        except Exception:
+            return False, f"model_dir 类型无效: {type(model_dir).__name__}"
+
     if not model_dir.is_dir():
         return False, f"模型目录不存在: {model_dir}"
 

@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlsplit
 
 from privacy import PrivacyService
 from privacy.device import DEVICE_MANAGER
-from privacy.model_catalog import list_all_models
+from privacy.model_catalog import get_model_descriptor, list_all_models
 from privacy.worker_client import get_worker_client
 import model_installer
 
@@ -151,7 +151,7 @@ INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.5.2"
+    server_version = "AIPrivacyCheck/0.5.3"
 
     def log_message(self, fmt: str, *args) -> None:
         safe_path = urlsplit(self.path).path
@@ -232,7 +232,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.5.2",
+                    "version": "0.5.3",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },
@@ -288,7 +288,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
             except Exception:
                 payload = {}
-            model_name = str(payload.get("model", "gliner-pii-edge"))
+            model_name = str(payload.get("model", "gliner-pii-edge")).strip()
+            if not get_model_descriptor(model_name):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": f"未知模型标识: {model_name}"})
+                return
             started = INSTALLER.start_install(model_name)
             status = HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT
             self._json(status, {"started": started, "status": INSTALLER.status()})
@@ -300,7 +303,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             try:
                 payload = self._read_json()
-                model_name = str(payload.get("model", "gliner-pii-edge"))
+                model_name = str(payload.get("model", "gliner-pii-edge")).strip()
+                if not get_model_descriptor(model_name):
+                    raise ValueError(f"未知模型标识: {model_name}")
                 source_path = str(payload.get("source_path", "")).strip()
                 if not source_path:
                     raise ValueError("必须指定模型导入路径 source_path")
@@ -322,6 +327,8 @@ class AppHandler(BaseHTTPRequestHandler):
             try:
                 payload = self._read_json()
                 model_name = str(payload.get("model", "")).strip()
+                if not get_model_descriptor(model_name):
+                    raise ValueError(f"未知模型标识: {model_name}")
                 source_path = str(payload.get("source_path", "")).strip()
                 if not model_name or not source_path:
                     raise ValueError("必须指定 model 和 source_path")
@@ -342,11 +349,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             try:
                 payload = self._read_json()
-                model_name = str(payload.get("model", "gliner-pii-edge"))
+                model_name = str(payload.get("model", "gliner-pii-edge")).strip()
+                if not get_model_descriptor(model_name):
+                    raise ValueError(f"未知模型标识: {model_name}")
                 ok, message = INSTALLER.uninstall_model(model_name)
                 self._json(HTTPStatus.OK, {"ok": ok, "message": message, "status": INSTALLER.status()})
             except RuntimeError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"卸载失败: {exc}"})
             return
@@ -381,6 +392,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 slot = str(payload.get("slot", "")).strip()
                 model_id = str(payload.get("model", "")).strip()
+                if not get_model_descriptor(model_id):
+                    raise ValueError(f"未知模型标识: {model_id}")
                 ok = PRIVACY.registry.set_active_model(slot, model_id)
                 if not ok:
                     raise ValueError(f"无法将模型 {model_id} 分配给槽位 {slot}")

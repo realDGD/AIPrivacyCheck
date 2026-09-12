@@ -721,7 +721,7 @@ class StabilizationHardeningTests(unittest.TestCase):
         import model_installer
         with tempfile.TemporaryDirectory() as td:
             data_dir = Path(td)
-            model_id = "test-model-lock"
+            model_id = "gliner-pii-edge"
 
             with model_installer.model_operation_lock(data_dir, model_id):
                 second_result = []
@@ -747,8 +747,8 @@ class StabilizationHardeningTests(unittest.TestCase):
             data_dir = Path(td)
             acquired_both = []
 
-            with model_installer.model_operation_lock(data_dir, "model-a"):
-                with model_installer.model_operation_lock(data_dir, "model-b"):
+            with model_installer.model_operation_lock(data_dir, "gliner-pii-edge"):
+                with model_installer.model_operation_lock(data_dir, "siamese-uie"):
                     acquired_both.append(True)
 
             self.assertTrue(acquired_both[0])
@@ -758,7 +758,7 @@ class StabilizationHardeningTests(unittest.TestCase):
         import model_installer
         with tempfile.TemporaryDirectory() as td:
             data_dir = Path(td)
-            model_id = "failing-model"
+            model_id = "gliner-pii-edge"
 
             try:
                 with model_installer.model_operation_lock(data_dir, model_id):
@@ -792,6 +792,119 @@ class StabilizationHardeningTests(unittest.TestCase):
         self.assertIn("CC BY-NC-ND 4.0", content)
         self.assertIn("Apache-2.0", content)
         self.assertIn("AIPrivacyCheck", content)
+
+
+class ModelInstallationHotfixV053Tests(unittest.TestCase):
+    """Regression and security tests for v0.5.3 hotfix."""
+
+    def test_verify_model_integrity_argument_order(self):
+        """P0: Ensure verify_model_integrity passes (model_id, model_dir) to check_model_integrity without 'str' has no attribute 'is_dir'."""
+        import model_installer
+        from privacy.model_catalog import check_model_integrity
+
+        with tempfile.TemporaryDirectory() as td:
+            model_dir = Path(td) / "models" / "gliner-pii-edge"
+            model_dir.mkdir(parents=True)
+            (model_dir / "config.json").write_text("{}")
+            (model_dir / "pytorch_model.bin").write_text("weights")
+            (model_dir / "tokenizer.json").write_text("{}")
+
+            with patch("model_installer.check_model_integrity", wraps=check_model_integrity) as mock_check:
+                ok, err = model_installer.verify_model_integrity(model_dir, "gliner-pii-edge")
+                self.assertTrue(ok)
+                self.assertIsNone(err)
+                mock_check.assert_called_once_with("gliner-pii-edge", model_dir)
+
+    def test_unknown_model_id_rejected(self):
+        """P1: Ensure unknown model IDs and path traversal patterns are rejected by validator and path resolvers."""
+        import model_installer
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            bad_ids = ["../runtimes", "../../etc", "unknown-model", "", " ", "   ", "model/sub", "eval(1)"]
+            for bad_id in bad_ids:
+                with self.assertRaises(ValueError, msg=f"Should reject bad model_id: {bad_id}"):
+                    model_installer.validate_model_id(bad_id)
+
+                with self.assertRaises(ValueError, msg=f"get_model_dir should reject bad model_id: {bad_id}"):
+                    model_installer.get_model_dir(data_dir, bad_id)
+
+                with self.assertRaises(ValueError, msg=f"get_staging_dir should reject bad model_id: {bad_id}"):
+                    model_installer.get_staging_dir(data_dir, bad_id)
+
+                with self.assertRaises(ValueError, msg=f"model_operation_lock should reject bad model_id: {bad_id}"):
+                    with model_installer.model_operation_lock(data_dir, bad_id):
+                        pass
+
+    def test_uninstall_traversal_rejected(self):
+        """P1: Attempting to uninstall with a traversal path must be rejected and must not delete directories."""
+        import model_installer
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            runtimes_dir = data_dir / "runtimes"
+            runtimes_dir.mkdir(parents=True)
+            marker_file = runtimes_dir / "marker.txt"
+            marker_file.write_text("keep_alive")
+
+            with self.assertRaises(ValueError):
+                model_installer.uninstall_model(data_dir, "../runtimes")
+
+            self.assertTrue(marker_file.exists(), "Marker file in runtimes directory must remain intact")
+
+    def test_import_traversal_rejected(self):
+        """P1: Attempting to import into a traversal target must be rejected before staging."""
+        import model_installer
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            src_dir = Path(td) / "source"
+            src_dir.mkdir(parents=True)
+            (src_dir / "config.json").write_text("{}")
+            (src_dir / "pytorch_model.bin").write_text("weights")
+            (src_dir / "tokenizer.json").write_text("{}")
+
+            with self.assertRaises(ValueError):
+                model_installer.import_local_model(data_dir, "../runtimes", src_dir)
+
+    def test_installer_chain_dry_run(self):
+        """End-to-end verification of model installation flow with mocked runtime and downloader."""
+        import model_installer
+        from privacy.device import DEVICE_MANAGER
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            model_id = "gliner-pii-edge"
+
+            # Prepare simulated model files
+            fake_download_dir = data_dir / "models" / model_id
+            fake_download_dir.mkdir(parents=True)
+            (fake_download_dir / "config.json").write_text("{}")
+            (fake_download_dir / "pytorch_model.bin").write_text("weights")
+            (fake_download_dir / "tokenizer.json").write_text("{}")
+
+            DEVICE_MANAGER.set_data_dir(data_dir)
+            DEVICE_MANAGER.set_requested_device("cpu")
+
+            with patch("model_installer.install_isolated_runtime") as mock_rt, \
+                 patch("model_installer.download_modelscope_model", return_value=fake_download_dir), \
+                 patch("model_installer.get_worker_client") as mock_wc, \
+                 patch.dict(os.environ, {"APP_DATA_DIR": str(data_dir)}, clear=False), \
+                 patch("sys.argv", ["model_installer.py", "install", model_id]):
+
+                mock_rt.return_value = data_dir / "runtimes" / "torch-cpu" / "venv"
+                mock_client = MagicMock()
+                mock_client.run_smoke_test.return_value = (True, None)
+                mock_wc.return_value = mock_client
+
+                exit_code = model_installer.main()
+                self.assertEqual(exit_code, 0)
+
+                status_file = data_dir / "status" / f"{model_id}-install.json"
+                self.assertTrue(status_file.exists())
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                self.assertEqual(status["state"], "ready")
+                self.assertIn("模型已就绪", status["detail"])
 
 
 class IntegrationSmokeTests(unittest.TestCase):

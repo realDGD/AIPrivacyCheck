@@ -2,7 +2,7 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.5.2`（fnOS Native 原生应用）
+当前版本：`0.5.3`（fnOS Native 原生应用）
 
 ## 已实现功能
 
@@ -85,7 +85,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.5.2_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.5.3_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 
@@ -108,6 +108,10 @@ uv run python scripts/benchmark.py
 2. **在线安装模型**：点击“从魔搭下载安装”，系统将从 ModelScope (魔搭社区) 获取指定版本的模型权重（GLiNER、MemPrivacy、SiameseUIE）。
 3. **本地手动导入**：若 NAS 无法直接连通外网，可将下载好的模型目录存放于 NAS 共享文件夹中，在页面填入绝对路径（如 `/vol1/1000/models/gliner-pii-edge`），系统将执行完整性校验并原子替换生效。
 4. **模型卸载与重载**：随时一键卸载模型，释放磁盘与显存。
+
+## 已知限制与后续规划
+
+- **MemPrivacy 早期版本资产兼容性 (TODO)**：v0.5.1 及更早版本在 `${TRIM_PKGVAR}/data/models/memprivacy-*` 中保留的历史 prompt 模板在 v0.5.2+ 升级后不会被自动覆写。若历史安装环境出现提示词版本不一致，建议在“模型与硬件”面板点击“重新安装”或“导入”以刷新生效。后续版本将增加内置资产的自动平滑迁移。
 
 ## 隐私与安全承诺
 

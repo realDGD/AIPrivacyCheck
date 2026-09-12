@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,24 @@ from privacy.worker_client import get_worker_client
 
 _LOCK_STATE = threading.local()
 
+MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+def validate_model_id(model_id: str):
+    """Validates model_id format and ensures it exists in the official ModelScope catalog.
+
+    Defense-in-depth against directory traversal (e.g. '../runtimes').
+    """
+    if not isinstance(model_id, str):
+        raise ValueError(f"model_id 类型无效: {type(model_id).__name__}")
+    clean_id = model_id.strip()
+    if not clean_id or not MODEL_ID_RE.match(clean_id):
+        raise ValueError(f"模型标识格式非法: {model_id}")
+    descriptor = get_model_descriptor(clean_id)
+    if descriptor is None:
+        raise ValueError(f"未知模型标识: {model_id}")
+    return descriptor
+
 
 @contextmanager
 def model_operation_lock(data_dir: Path, model_id: str, non_blocking: bool = True):
@@ -50,9 +69,12 @@ def model_operation_lock(data_dir: Path, model_id: str, non_blocking: bool = Tru
     Uses fcntl.flock on ${DATA_DIR}/locks/{model_id}.lock.
     Re-entrant within the same thread.
     """
-    locks_dir = Path(data_dir) / "locks"
+    validate_model_id(model_id)
+    locks_dir = (Path(data_dir) / "locks").resolve()
     locks_dir.mkdir(parents=True, exist_ok=True)
     lock_file = (locks_dir / f"{model_id}.lock").resolve()
+    if lock_file.parent != locks_dir:
+        raise ValueError(f"非法锁文件路径越界: {model_id}")
 
     if not hasattr(_LOCK_STATE, "acquired"):
         _LOCK_STATE.acquired = {}
@@ -105,11 +127,21 @@ def emit(message: str) -> None:
 
 
 def get_model_dir(data_dir: Path, model_id: str) -> Path:
-    return data_dir / "models" / model_id
+    validate_model_id(model_id)
+    base = (data_dir / "models").resolve()
+    target = (data_dir / "models" / model_id).resolve()
+    if target != base and base not in target.parents:
+        raise ValueError(f"非法模型路径越界: {model_id}")
+    return target
 
 
 def get_staging_dir(data_dir: Path, model_id: str) -> Path:
-    return data_dir / "models" / ".staging" / model_id
+    validate_model_id(model_id)
+    base = (data_dir / "models" / ".staging").resolve()
+    target = (data_dir / "models" / ".staging" / model_id).resolve()
+    if target != base and base not in target.parents:
+        raise ValueError(f"非法暂存路径越界: {model_id}")
+    return target
 
 
 def write_state(data_dir: Path, state: str, detail: str, model_id: str) -> None:
@@ -300,7 +332,7 @@ def scan_shared_models_directory(data_dir: Path) -> List[Dict[str, Any]]:
 
 def verify_model_integrity(model_dir: Path, model_id: str) -> Tuple[bool, str]:
     """Verify integrity of model weights and configs based on catalog descriptor."""
-    return check_model_integrity(model_dir, model_id)
+    return check_model_integrity(model_id, model_dir)
 
 
 def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
