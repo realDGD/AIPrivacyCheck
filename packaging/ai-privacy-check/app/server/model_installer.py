@@ -410,35 +410,17 @@ def verify_model_integrity(model_dir: Path, model_id: str) -> Tuple[bool, str]:
 def sanitize_model_config(model_dir: Path) -> Tuple[bool, str]:
     """Strips remote-code triggers from a model's ModelScope configuration.json.
 
-    ModelScope configs may declare `allow_remote` / `plugins`, which make newer
-    ModelScope runtimes pip-install requirements.txt pins and import arbitrary
-    .py files from the model directory. AIPrivacyCheck loads catalog models
-    exclusively through built-in pipeline/model classes and refuses remote-code
-    execution (and the uncontrolled dependency downgrades that come with it),
-    so those two fields are removed in-place during install/import before the
-    model is activated. The operation is idempotent.
+    Thin wrapper over privacy.model_security.gate_model_security, the single
+    source of truth shared with the pre-load security gate (which also covers
+    models installed by v0.6.3 and earlier). Idempotent.
     """
-    config_path = model_dir / "configuration.json"
-    if not config_path.is_file():
-        return False, "no configuration.json"
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return False, f"configuration.json 解析失败: {exc}"
-    if not isinstance(config, dict):
-        return False, "configuration.json 不是对象"
+    from privacy.model_security import gate_model_security
 
-    removed = [key for key in ("allow_remote", "plugins") if key in config]
-    if not removed:
-        return False, "already clean"
-    for key in removed:
-        config.pop(key, None)
-
-    temporary = config_path.with_suffix(".json.sanitize.tmp")
-    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, config_path)
-    emit(f"已从模型配置中移除远程代码声明 ({', '.join(removed)}): {config_path}")
-    return True, f"removed {', '.join(removed)}"
+    result = gate_model_security(model_dir)
+    if result["status"] == "sanitized":
+        emit(f"已从模型配置中移除远程代码声明: {model_dir / 'configuration.json'}")
+        return True, result["detail"]
+    return False, result["detail"]
 
 
 def _find_uv() -> Optional[str]:
@@ -485,6 +467,110 @@ def _default_dependency_runner(
         return 1, "", str(exc)
 
 
+# Base runtime compatibility contract: checked EVEN when the profile probe
+# reports verified, because historical runtimes (pre-0.6.4) may carry
+# incompatible packages (e.g. transformers 5.16.1) that the torch-only probe
+# cannot see. Repairs only the violating packages; never reinstalls torch,
+# never rebuilds the venv.
+BASE_RUNTIME_REQUIREMENTS: Tuple[str, ...] = (
+    "modelscope",
+    "numpy",
+    "packaging",
+    "tqdm",
+    "torch",
+    TRANSFORMERS_REQUIREMENT,
+    "accelerate",
+    "gliner",
+)
+
+
+def _probe_dependency_specs(
+    python_bin: Path,
+    specs: Tuple[str, ...],
+    runner: Callable[..., Tuple[int, str, str]],
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Probes the isolated interpreter for requirement satisfaction.
+
+    Returns (missing_specs, error). missing_specs is None on probe failure.
+    """
+    cmd = [
+        str(python_bin),
+        "-c",
+        f'"""{DEPENDENCY_PROBE_MARKER}"""' + "\n" + _DEPENDENCY_PROBE_SCRIPT,
+        json.dumps(list(specs)),
+    ]
+    retcode, stdout, stderr = runner(cmd, timeout=120)
+    if retcode != 0:
+        return None, stderr.strip() or stdout.strip() or f"依赖探测退出码 {retcode}"
+    try:
+        parsed = json.loads(stdout.strip().splitlines()[-1])
+        if not parsed.get("ok"):
+            return None, parsed.get("error") or "依赖探测返回失败"
+        return list(parsed.get("missing") or []), None
+    except Exception as exc:
+        return None, f"无法解析依赖探测输出: {exc}"
+
+
+def ensure_base_runtime_contract(
+    data_dir: Path,
+    profile: str,
+    command_runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+) -> Dict[str, Any]:
+    """Lightweight compatibility check for an ALREADY-VERIFIED runtime profile.
+
+    Migrates historical runtimes (e.g. transformers 5.16.1 installed before
+    the pin existed) to the base contract by installing only the violating
+    packages. Torch itself is never reinstalled here: a missing torch means
+    a broken venv that only the full install path may rebuild.
+    """
+    rt_manager = get_runtime_manager(data_dir)
+    python_bin = rt_manager.get_python_bin(profile)
+    if not python_bin.is_file():
+        raise RuntimeError(f"运行时 [{profile}] 解释器不存在，无法校验 Base Runtime Contract: {python_bin}")
+
+    runner = command_runner or _default_dependency_runner
+    summary: Dict[str, Any] = {
+        "profile": profile,
+        "required": BASE_RUNTIME_REQUIREMENTS,
+        "missing_initial": [],
+        "installed": [],
+        "satisfied": True,
+    }
+
+    missing, probe_err = _probe_dependency_specs(python_bin, BASE_RUNTIME_REQUIREMENTS, runner)
+    if probe_err is not None:
+        raise RuntimeError(f"运行时 [{profile}] Base Contract 探测失败: {probe_err}")
+    summary["missing_initial"] = list(missing or [])
+    if not missing:
+        return summary
+
+    violated = [spec for spec in missing if spec.split(">")[0].split("<")[0].split("=")[0].strip() == "torch"]
+    if violated:
+        raise RuntimeError(
+            f"运行时 [{profile}] 缺少 PyTorch，属于损坏环境，请重建运行时而不应增量修复"
+        )
+
+    emit(f"运行时 [{profile}] Base Contract 迁移: 补齐 {', '.join(missing)}...")
+    uv_bin = _find_uv()
+    venv_dir = rt_manager.venv_dir(profile)
+    install_cmd = _pip_install_command(uv_bin, python_bin, venv_dir, [*missing, "-i", PYPI_MIRROR_URL])
+    env_pip = build_runtime_env(data_dir)
+    retcode, stdout, stderr = runner(install_cmd, env=env_pip, timeout=1800)
+    if retcode != 0:
+        err_msg = stderr.strip() or stdout.strip() or f"依赖安装退出码 {retcode}"
+        raise RuntimeError(f"运行时 [{profile}] Base Contract 修复失败 ({', '.join(missing)}): {err_msg}")
+
+    missing_after, probe_err = _probe_dependency_specs(python_bin, BASE_RUNTIME_REQUIREMENTS, runner)
+    if probe_err is not None:
+        raise RuntimeError(f"运行时 [{profile}] Base Contract 复核失败: {probe_err}")
+    if missing_after:
+        raise RuntimeError(f"运行时 [{profile}] Base Contract 修复后仍缺失: {', '.join(missing_after)}")
+
+    summary["installed"] = list(missing)
+    emit(f"运行时 [{profile}] Base Contract 迁移完成: {', '.join(missing)}")
+    return summary
+
+
 def ensure_model_runtime_dependencies(
     data_dir: Path,
     model_id: str,
@@ -525,22 +611,7 @@ def ensure_model_runtime_dependencies(
         raise RuntimeError(f"运行时 [{profile}] 解释器不存在，无法校验模型专属依赖: {python_bin}")
 
     def probe() -> Tuple[Optional[List[str]], Optional[str]]:
-        cmd = [
-            str(python_bin),
-            "-c",
-            f'"""{DEPENDENCY_PROBE_MARKER}"""' + "\n" + _DEPENDENCY_PROBE_SCRIPT,
-            json.dumps(list(required)),
-        ]
-        retcode, stdout, stderr = runner(cmd, timeout=120)
-        if retcode != 0:
-            return None, stderr.strip() or stdout.strip() or f"依赖探测退出码 {retcode}"
-        try:
-            parsed = json.loads(stdout.strip().splitlines()[-1])
-            if not parsed.get("ok"):
-                return None, parsed.get("error") or "依赖探测返回失败"
-            return list(parsed.get("missing") or []), None
-        except Exception as exc:
-            return None, f"无法解析依赖探测输出: {exc}"
+        return _probe_dependency_specs(python_bin, required, runner)
 
     emit(f"正在校验模型 [{descriptor.display_name}] 的专属运行依赖 ({len(required)} 项)...")
     missing, probe_err = probe()
@@ -593,6 +664,9 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         probe = rt_manager.probe_profile(profile)
         if probe.get("verified", False):
             emit(f"运行时 [{profile}] 已就绪并通过验证，跳过安装。")
+            # Verified only proves torch imports: historical runtimes may still
+            # violate the base contract (e.g. transformers 5.x). Repair in place.
+            ensure_base_runtime_contract(data_dir, profile)
             return venv_dir
 
     emit(f"正在为 [{profile}] 创建隔离 Python 运行环境: {venv_dir}...")

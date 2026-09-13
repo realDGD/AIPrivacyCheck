@@ -683,6 +683,8 @@ class WorkerClient:
         """Executes a synthetic end-to-end smoke inference test to verify model + worker readiness."""
         _, infer_timeout = self.get_timeout_for_model(model_id, device=device)
         try:
+            from .model_security import gate_model_security
+            gate_model_security(model_path)
             with self.cuda_execution_session(device=device, timeout=float(infer_timeout)):
                 if device == "cuda" and "memprivacy" in model_id.lower():
                     self.stop_other_cuda_workers(keep_model_id=model_id)

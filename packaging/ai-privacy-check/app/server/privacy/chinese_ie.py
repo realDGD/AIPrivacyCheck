@@ -13,6 +13,7 @@ import threading
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from .device import DEVICE_MANAGER
+from .model_security import gate_model_security
 from .entities import Entity
 from .worker_client import get_worker_client
 
@@ -277,6 +278,7 @@ class ChineseIEDetector:
         if profile:
             from .worker_client import get_worker_client
             try:
+                gate_model_security(model_dir)
                 worker = get_worker_client(self.data_dir).get_worker(
                     self.active_model_id, profile, device=actual_dev
                 )
@@ -339,6 +341,7 @@ class ChineseIEDetector:
                         worker_client = get_worker_client(self.data_dir)
                         _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=device)
                         with worker_client.cuda_execution_session(device=device, timeout=float(infer_timeout)):
+                            gate_model_security(model_dir)
                             worker = worker_client.get_worker(
                                 self.active_model_id, profile, device=device
                             )

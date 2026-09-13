@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .device import DEVICE_MANAGER
 from .entities import Entity
+from .model_security import gate_model_security
 from .model_catalog import (
     SLOT_BUILT_IN,
     SLOT_CHINESE_IE,
@@ -98,6 +99,15 @@ class GLiNERDetector(Detector):
     id = "gliner_pii"
     slot = SLOT_GENERAL_PII
     name = "gliner_pii"
+
+    # Single source of truth for the prediction threshold. Production
+    # detectors and the benchmark harness MUST both import this value so the
+    # benchmark measures exactly what production runs.
+    # Re-swept on the 100-doc layered corpus (0.35..0.65): Detection F1 peaks
+    # at 0.50 (P 55.2 / R 30.9 / F1 39.6, model-only), PII-free FPR 3/9 and
+    # USERNAME->PERSON confusion 4 both flat vs 0.55; 0.60+ trades 9-19 F1
+    # points for no FPR gain.
+    GLINER_DEFAULT_THRESHOLD = 0.50
 
     GLINER_LABEL_MAP: Dict[str, Tuple[str, str]] = {
         "person": ("PERSON", "Person"),
@@ -183,6 +193,7 @@ class GLiNERDetector(Detector):
         dev = model_res.get("actual_device", "cpu")
         if profile:
             try:
+                gate_model_security(model_dir)
                 worker = get_worker_client(self.data_dir).get_worker(
                     self.active_model_id, profile, device=dev
                 )
@@ -299,21 +310,18 @@ class GLiNERDetector(Detector):
             return entities, warnings
 
         try:
+            gate_model_security(model_dir)
             worker_client = get_worker_client(self.data_dir)
             _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=dev)
             with worker_client.cuda_execution_session(device=dev, timeout=float(infer_timeout)):
                 worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
                 labels = list(set(self.GLINER_LABEL_MAP.keys()))
-                # Threshold tuned via Benchmark v2 (tests/fixtures/contextual_privacy_seed.jsonl):
-                # raising 0.40 -> 0.55 cut model false positives by ~5x on the
-                # PII-free samples with no measurable recall loss (recall stays
-                # flat across 0.40-0.60 on the seed).
                 res = worker.query({
                     "action": "detect",
                     "model_path": str(model_dir),
                     "text": text,
                     "labels": labels,
-                    "threshold": 0.55,
+                    "threshold": self.GLINER_DEFAULT_THRESHOLD,
                 }, timeout=infer_timeout)
 
                 if not res.get("ok"):
@@ -625,6 +633,7 @@ class MemPrivacyDetector(Detector):
         dev = model_res.get("actual_device", "cpu")
         if profile:
             try:
+                gate_model_security(model_dir)
                 worker = get_worker_client(self.data_dir).get_worker(
                     self.active_model_id, profile, device=dev
                 )
@@ -702,6 +711,7 @@ class MemPrivacyDetector(Detector):
             truncated_chunk_count = 0
             timed_out_budget = False
 
+            gate_model_security(model_dir)
             for chunk_start, chunk_end, chunk_text in chunks:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
