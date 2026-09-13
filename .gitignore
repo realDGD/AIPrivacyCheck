@@ -84,4 +84,5 @@ data/
 *.crt
 *.cert
 .env
+benchmark-cache/
 
