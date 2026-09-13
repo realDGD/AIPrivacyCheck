@@ -270,27 +270,21 @@ add("cjk_context",
     "令牌过期后需重新登录。", "凭证夹带将被网关拦截。",
     "密码找回流程见帮助中心。", "签名密钥与加密密钥分离存放。")
 
-# --- 15. format-perfect fakes (SEPARATE bucket; expected detection) ---------
-import random
-random.seed(20260913)
-def rchars(alphabet, n):
-    return "".join(random.choice(alphabet) for _ in range(n))
-UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-AL = "abcdefghijklmnopqrstuvwxyz0123456789"
-HEX = "0123456789abcdef"
+# Inert dummy tokens matching official syntax with zero entropy (repeating zeroes),
+# ensuring that offline detection recall is preserved while eliminating all scanner-shaped credentials.
 add("format_perfect_fake",
-    "ghp_" + rchars(AL + "_", 36),
-    "github_pat_" + rchars(AL, 22) + "_" + rchars(AL, 59),
-    "hf_" + rchars(AL, 34),
-    "sk-" + rchars(AL, 48),
-    "AKIA" + rchars(UP, 16),
-    "LTAI" + rchars(AL, 16),
-    "glpat-" + rchars(AL + "-_", 20),
-    "cli_" + rchars("abcdefghijklmnopqrstuvwxyz0123456789", 16),
-    "ab1" + "8Q~" + rchars("aZ09_~-." + "", 34),
-    "密钥：" + rchars("ABCDEFGH12345678", 12),
-    "password=" + rchars("abcdefgh0123456789", 16),
-    "Bearer " + rchars(AL, 40),
+    "ghp_" + "0" * 36,
+    "github_pat_" + "0" * 22 + "_" + "0" * 59,
+    "hf_" + "0" * 34,
+    "sk-" + "0" * 48,
+    "AKIA" + "0" * 16,
+    "LTAI" + "0" * 16,
+    "glpat-" + "0" * 20,
+    "cli_" + "0" * 16,
+    "ab18Q~" + "0" * 34,
+    "密钥：" + "0" * 12,
+    "password=" + "0" * 16,
+    "Bearer " + "0" * 40,
 )
 
 

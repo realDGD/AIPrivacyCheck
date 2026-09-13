@@ -393,15 +393,15 @@
 {"id": "neg_393", "category": "cjk_context", "text": "凭证夹带将被网关拦截。", "expect_detection": false}
 {"id": "neg_394", "category": "cjk_context", "text": "密码找回流程见帮助中心。", "expect_detection": false}
 {"id": "neg_395", "category": "cjk_context", "text": "签名密钥与加密密钥分离存放。", "expect_detection": false}
-{"id": "neg_396", "category": "format_perfect_fake", "text": "ghp_gmoxy0vdxzn8ikd55jz51hqftx7n3n76csw3", "expect_detection": true}
-{"id": "neg_397", "category": "format_perfect_fake", "text": "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", "expect_detection": true}
-{"id": "neg_398", "category": "format_perfect_fake", "text": "hf_ni5k8321rkbux9z8jblbx1ie09kxbq95js", "expect_detection": true}
-{"id": "neg_399", "category": "format_perfect_fake", "text": "sk-os6xyxcno31kx6o8l3jbrt2u56ey316m3csib3r8s2szl84q", "expect_detection": true}
-{"id": "neg_400", "category": "format_perfect_fake", "text": "AKIAC803R7MW5LZEGPVT", "expect_detection": true}
-{"id": "neg_401", "category": "format_perfect_fake", "text": "LTAIr7nzosuf1lgf5q0m", "expect_detection": true}
-{"id": "neg_402", "category": "format_perfect_fake", "text": "glpat-5hf7wq85dzxi2r2nk8f6", "expect_detection": true}
-{"id": "neg_403", "category": "format_perfect_fake", "text": "cli_5bk38c794rgg5c0h", "expect_detection": true}
-{"id": "neg_404", "category": "format_perfect_fake", "text": "ab18Q~~aa_99~~-.Z-_aZaZ00a0a~99Z~0_~-.ZZ", "expect_detection": true}
-{"id": "neg_405", "category": "format_perfect_fake", "text": "密钥：G83HE62DFAG6", "expect_detection": true}
-{"id": "neg_406", "category": "format_perfect_fake", "text": "password=0g1abeh8haa1cda2", "expect_detection": true}
-{"id": "neg_407", "category": "format_perfect_fake", "text": "Bearer hathjv5uml48kmnqgsomu2h758ci41lqz6hvrkm8", "expect_detection": true}
+{"id": "neg_396", "category": "format_perfect_fake", "text": "ghp_000000000000000000000000000000000000", "expect_detection": true}
+{"id": "neg_397", "category": "format_perfect_fake", "text": "github_pat_0000000000000000000000_00000000000000000000000000000000000000000000000000000000000", "expect_detection": true}
+{"id": "neg_398", "category": "format_perfect_fake", "text": "hf_0000000000000000000000000000000000", "expect_detection": true}
+{"id": "neg_399", "category": "format_perfect_fake", "text": "sk-000000000000000000000000000000000000000000000000", "expect_detection": true}
+{"id": "neg_400", "category": "format_perfect_fake", "text": "AKIA0000000000000000", "expect_detection": true}
+{"id": "neg_401", "category": "format_perfect_fake", "text": "LTAI0000000000000000", "expect_detection": true}
+{"id": "neg_402", "category": "format_perfect_fake", "text": "glpat-00000000000000000000", "expect_detection": true}
+{"id": "neg_403", "category": "format_perfect_fake", "text": "cli_0000000000000000", "expect_detection": true}
+{"id": "neg_404", "category": "format_perfect_fake", "text": "ab18Q~0000000000000000000000000000000000", "expect_detection": true}
+{"id": "neg_405", "category": "format_perfect_fake", "text": "密钥：000000000000", "expect_detection": true}
+{"id": "neg_406", "category": "format_perfect_fake", "text": "password=0000000000000000", "expect_detection": true}
+{"id": "neg_407", "category": "format_perfect_fake", "text": "Bearer 0000000000000000000000000000000000000000", "expect_detection": true}

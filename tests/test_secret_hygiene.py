@@ -1,13 +1,15 @@
-"""Repository Secret Hygiene & Static Credential Scanning Tests (v0.6.7).
+"""Repository Secret Hygiene & Static Credential Scanning Tests (v0.6.8).
 
-Verifies that no static fixtures or test suites store complete partner-scanner-shaped
-credential literals that trigger GitHub Secret Scanning alerts. All test vectors
-representing live-format API credentials must be fragmented at runtime or use generic
-synthetic formats that cannot be mistaken for active cloud credentials.
+Verifies that no static fixtures, documentation, or source code files store
+partner-scanner-shaped credential literals that trigger GitHub Secret Scanning alerts.
+All test vectors representing live-format API credentials must be fragmented at runtime
+or use generic synthetic formats with explicit non-secret markers (e.g. SAMPLE, EXAMPLE,
+zero-entropy repeating runs).
 """
 
 from pathlib import Path
 import json
+import os
 import re
 import sys
 import unittest
@@ -37,6 +39,61 @@ class SecretHygieneTests(unittest.TestCase):
         cls.raw_ltai_pat = re.compile(
             "".join([r'["\']', "LT", "AI", r"[0-9A-Za-z]{16,20}", r'["\']'])
         )
+
+    def test_repository_has_no_scanner_shaped_secret_literals(self):
+        """Repo-wide scan: ensures 0 active/scanner-shaped credential literals exist across all text files."""
+        patterns = {
+            "alibaba_secret": re.compile("".join(["(?i)(?:oss_secret|access_key_secret|accesskeysecret)", r"\s*[:=]\s*", r"[A-Za-z0-9]{30}"])),
+            "google_aiza": re.compile("".join([r"(?<![A-Za-z0-9_-])", "AI", "za", r"[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])"])),
+            "github_ghp": re.compile("".join([r"(?<![A-Za-z0-9_])", "gh", "p_", r"[0-9A-Za-z]{36}(?![A-Za-z0-9_])"])),
+            "github_pat": re.compile("".join([r"(?<![A-Za-z0-9_])", "github_", "pat_", r"[0-9A-Za-z_]{80,}(?![A-Za-z0-9_])"])),
+            "slack_token": re.compile("".join([r"(?<![A-Za-z0-9_-])", "xo", "x[bpaers]-[0-9]+-[0-9]+-[a-zA-Z0-9]+"])),
+            "aws_key": re.compile("".join([r"(?<![A-Z0-9])(?:A3T[A-Z0-9]|AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"])),
+            "alibaba_ltai": re.compile("".join([r"(?<![A-Za-z0-9])", "LT", "AI", r"[0-9A-Za-z]{16,24}(?![A-Za-z0-9])"])),
+            "tencent_key": re.compile("".join([r"(?<![A-Za-z0-9])(?:AKID|IKID)[0-9A-Za-z]{32}(?![A-Za-z0-9])"])),
+            "databricks": re.compile("".join([r"(?<![A-Za-z0-9_-])", "da", "pi", r"[0-9a-f]{32}(?![A-Za-z0-9_-])"])),
+            "linear": re.compile("".join([r"(?<![A-Za-z0-9_-])", "lin_", "api_", r"[0-9a-z]{40}(?![A-Za-z0-9_-])"])),
+            "huggingface": re.compile("".join([r"(?<![A-Za-z0-9_-])", "h", "f_", r"[0-9A-Za-z]{34,40}(?![A-Za-z0-9_-])"])),
+            "anthropic": re.compile("".join([r"(?<![A-Za-z0-9_-])", "sk-ant-", "api03-[0-9A-Za-z_-]{93}AA(?![A-Za-z0-9_-])"])),
+            "openai": re.compile("".join([r"(?<![A-Za-z0-9_-])", "sk-", r"[0-9A-Za-z]{20}T3BlbkFJ[0-9A-Za-z]{20}(?![A-Za-z0-9_-])"])),
+            "pem_private_key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----\n[A-Za-z0-9+/=\n]{100,}"),
+        }
+
+        def is_inert_synthetic(val: str) -> bool:
+            v_upper = val.upper()
+            if "EXAMPLE" in v_upper or "SAMPLE" in v_upper or "FAKE" in v_upper or "DUMMY" in v_upper:
+                return True
+            if re.search(r"(.)\1{9,}", val):
+                return True
+            core = re.sub(r"^(?:ghp_|github_pat_|hf_|sk-|AKIA|LTAI|ab18Q~|Bearer\s*)", "", val)
+            if len(core) >= 8 and len(set(core)) <= 3:
+                return True
+            return False
+
+        exts = {".py", ".json", ".jsonl", ".md", ".txt", ".sh", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".js", ".ts", ".html", ".css"}
+        excluded_dirs = {".git", "dist", "benchmark-cache", ".venv", "venv", "node_modules", "__pycache__", "scratch"}
+
+        violations = []
+        for root, dirs, files in os.walk(PROJECT_DIR):
+            dirs[:] = [d for d in dirs if d not in excluded_dirs]
+            for fname in files:
+                if fname.startswith(".") or "visual-check" in fname or fname.endswith(".png") or fname == "test_secret_hygiene.py":
+                    continue
+                p = Path(root) / fname
+                if p.suffix in exts:
+                    content = p.read_text(encoding="utf-8", errors="ignore")
+                    for pat_name, pat in patterns.items():
+                        for match in pat.findall(content):
+                            if "rules.py" in str(p) or "model_api_names" in str(p):
+                                continue
+                            if not is_inert_synthetic(match):
+                                violations.append({
+                                    "file": str(p.relative_to(PROJECT_DIR)),
+                                    "rule": pat_name,
+                                    "match": match[:20] + "...",
+                                })
+
+        self.assertEqual(violations, [], f"Repository HEAD contains scanner-shaped credential literals: {violations}")
 
     def test_no_alibaba_access_key_secret_in_fixtures_or_scripts(self):
         """No static fixture or script should contain full-length Alibaba Cloud AccessKey Secrets."""

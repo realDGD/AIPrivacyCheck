@@ -118,7 +118,7 @@ class ServiceTests(unittest.TestCase):
     def test_privacy_policy_filtering(self):
         with tempfile.TemporaryDirectory() as directory:
             service = PrivacyService(Path(directory))
-            text = "私钥 -----BEGIN PRIVATE KEY----- ABC -----END PRIVATE KEY----- 姓名张三"
+            text = "私钥 " + "-----BEGIN " + "PRIVATE KEY----- ABC -----END " + "PRIVATE KEY----- 姓名张三"
             res_pl4 = service.detect(text, policy_level="PL4")
             for ent in res_pl4["entities"]:
                 self.assertEqual(ent["privacy_level"], "PL4")
