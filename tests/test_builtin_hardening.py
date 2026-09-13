@@ -327,6 +327,23 @@ class VendorCatalogGapsTests(unittest.TestCase):
         self.assertIn(("SECRET", secret),
                       _detect(f'"discord_token" : "{secret}"'))
 
+    def test_format_perfect_fakes_runtime_assembled(self):
+        """Format-perfect fakes whose discriminators are identical to the
+        push-protection scanners (OpenAI T3BlbkFJ, Tencent AKID+32) can only
+        exist at runtime - the fixture must not carry the literals."""
+        import random
+
+        rng = random.Random(20260913)
+        up = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        al = "abcdefghijklmnopqrstuvwxyz0123456789"
+        openai_key = "sk-proj-" + "".join(rng.choice(al + "-_") for _ in range(40)) + "T3BlbkFJ" + "".join(rng.choice(al + "-_") for _ in range(40))
+        tencent_id = "AKID" + "".join(rng.choice(al) for _ in range(32))
+        slack_bot = "xoxb-" + "".join(rng.choice("0123456789") for _ in range(10)) + "-" + "".join(rng.choice("0123456789") for _ in range(13)) + "-" + "".join(rng.choice(al) for _ in range(24))
+        databricks = "dapi" + "".join(rng.choice("0123456789abcdef") for _ in range(32))
+        linear = "lin_api_" + "".join(rng.choice(al) for _ in range(40))
+        for key in (openai_key, tencent_id, slack_bot, databricks, linear):
+            self.assertIn(("SECRET", key), _detect(f"sample: {key}"), key[:24])
+
     def test_catalog_negatives(self):
         for text in ("openai: sk-short", "databricks: dapi12345",
                      "linear: lin_api_short", "azure: xx8Q~short",

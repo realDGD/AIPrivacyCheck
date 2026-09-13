@@ -1,0 +1,407 @@
+{"id": "neg_001", "category": "code_identifiers", "text": "const secret = ModelUtils.toStringSafe(foo)", "expect_detection": false}
+{"id": "neg_002", "category": "code_identifiers", "text": "obj.secret = getSecret()", "expect_detection": false}
+{"id": "neg_003", "category": "code_identifiers", "text": "passwordManager 同步完成", "expect_detection": false}
+{"id": "neg_004", "category": "code_identifiers", "text": "if (user.tokenizer) return", "expect_detection": false}
+{"id": "neg_005", "category": "code_identifiers", "text": "token_count >= 64", "expect_detection": false}
+{"id": "neg_006", "category": "code_identifiers", "text": "api_key_name VARCHAR(64)", "expect_detection": false}
+{"id": "neg_007", "category": "code_identifiers", "text": "ACCESS_KEY_LENGTH = 40", "expect_detection": false}
+{"id": "neg_008", "category": "code_identifiers", "text": "AUTH_TOKEN_TYPE bearer", "expect_detection": false}
+{"id": "neg_009", "category": "code_identifiers", "text": "class UserSecretConfig(BaseModel)", "expect_detection": false}
+{"id": "neg_010", "category": "code_identifiers", "text": "private_key_path = settings.KEY_PATH", "expect_detection": false}
+{"id": "neg_011", "category": "code_identifiers", "text": "SecretService.get_instance()", "expect_detection": false}
+{"id": "neg_012", "category": "code_identifiers", "text": "SecretKeyFactory.getInstance()", "expect_detection": false}
+{"id": "neg_013", "category": "code_identifiers", "text": "self._access_key_length = 40", "expect_detection": false}
+{"id": "neg_014", "category": "code_identifiers", "text": "setPassword(value) 后请刷新会话", "expect_detection": false}
+{"id": "neg_015", "category": "code_identifiers", "text": "getPassword() 返回 None", "expect_detection": false}
+{"id": "neg_016", "category": "code_identifiers", "text": "ConfigurationManager.load(path)", "expect_detection": false}
+{"id": "neg_017", "category": "code_identifiers", "text": "import os, sys, json, hashlib", "expect_detection": false}
+{"id": "neg_018", "category": "code_identifiers", "text": "from cryptography.hazmat.primitives import hashes", "expect_detection": false}
+{"id": "neg_019", "category": "code_identifiers", "text": "requests.post(url, headers=headers)", "expect_detection": false}
+{"id": "neg_020", "category": "code_identifiers", "text": "logger.warning('cache miss: %s', key_name)", "expect_detection": false}
+{"id": "neg_021", "category": "code_identifiers", "text": "def rotate_token_count(handler):", "expect_detection": false}
+{"id": "neg_022", "category": "code_identifiers", "text": "if (result.is_valid) { emit(row); }", "expect_detection": false}
+{"id": "neg_023", "category": "code_identifiers", "text": "SELECT secret_name FROM vault_metadata", "expect_detection": false}
+{"id": "neg_024", "category": "code_identifiers", "text": "pip install python-dateutil", "expect_detection": false}
+{"id": "neg_025", "category": "code_identifiers", "text": "npm i lodash-es", "expect_detection": false}
+{"id": "neg_026", "category": "code_identifiers", "text": "org.apache.commons.lang3.StringUtils", "expect_detection": false}
+{"id": "neg_027", "category": "uuid_hash", "text": "id=550e8400-e29b-41d4-a716-446655440000", "expect_detection": false}
+{"id": "neg_028", "category": "uuid_hash", "text": "commit 9c4d3f7a2b81e5d0614c7fa8b3e2d1094a5f6c7d", "expect_detection": false}
+{"id": "neg_029", "category": "uuid_hash", "text": "sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "expect_detection": false}
+{"id": "neg_030", "category": "uuid_hash", "text": "etag W/\"07f1b8c4-9d2e\"", "expect_detection": false}
+{"id": "neg_031", "category": "uuid_hash", "text": "md5 5d41402abc4b2a76b9719d911017c592", "expect_detection": false}
+{"id": "neg_032", "category": "uuid_hash", "text": "uuid4() 生成 8-4-4-4-12 格式", "expect_detection": false}
+{"id": "neg_033", "category": "uuid_hash", "text": "checksum crc32=0x8a914b2c", "expect_detection": false}
+{"id": "neg_034", "category": "uuid_hash", "text": "blob 51a8c4f2e9d3b7a60415c8e9f2d3b4a506172839", "expect_detection": false}
+{"id": "neg_035", "category": "uuid_hash", "text": "trace_id=4bf92f3577b34da6a3ce929d0e0e4736", "expect_detection": false}
+{"id": "neg_036", "category": "uuid_hash", "text": "digest sha512 9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043", "expect_detection": false}
+{"id": "neg_037", "category": "version_timestamp", "text": "version 10.2.3.4 发布", "expect_detection": false}
+{"id": "neg_038", "category": "version_timestamp", "text": "release v2.13.0-rc.1", "expect_detection": false}
+{"id": "neg_039", "category": "version_timestamp", "text": "semver 1.0.0-alpha.1+build.7", "expect_detection": false}
+{"id": "neg_040", "category": "version_timestamp", "text": "build 2026.09.13-08", "expect_detection": false}
+{"id": "neg_041", "category": "version_timestamp", "text": "2026-09-13T09:15:00Z", "expect_detection": false}
+{"id": "neg_042", "category": "version_timestamp", "text": "unix ts 1789312500", "expect_detection": false}
+{"id": "neg_043", "category": "version_timestamp", "text": "updated_at 1789312500123", "expect_detection": false}
+{"id": "neg_044", "category": "version_timestamp", "text": "日期 2026-12-01 08:30", "expect_detection": false}
+{"id": "neg_045", "category": "version_timestamp", "text": "npm engine node >=20.11.0", "expect_detection": false}
+{"id": "neg_046", "category": "version_timestamp", "text": "chrome/126.0.6478.61", "expect_detection": false}
+{"id": "neg_047", "category": "version_timestamp", "text": "内核 6.8.0-45-generic", "expect_detection": false}
+{"id": "neg_048", "category": "version_timestamp", "text": "镜像 build 88127341", "expect_detection": false}
+{"id": "neg_049", "category": "version_timestamp", "text": "1700000000 与 1800000000 的时间戳比对", "expect_detection": false}
+{"id": "neg_050", "category": "version_timestamp", "text": "commit dated 2026-09-12", "expect_detection": false}
+{"id": "neg_051", "category": "url_domain", "text": "文档 https://docs.example.com/guide/install", "expect_detection": false}
+{"id": "neg_052", "category": "url_domain", "text": "镜像 registry.cn-hangzhou.example.com", "expect_detection": false}
+{"id": "neg_053", "category": "url_domain", "text": "访问 https://example.org/docs/api#section-2", "expect_detection": false}
+{"id": "neg_054", "category": "url_domain", "text": "git clone https://github.com/example/repo.git", "expect_detection": false}
+{"id": "neg_055", "category": "url_domain", "text": "https://blog.example.org/2026/09/公共文章", "expect_detection": false}
+{"id": "neg_056", "category": "url_domain", "text": "ws://localhost:8765/ws", "expect_detection": false}
+{"id": "neg_057", "category": "url_domain", "text": "内网域名 nas.example.internal", "expect_detection": false}
+{"id": "neg_058", "category": "url_domain", "text": "https://mirrors.aliyun.com/pypi/simple/", "expect_detection": false}
+{"id": "neg_059", "category": "url_domain", "text": "访问 https://huggingface.co/Qwen/Qwen3-0.6B 页面", "expect_detection": false}
+{"id": "neg_060", "category": "url_domain", "text": "站点 maps.example.cn/maps?q=杭州", "expect_detection": false}
+{"id": "neg_061", "category": "reserved_documentation", "text": "示例：test@example.com", "expect_detection": true}
+{"id": "neg_062", "category": "reserved_documentation", "text": "联系 admin@example.org", "expect_detection": true}
+{"id": "neg_063", "category": "reserved_documentation", "text": "EMAIL_USER=you@example.net", "expect_detection": true}
+{"id": "neg_064", "category": "reserved_documentation", "text": "占位格式 {{EMAIL_01_ab12cd34}}", "expect_detection": true}
+{"id": "neg_065", "category": "reserved_documentation", "text": "config.password = os.environ['DB_PASS']", "expect_detection": true}
+{"id": "neg_066", "category": "doc_examples", "text": "api_key = <your-api-key>", "expect_detection": false}
+{"id": "neg_067", "category": "doc_examples", "text": "token: ${VAULT_SECRET_REF}", "expect_detection": false}
+{"id": "neg_068", "category": "doc_examples", "text": "password = ${DB_PASSWORD}", "expect_detection": false}
+{"id": "neg_069", "category": "doc_examples", "text": "Authorization: Bearer <token>", "expect_detection": false}
+{"id": "neg_070", "category": "doc_examples", "text": "secret: [FROM_ENV]", "expect_detection": false}
+{"id": "neg_071", "category": "doc_examples", "text": "password: ******（见保险箱）", "expect_detection": false}
+{"id": "neg_072", "category": "doc_examples", "text": "export OPENAI_API_KEY=sk-...", "expect_detection": false}
+{"id": "neg_073", "category": "doc_examples", "text": "api_key=\"REPLACE_ME\"", "expect_detection": false}
+{"id": "neg_074", "category": "doc_examples", "text": "使用 {{PLACEHOLDER}} 语法", "expect_detection": false}
+{"id": "neg_075", "category": "doc_examples", "text": "占位格式 {{EMAIL_01_ab12cd34}}", "expect_detection": false}
+{"id": "neg_076", "category": "doc_examples", "text": "config.password = os.environ['DB_PASS']", "expect_detection": false}
+{"id": "neg_077", "category": "fake_credentials_weak", "text": "ghp_example", "expect_detection": false}
+{"id": "neg_078", "category": "fake_credentials_weak", "text": "github_pat_example", "expect_detection": false}
+{"id": "neg_079", "category": "fake_credentials_weak", "text": "hf_model_name", "expect_detection": false}
+{"id": "neg_080", "category": "fake_credentials_weak", "text": "sk-example", "expect_detection": false}
+{"id": "neg_081", "category": "fake_credentials_weak", "text": "sk-example-123", "expect_detection": false}
+{"id": "neg_082", "category": "fake_credentials_weak", "text": "AKIAEXAMPLE", "expect_detection": false}
+{"id": "neg_083", "category": "fake_credentials_weak", "text": "ASIAEXAMPLE123", "expect_detection": false}
+{"id": "neg_084", "category": "fake_credentials_weak", "text": "LTAIexample12", "expect_detection": false}
+{"id": "neg_085", "category": "fake_credentials_weak", "text": "AKIDexample", "expect_detection": false}
+{"id": "neg_086", "category": "fake_credentials_weak", "text": "xoxb-example", "expect_detection": false}
+{"id": "neg_087", "category": "fake_credentials_weak", "text": "xoxp-example", "expect_detection": false}
+{"id": "neg_088", "category": "fake_credentials_weak", "text": "xoxr-example-token", "expect_detection": false}
+{"id": "neg_089", "category": "fake_credentials_weak", "text": "glpat_example", "expect_detection": false}
+{"id": "neg_090", "category": "fake_credentials_weak", "text": "dapi_example", "expect_detection": false}
+{"id": "neg_091", "category": "fake_credentials_weak", "text": "lin_api_example", "expect_detection": false}
+{"id": "neg_092", "category": "fake_credentials_weak", "text": "8Q~example", "expect_detection": false}
+{"id": "neg_093", "category": "fake_credentials_weak", "text": "cli_example_secret", "expect_detection": false}
+{"id": "neg_094", "category": "fake_credentials_weak", "text": "sk-ant-example", "expect_detection": false}
+{"id": "neg_095", "category": "fake_credentials_weak", "text": "AIza EXAMPLE", "expect_detection": false}
+{"id": "neg_096", "category": "fake_credentials_weak", "text": "wJalrXUtnFEMI EXAMPLE KEY", "expect_detection": false}
+{"id": "neg_097", "category": "fake_credentials_weak", "text": "Bearer <credentials>", "expect_detection": false}
+{"id": "neg_098", "category": "fake_credentials_weak", "text": "密钥示例：***", "expect_detection": false}
+{"id": "neg_099", "category": "fake_credentials_weak", "text": "口令：******", "expect_detection": false}
+{"id": "neg_100", "category": "fake_credentials_weak", "text": "密码：[已隐藏]", "expect_detection": false}
+{"id": "neg_101", "category": "scientific_data", "text": "浓度 3.2e-5 mol/L", "expect_detection": false}
+{"id": "neg_102", "category": "scientific_data", "text": "质量 4.184 J/(g·K)", "expect_detection": false}
+{"id": "neg_103", "category": "scientific_data", "text": "测得 1.29e9 个粒子", "expect_detection": false}
+{"id": "neg_104", "category": "scientific_data", "text": "p < 0.0001，n=42", "expect_detection": false}
+{"id": "neg_105", "category": "scientific_data", "text": "pi=3.141592653589793", "expect_detection": false}
+{"id": "neg_106", "category": "scientific_data", "text": "光速 2.99792458e8 m/s", "expect_detection": false}
+{"id": "neg_107", "category": "scientific_data", "text": "误差 ±0.000000123", "expect_detection": false}
+{"id": "neg_108", "category": "scientific_data", "text": "x=1.23456789e12", "expect_detection": false}
+{"id": "neg_109", "category": "scientific_data", "text": "温度 298.15K", "expect_detection": false}
+{"id": "neg_110", "category": "scientific_data", "text": "电压 3.3V 电流 0.5A", "expect_detection": false}
+{"id": "neg_111", "category": "random_ids", "text": "订单号 2026121312345678", "expect_detection": false}
+{"id": "neg_112", "category": "random_ids", "text": "运单 SF138 0001 2233", "expect_detection": false}
+{"id": "neg_113", "category": "random_ids", "text": "流水号 NO.20261213009812", "expect_detection": false}
+{"id": "neg_114", "category": "random_ids", "text": "批次 BATCH-20261213-A1", "expect_detection": false}
+{"id": "neg_115", "category": "random_ids", "text": "工单 2026121300123", "expect_detection": false}
+{"id": "neg_116", "category": "random_ids", "text": "序列号 SN881234567890", "expect_detection": false}
+{"id": "neg_117", "category": "random_ids", "text": "编号 AB1234567890", "expect_detection": false}
+{"id": "neg_118", "category": "random_ids", "text": "参考号 REF99118822", "expect_detection": false}
+{"id": "neg_119", "category": "random_ids", "text": "确认码 882199", "expect_detection": false}
+{"id": "neg_120", "category": "random_ids", "text": "取件码 6-3-2211", "expect_detection": false}
+{"id": "neg_121", "category": "shell_env", "text": "export PATH=/usr/local/bin:$PATH", "expect_detection": false}
+{"id": "neg_122", "category": "shell_env", "text": "echo $HOME", "expect_detection": false}
+{"id": "neg_123", "category": "shell_env", "text": "kubectl get pods -n prod", "expect_detection": false}
+{"id": "neg_124", "category": "shell_env", "text": "grep -r 'TODO' ./src", "expect_detection": false}
+{"id": "neg_125", "category": "shell_env", "text": "sudo systemctl restart nginx", "expect_detection": false}
+{"id": "neg_126", "category": "shell_env", "text": "ls -la | wc -l", "expect_detection": false}
+{"id": "neg_127", "category": "shell_env", "text": "docker ps --format '{{.Names}}'", "expect_detection": false}
+{"id": "neg_128", "category": "shell_env", "text": "cat /etc/os-release | head -2", "expect_detection": false}
+{"id": "neg_129", "category": "shell_env", "text": "find . -name '*.py' -exec wc -l {} +", "expect_detection": false}
+{"id": "neg_130", "category": "shell_env", "text": "ssh -L 8080:localhost:80 admin@bastion", "expect_detection": false}
+{"id": "neg_131", "category": "config_examples", "text": "{\"database\": {\"host\": \"db.prod\", \"port\": 5432, \"ssl\": true}}", "expect_detection": false}
+{"id": "neg_132", "category": "config_examples", "text": "server:\n  port: 8080\n  workers: 4", "expect_detection": false}
+{"id": "neg_133", "category": "config_examples", "text": "[logging]\nlevel = \"info\"\nfile = \"/var/log/app.log\"", "expect_detection": false}
+{"id": "neg_134", "category": "config_examples", "text": "DB_HOST=db.internal\nDB_PORT=5432\nDB_SSLMODE=verify-full", "expect_detection": false}
+{"id": "neg_135", "category": "config_examples", "text": "{\"model\": \"qwen3.5-0.8b\", \"temperature\": 0, \"max_tokens\": 256}", "expect_detection": false}
+{"id": "neg_136", "category": "config_examples", "text": "cache:\n  ttl: 300\n  max_entries: 10000", "expect_detection": false}
+{"id": "neg_137", "category": "config_examples", "text": "region = \"cn-hangzhou\"\nprofile = \"default\"", "expect_detection": false}
+{"id": "neg_138", "category": "config_examples", "text": "{\"retries\": 3, \"backoff_ms\": [100, 400, 1600]}", "expect_detection": false}
+{"id": "neg_139", "category": "config_examples", "text": "timeout: 30s\nkeepalive: 60s", "expect_detection": false}
+{"id": "neg_140", "category": "sql_schema", "text": "CREATE TABLE users (id BIGINT PRIMARY KEY, created_at TIMESTAMPTZ);", "expect_detection": false}
+{"id": "neg_141", "category": "sql_schema", "text": "SELECT count(*) FROM orders WHERE status = 'paid';", "expect_detection": false}
+{"id": "neg_142", "category": "sql_schema", "text": "ALTER TABLE sessions ADD COLUMN expires_at TIMESTAMPTZ;", "expect_detection": false}
+{"id": "neg_143", "category": "sql_schema", "text": "INSERT INTO audit(event, ts) VALUES ('login', now());", "expect_detection": false}
+{"id": "neg_144", "category": "sql_schema", "text": "CREATE INDEX idx_orders_user ON orders(user_id);", "expect_detection": false}
+{"id": "neg_145", "category": "sql_schema", "text": "-- 迁移脚本：调整字符集 utf8mb4", "expect_detection": false}
+{"id": "neg_146", "category": "sql_schema", "text": "GRANT SELECT ON reports TO analyst;", "expect_detection": false}
+{"id": "neg_147", "category": "model_api_names", "text": "模型 gpt-4o 与 claude-3-5-sonnet 对比", "expect_detection": false}
+{"id": "neg_148", "category": "model_api_names", "text": "qwen3.5-0.8b 本地可跑", "expect_detection": false}
+{"id": "neg_149", "category": "model_api_names", "text": "调用 /v1/chat/completions 接口", "expect_detection": false}
+{"id": "neg_150", "category": "model_api_names", "text": "使用 transformers 4.57.6 加载", "expect_detection": false}
+{"id": "neg_151", "category": "model_api_names", "text": "库版本 flask==3.1.0 sqlalchemy==2.0.36", "expect_detection": false}
+{"id": "neg_152", "category": "model_api_names", "text": "模型路径 /models/qwen3.5-2b", "expect_detection": false}
+{"id": "neg_153", "category": "model_api_names", "text": "qwen/qwen3.5-2b 是 text-generation 类型", "expect_detection": false}
+{"id": "neg_154", "category": "model_api_names", "text": "API 端点 /api/v2/detect", "expect_detection": false}
+{"id": "neg_155", "category": "model_api_names", "text": "module tensorflow.keras.layers", "expect_detection": false}
+{"id": "neg_156", "category": "model_api_names", "text": "torch.cuda.is_available()", "expect_detection": false}
+{"id": "neg_157", "category": "network_like", "text": "非法地址 999.999.999.999", "expect_detection": false}
+{"id": "neg_158", "category": "network_like", "text": "五段伪 IP 1.2.3.4.5", "expect_detection": false}
+{"id": "neg_159", "category": "network_like", "text": "CIDR 写法 10.0.0.0/8", "expect_detection": false}
+{"id": "neg_160", "category": "network_like", "text": "网段 172.16.0.0/12 说明", "expect_detection": false}
+{"id": "neg_161", "category": "network_like", "text": "semver 10.20.30", "expect_detection": false}
+{"id": "neg_162", "category": "network_like", "text": "电话样例 10086", "expect_detection": false}
+{"id": "neg_163", "category": "network_like", "text": "号码样例 12345678901", "expect_detection": false}
+{"id": "neg_164", "category": "network_like", "text": "卡样例 0000000000000000", "expect_detection": false}
+{"id": "neg_165", "category": "network_like", "text": "证件样例 000000000000000", "expect_detection": false}
+{"id": "neg_166", "category": "network_like", "text": "时间戳样例 1380013800000", "expect_detection": false}
+{"id": "neg_167", "category": "network_like", "text": "长度 16 的数字 1234567890123456", "expect_detection": false}
+{"id": "neg_168", "category": "network_like", "text": "UUID 样例 123e4567-e89b-12d3-a456-426614174000", "expect_detection": false}
+{"id": "neg_169", "category": "network_like", "text": "哈希样例 a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "expect_detection": false}
+{"id": "neg_170", "category": "network_like", "text": "ipv6 示例 fe80::1%eth0", "expect_detection": false}
+{"id": "neg_171", "category": "network_like", "text": "网站 192.0.2.1 是文档保留段", "expect_detection": false}
+{"id": "neg_172", "category": "format_perfect_fake", "text": "1:2:3:4:5:6:7:8", "expect_detection": true}
+{"id": "neg_173", "category": "format_perfect_fake", "text": "12:34:56:78:9a:bc", "expect_detection": true}
+{"id": "neg_174", "category": "cjk_context", "text": "密码策略要求至少 16 个字符。", "expect_detection": false}
+{"id": "neg_175", "category": "cjk_context", "text": "请勿在聊天中泄露凭据。", "expect_detection": false}
+{"id": "neg_176", "category": "cjk_context", "text": "本次演练不涉及真实凭证。", "expect_detection": false}
+{"id": "neg_177", "category": "cjk_context", "text": "访问密钥请放入保险箱。", "expect_detection": false}
+{"id": "neg_178", "category": "cjk_context", "text": "口令到期前 7 天会提醒。", "expect_detection": false}
+{"id": "neg_179", "category": "cjk_context", "text": "私钥文件已用 TPM 保护。", "expect_detection": false}
+{"id": "neg_180", "category": "cjk_context", "text": "用户名是登录身份的一部分，不是秘密。", "expect_detection": false}
+{"id": "neg_181", "category": "cjk_context", "text": "账号被锁定 30 分钟。", "expect_detection": false}
+{"id": "neg_182", "category": "cjk_context", "text": "令牌轮换策略每月执行。", "expect_detection": false}
+{"id": "neg_183", "category": "cjk_context", "text": "秘钥管理系统上线了。", "expect_detection": false}
+{"id": "neg_184", "category": "code_identifiers", "text": "hashed = hashlib.sha256(payload).hexdigest()", "expect_detection": false}
+{"id": "neg_185", "category": "code_identifiers", "text": "self.token_bucket.refill()", "expect_detection": false}
+{"id": "neg_186", "category": "code_identifiers", "text": "await verifier.verify(jwt_claims)", "expect_detection": false}
+{"id": "neg_187", "category": "code_identifiers", "text": "config.get('timeout', 30)", "expect_detection": false}
+{"id": "neg_188", "category": "code_identifiers", "text": "class SecretRotator:", "expect_detection": false}
+{"id": "neg_189", "category": "code_identifiers", "text": "async def fetch_quota(self):", "expect_detection": false}
+{"id": "neg_190", "category": "code_identifiers", "text": "user.settings.password_policy.enabled", "expect_detection": false}
+{"id": "neg_191", "category": "code_identifiers", "text": "Route::post('/rotate', [TokenController::class, 'rotate'])", "expect_detection": false}
+{"id": "neg_192", "category": "code_identifiers", "text": "fmt.Sprintf(\"%s=%v\", keyName, keyLength)", "expect_detection": false}
+{"id": "neg_193", "category": "code_identifiers", "text": "try { validator.validate(input); }", "expect_detection": false}
+{"id": "neg_194", "category": "code_identifiers", "text": "for k, v in sorted(envelope.items()):", "expect_detection": false}
+{"id": "neg_195", "category": "code_identifiers", "text": "printf('%s: %d\n', name, count)", "expect_detection": false}
+{"id": "neg_196", "category": "code_identifiers", "text": "public static final int API_KEY_LENGTH = 64;", "expect_detection": false}
+{"id": "neg_197", "category": "code_identifiers", "text": "func (s *Store) Put(ctx context.Context)", "expect_detection": false}
+{"id": "neg_198", "category": "code_identifiers", "text": "keyId := os.Getenv(\"KEY_ID\")", "expect_detection": false}
+{"id": "neg_199", "category": "code_identifiers", "text": "assert response.status_code == 200", "expect_detection": false}
+{"id": "neg_200", "category": "code_identifiers", "text": "JSON.stringify({event: 'rotate', ok: true})", "expect_detection": false}
+{"id": "neg_201", "category": "code_identifiers", "text": "DELETE FROM tokens WHERE revoked = true", "expect_detection": false}
+{"id": "neg_202", "category": "code_identifiers", "text": "set -euo pipefail", "expect_detection": false}
+{"id": "neg_203", "category": "code_identifiers", "text": "ln -sf target link_name", "expect_detection": false}
+{"id": "neg_204", "category": "code_identifiers", "text": "hasattr(module, 'SECRET_NAME')", "expect_detection": false}
+{"id": "neg_205", "category": "code_identifiers", "text": "match (kind) { case 'id': break; }", "expect_detection": false}
+{"id": "neg_206", "category": "code_identifiers", "text": "console.log('token refresh scheduled')", "expect_detection": false}
+{"id": "neg_207", "category": "code_identifiers", "text": "tokens.map(t => t.prefix)", "expect_detection": false}
+{"id": "neg_208", "category": "code_identifiers", "text": "with vault.client() as c:", "expect_detection": false}
+{"id": "neg_209", "category": "code_identifiers", "text": "@dataclass(frozen=True)", "expect_detection": false}
+{"id": "neg_210", "category": "uuid_hash", "text": "hash 00000000000000000000000000000000", "expect_detection": false}
+{"id": "neg_211", "category": "uuid_hash", "text": "run_id 7e5a1c90-4b2f-4c3d-8d0a-9f1e2d3c4b5a", "expect_detection": false}
+{"id": "neg_212", "category": "uuid_hash", "text": "digest blake2b a8cb2d4f0e13b6598701c2fa4d5e6b708192a3b4c5d6e7f8091a2b3c4d5e6f70", "expect_detection": false}
+{"id": "neg_213", "category": "uuid_hash", "text": "etag 33a64df5514ffccf832fc45d4a3b7c", "expect_detection": false}
+{"id": "neg_214", "category": "uuid_hash", "text": "job 20261213-abcdef-4210", "expect_detection": false}
+{"id": "neg_215", "category": "uuid_hash", "text": "session fb350c1e-8a11-42bb-9c63-6b3f1e0d7a22", "expect_detection": false}
+{"id": "neg_216", "category": "uuid_hash", "text": "request id req_01HQX7P4K2M3N4", "expect_detection": false}
+{"id": "neg_217", "category": "uuid_hash", "text": "sha1 85d7e5f1c2b3a49687061524396b7a8c9d0e1f2a", "expect_detection": false}
+{"id": "neg_218", "category": "uuid_hash", "text": "签名摘要 4f2a6b8c0d1e3f5a7b9c1d3e5f7a9b1d", "expect_detection": false}
+{"id": "neg_219", "category": "uuid_hash", "text": "object id 2a9f8b7c6d5e4f3a2b1c0d9e8f7a6b5c", "expect_detection": false}
+{"id": "neg_220", "category": "uuid_hash", "text": "批次指纹 f0e1d2c3b4a5968778695a4b3c2d1e0f", "expect_detection": false}
+{"id": "neg_221", "category": "version_timestamp", "text": "alpha build 0.0.1", "expect_detection": false}
+{"id": "neg_222", "category": "version_timestamp", "text": "beta 1.2.0-beta.3", "expect_detection": false}
+{"id": "neg_223", "category": "version_timestamp", "text": "lts 22.04.5", "expect_detection": false}
+{"id": "neg_224", "category": "version_timestamp", "text": "patch 3.0.186", "expect_detection": false}
+{"id": "neg_225", "category": "version_timestamp", "text": "ts 1789312500789", "expect_detection": false}
+{"id": "neg_226", "category": "version_timestamp", "text": "modified 2026-12-31T23:59:59+08:00", "expect_detection": false}
+{"id": "neg_227", "category": "version_timestamp", "text": "发布于 2027 年 1 月 4 日", "expect_detection": false}
+{"id": "neg_228", "category": "version_timestamp", "text": "effective 2027-02-01", "expect_detection": false}
+{"id": "neg_229", "category": "version_timestamp", "text": "start=2026-01-01, end=2026-12-31", "expect_detection": false}
+{"id": "neg_230", "category": "version_timestamp", "text": "epoch 1900000000", "expect_detection": false}
+{"id": "neg_231", "category": "version_timestamp", "text": "version: 8.25.0", "expect_detection": false}
+{"id": "neg_232", "category": "version_timestamp", "text": "kernel 15.2-3", "expect_detection": false}
+{"id": "neg_233", "category": "version_timestamp", "text": "fw 2.1.37", "expect_detection": false}
+{"id": "neg_234", "category": "version_timestamp", "text": "发行 2026Q4", "expect_detection": false}
+{"id": "neg_235", "category": "version_timestamp", "text": "定时 00:00 UTC", "expect_detection": false}
+{"id": "neg_236", "category": "version_timestamp", "text": "backup at 03:00, 15:00", "expect_detection": false}
+{"id": "neg_237", "category": "url_domain", "text": "https://api.example.com/v2/health", "expect_detection": false}
+{"id": "neg_238", "category": "url_domain", "text": "ldap://directory.example.org/dc=corp", "expect_detection": false}
+{"id": "neg_239", "category": "url_domain", "text": "s3://artifacts-bucket/releases/", "expect_detection": false}
+{"id": "neg_240", "category": "url_domain", "text": "file:///etc/example/config.yaml", "expect_detection": false}
+{"id": "neg_241", "category": "url_domain", "text": "https://gitlab.example.cn/-/settings/repository", "expect_detection": false}
+{"id": "neg_242", "category": "url_domain", "text": "https://pypi.org/project/requests/", "expect_detection": false}
+{"id": "neg_243", "category": "url_domain", "text": "mirror.aliyuncs.com/docker-library", "expect_detection": false}
+{"id": "neg_244", "category": "url_domain", "text": "https://modelscope.cn/models/Qwen/Qwen3-0.6B", "expect_detection": false}
+{"id": "neg_245", "category": "url_domain", "text": "host backup.example.net:2222", "expect_detection": false}
+{"id": "neg_246", "category": "url_domain", "text": "ws://127.0.0.1:9000/stream", "expect_detection": false}
+{"id": "neg_247", "category": "url_domain", "text": "https://example.com/zh/guide#安装", "expect_detection": false}
+{"id": "neg_248", "category": "url_domain", "text": "https://charts.example.io/stable/index.yaml", "expect_detection": false}
+{"id": "neg_249", "category": "url_domain", "text": "ftp://files.example.com/pub/README", "expect_detection": false}
+{"id": "neg_250", "category": "url_domain", "text": "proxy http://squid.internal:3128", "expect_detection": false}
+{"id": "neg_251", "category": "url_domain", "text": "保留段示例 (见 reserved_documentation 桶)", "expect_detection": false}
+{"id": "neg_252", "category": "doc_examples", "text": "connect \"host=<db-host> port=<db-port>\"", "expect_detection": false}
+{"id": "neg_253", "category": "doc_examples", "text": "secretRef: vault://kv/data/example", "expect_detection": false}
+{"id": "neg_254", "category": "doc_examples", "text": "api-key: ${secrets.API_KEY}", "expect_detection": false}
+{"id": "neg_255", "category": "doc_examples", "text": "TOKEN_FILE=/run/secrets/token", "expect_detection": false}
+{"id": "neg_256", "category": "doc_examples", "text": "use your-tenant-id here", "expect_detection": false}
+{"id": "neg_257", "category": "doc_examples", "text": "password: (from prompt)", "expect_detection": false}
+{"id": "neg_258", "category": "doc_examples", "text": "accessKey: <ACCESS_KEY>", "expect_detection": false}
+{"id": "neg_259", "category": "doc_examples", "text": "示例 2：sk-***-***", "expect_detection": false}
+{"id": "neg_260", "category": "doc_examples", "text": "写法：Bearer <jwt>", "expect_detection": false}
+{"id": "neg_261", "category": "doc_examples", "text": "placeholder: <<REDACTED>>", "expect_detection": false}
+{"id": "neg_262", "category": "doc_examples", "text": "config: {\"log\": \"info\", \"key\": null}", "expect_detection": false}
+{"id": "neg_263", "category": "doc_examples", "text": "示例输出：OK (200)", "expect_detection": false}
+{"id": "neg_264", "category": "doc_examples", "text": "替换 <your-domain> 为实际域名", "expect_detection": false}
+{"id": "neg_265", "category": "fake_credentials_weak", "text": "gho_example", "expect_detection": false}
+{"id": "neg_266", "category": "fake_credentials_weak", "text": "ghu_example", "expect_detection": false}
+{"id": "neg_267", "category": "fake_credentials_weak", "text": "ghr_example", "expect_detection": false}
+{"id": "neg_268", "category": "fake_credentials_weak", "text": "hf_token_example_long", "expect_detection": false}
+{"id": "neg_269", "category": "fake_credentials_weak", "text": "sk-proj-EXAMPLE", "expect_detection": false}
+{"id": "neg_270", "category": "fake_credentials_weak", "text": "sk-ant-example", "expect_detection": false}
+{"id": "neg_271", "category": "fake_credentials_weak", "text": "ASIAEXAMPLEKEY00", "expect_detection": false}
+{"id": "neg_272", "category": "fake_credentials_weak", "text": "ABIAEXAMPLEKEY00", "expect_detection": false}
+{"id": "neg_273", "category": "fake_credentials_weak", "text": "xoxs-example", "expect_detection": false}
+{"id": "neg_274", "category": "fake_credentials_weak", "text": "xoxa-example", "expect_detection": false}
+{"id": "neg_275", "category": "fake_credentials_weak", "text": "xapp-example", "expect_detection": false}
+{"id": "neg_276", "category": "fake_credentials_weak", "text": "xwfp-example", "expect_detection": false}
+{"id": "neg_277", "category": "fake_credentials_weak", "text": "glptt-example", "expect_detection": false}
+{"id": "neg_278", "category": "fake_credentials_weak", "text": "hooks.slack.com 例句", "expect_detection": false}
+{"id": "neg_279", "category": "fake_credentials_weak", "text": "dapiEXAMPLE", "expect_detection": false}
+{"id": "neg_280", "category": "fake_credentials_weak", "text": "lin_api_EXAMPLE", "expect_detection": false}
+{"id": "neg_281", "category": "fake_credentials_weak", "text": "cliEXAMPLE", "expect_detection": false}
+{"id": "neg_282", "category": "fake_credentials_weak", "text": "AIzaEXAMPLE", "expect_detection": false}
+{"id": "neg_283", "category": "fake_credentials_weak", "text": "rk_live_EXAMPLE", "expect_detection": false}
+{"id": "neg_284", "category": "fake_credentials_weak", "text": "sk_live_EXAMPLE", "expect_detection": false}
+{"id": "neg_285", "category": "fake_credentials_weak", "text": "github_pat_EXAMPLE", "expect_detection": false}
+{"id": "neg_286", "category": "fake_credentials_weak", "text": "密钥=example", "expect_detection": false}
+{"id": "neg_287", "category": "fake_credentials_weak", "text": "令牌：EXAMPLE", "expect_detection": false}
+{"id": "neg_288", "category": "fake_credentials_weak", "text": "凭据 example 文案", "expect_detection": false}
+{"id": "neg_289", "category": "scientific_data", "text": "半径 6.371e6 m", "expect_detection": false}
+{"id": "neg_290", "category": "scientific_data", "text": "频率 2.45 GHz", "expect_detection": false}
+{"id": "neg_291", "category": "scientific_data", "text": "浓度 1.0e-3 %", "expect_detection": false}
+{"id": "neg_292", "category": "scientific_data", "text": "误差 1e-11 s", "expect_detection": false}
+{"id": "neg_293", "category": "scientific_data", "text": "计数 1234567890 ± 42", "expect_detection": false}
+{"id": "neg_294", "category": "scientific_data", "text": "增益 0.9998", "expect_detection": false}
+{"id": "neg_295", "category": "scientific_data", "text": "斜率 -3.7e-4", "expect_detection": false}
+{"id": "neg_296", "category": "scientific_data", "text": "能量 6.626e-34 J·s", "expect_detection": false}
+{"id": "neg_297", "category": "scientific_data", "text": "采样 48000 Hz", "expect_detection": false}
+{"id": "neg_298", "category": "scientific_data", "text": "码率 1.5e7 bps", "expect_detection": false}
+{"id": "neg_299", "category": "scientific_data", "text": "质量比 1:3.6e2", "expect_detection": false}
+{"id": "neg_300", "category": "scientific_data", "text": " pH 7.40", "expect_detection": false}
+{"id": "neg_301", "category": "scientific_data", "text": "坐标 3.14e15 m", "expect_detection": false}
+{"id": "neg_302", "category": "scientific_data", "text": "带宽 1e9 Hz", "expect_detection": false}
+{"id": "neg_303", "category": "scientific_data", "text": "分辨 1.22e-7 rad", "expect_detection": false}
+{"id": "neg_304", "category": "random_ids", "text": "编号 ZX-99-887766", "expect_detection": false}
+{"id": "neg_305", "category": "random_ids", "text": "单号 YT4213887766", "expect_detection": false}
+{"id": "neg_306", "category": "random_ids", "text": "回执 RC-8877-6655", "expect_detection": false}
+{"id": "neg_307", "category": "random_ids", "text": "操作流水 OP202612130001", "expect_detection": false}
+{"id": "neg_308", "category": "random_ids", "text": "会话序号 0042", "expect_detection": false}
+{"id": "neg_309", "category": "random_ids", "text": "分片 17/64", "expect_detection": false}
+{"id": "neg_310", "category": "random_ids", "text": "批次号 LOT-88-12-34", "expect_detection": false}
+{"id": "neg_311", "category": "random_ids", "text": "卡位 A-12-34", "expect_detection": false}
+{"id": "neg_312", "category": "random_ids", "text": "库位 K-09-88-2", "expect_detection": false}
+{"id": "neg_313", "category": "random_ids", "text": "模板 TPL-1001", "expect_detection": false}
+{"id": "neg_314", "category": "random_ids", "text": "规则 R-77", "expect_detection": false}
+{"id": "neg_315", "category": "random_ids", "text": "案例 CS-2026-0042", "expect_detection": false}
+{"id": "neg_316", "category": "shell_env", "text": "sed -i 's/old/new/g' file", "expect_detection": false}
+{"id": "neg_317", "category": "shell_env", "text": "awk '{print $2}' data.txt", "expect_detection": false}
+{"id": "neg_318", "category": "shell_env", "text": "tar -czf backup.tgz /data", "expect_detection": false}
+{"id": "neg_319", "category": "shell_env", "text": "chown app:app /run/app", "expect_detection": false}
+{"id": "neg_320", "category": "shell_env", "text": "mount | grep /data", "expect_detection": false}
+{"id": "neg_321", "category": "shell_env", "text": "journalctl -u app -f", "expect_detection": false}
+{"id": "neg_322", "category": "shell_env", "text": "ip -brief addr show", "expect_detection": false}
+{"id": "neg_323", "category": "shell_env", "text": "ss -tlnp | head", "expect_detection": false}
+{"id": "neg_324", "category": "shell_env", "text": "curl -s https://api.example.com/health", "expect_detection": false}
+{"id": "neg_325", "category": "shell_env", "text": "htop -u app", "expect_detection": false}
+{"id": "neg_326", "category": "shell_env", "text": "setx PATH \"%PATH%;C:\\tools\"", "expect_detection": false}
+{"id": "neg_327", "category": "shell_env", "text": "Get-ChildItem Env: | head", "expect_detection": false}
+{"id": "neg_328", "category": "shell_env", "text": "echo \"export EDITOR=vim\" >> ~/.bashrc", "expect_detection": false}
+{"id": "neg_329", "category": "shell_env", "text": "chmod +x deploy.sh", "expect_detection": false}
+{"id": "neg_330", "category": "shell_env", "text": "pushd /var/log && ls", "expect_detection": false}
+{"id": "neg_331", "category": "shell_env", "text": "xargs -n1 echo < list.txt", "expect_detection": false}
+{"id": "neg_332", "category": "config_examples", "text": "{\"enable_tls\": true, \"min_version\": \"1.3\"}", "expect_detection": false}
+{"id": "neg_333", "category": "config_examples", "text": "workers: 8\nmax_connections: 500", "expect_detection": false}
+{"id": "neg_334", "category": "config_examples", "text": "[server]\nbind = \"0.0.0.0:8443\"\nbacklog = 1024", "expect_detection": false}
+{"id": "neg_335", "category": "config_examples", "text": "LOG_LEVEL=debug\nMETRICS_PORT=9100", "expect_detection": false}
+{"id": "neg_336", "category": "config_examples", "text": "{\"queue\": {\"type\": \"memory\", \"limit\": 1000}}", "expect_detection": false}
+{"id": "neg_337", "category": "config_examples", "text": "replicas: 3\nstrategy: rolling", "expect_detection": false}
+{"id": "neg_338", "category": "config_examples", "text": "interval = \"5m\"\njitter = \"30s\"", "expect_detection": false}
+{"id": "neg_339", "category": "config_examples", "text": "db:\n  pool: 10\n  idle: 60", "expect_detection": false}
+{"id": "neg_340", "category": "config_examples", "text": "{\"name\": \"edge\", \"weight\": 0.5}", "expect_detection": false}
+{"id": "neg_341", "category": "config_examples", "text": "log_format = \"json\"\ntz = \"Asia/Shanghai\"", "expect_detection": false}
+{"id": "neg_342", "category": "config_examples", "text": "retry:\n  max: 5\n  policy: exponential", "expect_detection": false}
+{"id": "neg_343", "category": "sql_schema", "text": "SELECT id, name FROM products WHERE price > 100 ORDER BY id LIMIT 10;", "expect_detection": false}
+{"id": "neg_344", "category": "sql_schema", "text": "CREATE VIEW v_active AS SELECT * FROM users WHERE active;", "expect_detection": false}
+{"id": "neg_345", "category": "sql_schema", "text": "TRUNCATE TABLE staging_metrics;", "expect_detection": false}
+{"id": "neg_346", "category": "sql_schema", "text": "CREATE TYPE order_status AS ENUM ('open','closed');", "expect_detection": false}
+{"id": "neg_347", "category": "sql_schema", "text": "EXPLAIN ANALYZE SELECT 1;", "expect_detection": false}
+{"id": "neg_348", "category": "sql_schema", "text": "VACUUM ANALYZE orders;", "expect_detection": false}
+{"id": "neg_349", "category": "sql_schema", "text": "CREATE TRIGGER trg_touch BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE fn_touch();", "expect_detection": false}
+{"id": "neg_350", "category": "sql_schema", "text": "COMMENT ON COLUMN users.phone IS 'masked at write time';", "expect_detection": false}
+{"id": "neg_351", "category": "sql_schema", "text": "SELECT pg_size_pretty(pg_total_relation_size('events'));", "expect_detection": false}
+{"id": "neg_352", "category": "sql_schema", "text": "BEGIN; UPDATE quotas SET used = used + 1; COMMIT;", "expect_detection": false}
+{"id": "neg_353", "category": "model_api_names", "text": "接口 GET /healthz 返回 200", "expect_detection": false}
+{"id": "neg_354", "category": "model_api_names", "text": "库 pandas 2.2.3", "expect_detection": false}
+{"id": "neg_355", "category": "model_api_names", "text": "框架 django==5.1.1", "expect_detection": false}
+{"id": "neg_356", "category": "model_api_names", "text": "qwen2.5-0.5b-instruct 量化版", "expect_detection": false}
+{"id": "neg_357", "category": "model_api_names", "text": "模型卡 modelscope.cn/Qwen/Qwen2.5-0.5B-Instruct", "expect_detection": false}
+{"id": "neg_358", "category": "model_api_names", "text": "embedding 模型 bge-small-zh-v1.5", "expect_detection": false}
+{"id": "neg_359", "category": "model_api_names", "text": "运行 uvicorn app:main --port 9000", "expect_detection": false}
+{"id": "neg_360", "category": "model_api_names", "text": "包 langchain-core==0.3.7", "expect_detection": false}
+{"id": "neg_361", "category": "model_api_names", "text": "端点 POST /v1/messages", "expect_detection": false}
+{"id": "neg_362", "category": "model_api_names", "text": "服务 NATS topics：events.detect", "expect_detection": false}
+{"id": "neg_363", "category": "model_api_names", "text": "模块包名 privacy.detectors", "expect_detection": false}
+{"id": "neg_364", "category": "model_api_names", "text": "类名 SpanResolver", "expect_detection": false}
+{"id": "neg_365", "category": "model_api_names", "text": "函数 detect_entities(text)", "expect_detection": false}
+{"id": "neg_366", "category": "model_api_names", "text": "OpenAI 兼容端点 /v1/completions 说明", "expect_detection": false}
+{"id": "neg_367", "category": "model_api_names", "text": "CLI 用法 vault-engine scrub INFILE", "expect_detection": false}
+{"id": "neg_368", "category": "network_like", "text": " malformed ::::::", "expect_detection": false}
+{"id": "neg_369", "category": "network_like", "text": "版本样例 192.168.1", "expect_detection": false}
+{"id": "neg_370", "category": "network_like", "text": "三段数字 10.20.30", "expect_detection": false}
+{"id": "neg_371", "category": "network_like", "text": "四段 999.1.2.3", "expect_detection": false}
+{"id": "neg_372", "category": "network_like", "text": "掩码写法 /24", "expect_detection": false}
+{"id": "neg_373", "category": "network_like", "text": "MAC 样例 00-00-00-00-00-00", "expect_detection": false}
+{"id": "neg_374", "category": "network_like", "text": "MAC 样例 ff:ff:ff:ff:ff:ff", "expect_detection": false}
+{"id": "neg_375", "category": "network_like", "text": "纯数字 0000000000", "expect_detection": false}
+{"id": "neg_376", "category": "network_like", "text": "学号样例 2026000000", "expect_detection": false}
+{"id": "neg_377", "category": "network_like", "text": "票号 9999999999", "expect_detection": false}
+{"id": "neg_378", "category": "network_like", "text": "hex 0000ffff", "expect_detection": false}
+{"id": "neg_379", "category": "network_like", "text": "binary 0b10101010", "expect_detection": false}
+{"id": "neg_380", "category": "network_like", "text": "octal 0o777", "expect_detection": false}
+{"id": "neg_381", "category": "network_like", "text": "UTF-8 码点 U+1F600", "expect_detection": false}
+{"id": "neg_382", "category": "network_like", "text": "区间 [0,1)", "expect_detection": false}
+{"id": "neg_383", "category": "network_like", "text": "百分比 99.99%", "expect_detection": false}
+{"id": "neg_384", "category": "cjk_context", "text": "秘钥轮换窗口为每周二 02:00。", "expect_detection": false}
+{"id": "neg_385", "category": "cjk_context", "text": "凭证上传通道已关闭。", "expect_detection": false}
+{"id": "neg_386", "category": "cjk_context", "text": "授权码单次有效期为 10 分钟。", "expect_detection": false}
+{"id": "neg_387", "category": "cjk_context", "text": "访问密钥分两级：读写与只读。", "expect_detection": false}
+{"id": "neg_388", "category": "cjk_context", "text": "接口密钥需绑定白名单。", "expect_detection": false}
+{"id": "neg_389", "category": "cjk_context", "text": "私钥绝不应出现在日志中。", "expect_detection": false}
+{"id": "neg_390", "category": "cjk_context", "text": "口令复杂度不做强制要求。", "expect_detection": false}
+{"id": "neg_391", "category": "cjk_context", "text": "该账号已启用双因子认证。", "expect_detection": false}
+{"id": "neg_392", "category": "cjk_context", "text": "令牌过期后需重新登录。", "expect_detection": false}
+{"id": "neg_393", "category": "cjk_context", "text": "凭证夹带将被网关拦截。", "expect_detection": false}
+{"id": "neg_394", "category": "cjk_context", "text": "密码找回流程见帮助中心。", "expect_detection": false}
+{"id": "neg_395", "category": "cjk_context", "text": "签名密钥与加密密钥分离存放。", "expect_detection": false}
+{"id": "neg_396", "category": "format_perfect_fake", "text": "ghp_gmoxy0vdxzn8ikd55jz51hqftx7n3n76csw3", "expect_detection": true}
+{"id": "neg_397", "category": "format_perfect_fake", "text": "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", "expect_detection": true}
+{"id": "neg_398", "category": "format_perfect_fake", "text": "hf_ni5k8321rkbux9z8jblbx1ie09kxbq95js", "expect_detection": true}
+{"id": "neg_399", "category": "format_perfect_fake", "text": "sk-os6xyxcno31kx6o8l3jbrt2u56ey316m3csib3r8s2szl84q", "expect_detection": true}
+{"id": "neg_400", "category": "format_perfect_fake", "text": "AKIAC803R7MW5LZEGPVT", "expect_detection": true}
+{"id": "neg_401", "category": "format_perfect_fake", "text": "LTAIr7nzosuf1lgf5q0m", "expect_detection": true}
+{"id": "neg_402", "category": "format_perfect_fake", "text": "glpat-5hf7wq85dzxi2r2nk8f6", "expect_detection": true}
+{"id": "neg_403", "category": "format_perfect_fake", "text": "cli_5bk38c794rgg5c0h", "expect_detection": true}
+{"id": "neg_404", "category": "format_perfect_fake", "text": "ab18Q~~aa_99~~-.Z-_aZaZ00a0a~99Z~0_~-.ZZ", "expect_detection": true}
+{"id": "neg_405", "category": "format_perfect_fake", "text": "密钥：G83HE62DFAG6", "expect_detection": true}
+{"id": "neg_406", "category": "format_perfect_fake", "text": "password=0g1abeh8haa1cda2", "expect_detection": true}
+{"id": "neg_407", "category": "format_perfect_fake", "text": "Bearer hathjv5uml48kmnqgsomu2h758ci41lqz6hvrkm8", "expect_detection": true}

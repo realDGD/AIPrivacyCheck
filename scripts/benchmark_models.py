@@ -233,7 +233,7 @@ def detect_adapter(model_dir: Path) -> str | None:
     joined = ",".join(str(a) for a in archs)
     if "ForTokenClassification" in joined:
         return "token_cls"
-    if "ForCausalLM" in joined:
+    if "ForCausalLM" in joined or "ForConditionalGeneration" in joined:
         return "generative"
     return None
 
@@ -292,12 +292,13 @@ def run_gliner(model_dir: Path, samples: list, device: str, notes: list):
 
     labels = list(set(GLiNERDetector.GLINER_LABEL_MAP.keys()))
     detector = GLiNERDetector(Path("/tmp"))
+    threshold = GLiNERDetector.GLINER_DEFAULT_THRESHOLD
     latencies = []
     out = []
     for sample in samples:
         text = sample["text"]
         t0 = _time.perf_counter()
-        raw_entities = model.predict_entities(text, labels, threshold=0.40)
+        raw_entities = model.predict_entities(text, labels, threshold=threshold)
         latencies.append((_time.perf_counter() - t0) * 1000.0)
         entities = []
         for ent in raw_entities:
@@ -326,16 +327,104 @@ def run_ms_ner(model_dir: Path, samples: list, device: str, notes: list):
                     device="cuda:0" if device == "cuda" else "cpu")
     latencies = []
     out = []
+    failures = 0
     for sample in samples:
         text = sample["text"]
         t0 = _time.perf_counter()
-        raw = pipe(input=text)
+        try:
+            raw = pipe(input=text)
+        except Exception as exc:
+            # Legacy NER pipelines cap at 512 positions: long documents crash
+            # inside the model. Record as a model limitation (empty prediction),
+            # never as a silent skip.
+            failures += 1
+            latencies.append((_time.perf_counter() - t0) * 1000.0)
+            out.append([])
+            continue
         latencies.append((_time.perf_counter() - t0) * 1000.0)
         entities = []
         for ent in extract_entities_from_output(raw, text):
             mapped = RANER_TYPE_MAP.get(ent["label"], ent["label"])
             entities.append({"type": mapped, "start": ent["start"], "end": ent["end"], "text": ent["text"]})
         out.append(entities)
+    if failures:
+        notes.append(f"{failures}/{len(samples)} samples crashed the 512-position model")
+    return out, latencies
+
+
+def run_native_token_cls(model_dir: Path, samples: list, device: str, notes: list):
+    """Token classification through a runtime that natively registers the
+    architecture (e.g. openai_privacy_filter under transformers >=5.6).
+    The repo ships no custom code, so no trust_remote_code is involved."""
+    import time as _time
+
+    import torch  # type: ignore
+    from transformers import AutoModelForTokenClassification, AutoTokenizer  # type: ignore
+
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, use_fast=True)
+    model = AutoModelForTokenClassification.from_pretrained(str(model_dir), local_files_only=True)
+    model.to(device if device in ("cuda", "cpu") else "cpu")
+    model.eval()
+
+    hf_config = _read_json(model_dir / "config.json") or {}
+    id2label = {int(k): v for k, v in (hf_config.get("id2label") or {}).items()}
+    has_e_tags = any(str(v).startswith(("B-", "I-", "E-", "S-")) for v in id2label.values())
+
+    out = []
+    latencies = []
+    with torch.no_grad():
+        for sample in samples:
+            text = sample["text"]
+            t0 = _time.perf_counter()
+            inputs = tokenizer(text, return_tensors="pt", return_offsets_mapping=True,
+                               truncation=True, max_length=8192)
+            offset_mapping = inputs.pop("offset_mapping")[0].tolist()
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            logits = model(**inputs).logits[0]
+            labels = logits.argmax(dim=-1).tolist()
+            latencies.append((_time.perf_counter() - t0) * 1000.0)
+
+            spans = []
+            open_span = None
+            for (tok_start, tok_end), label_id in zip(offset_mapping, labels):
+                if tok_start == tok_end:
+                    continue
+                raw_label = id2label.get(label_id, "O")
+                if has_e_tags and raw_label != "O":
+                    prefix, body = raw_label.split("-", 1)
+                else:
+                    prefix, body = ("S", raw_label) if raw_label != "O" else ("O", "")
+                if prefix == "S":
+                    if open_span:
+                        spans.append(open_span)
+                        open_span = None
+                    spans.append([tok_start, tok_end, body])
+                elif prefix == "B":
+                    if open_span:
+                        spans.append(open_span)
+                    open_span = [tok_start, tok_end, body]
+                elif prefix == "I" and open_span and open_span[2] == body:
+                    open_span[1] = tok_end
+                elif prefix == "E":
+                    if open_span and open_span[2] == body:
+                        open_span[1] = tok_end
+                        spans.append(open_span)
+                        open_span = None
+                    else:
+                        spans.append([tok_start, tok_end, body])
+            if open_span:
+                spans.append(open_span)
+
+            entities = []
+            for s, e, body in spans:
+                frag = text[s:e].strip()
+                if not frag:
+                    continue
+                entities.append({
+                    "type": resolve_model_type(body, {}),
+                    "start": s, "end": e, "text": frag,
+                })
+            out.append(entities)
     return out, latencies
 
 
@@ -367,8 +456,11 @@ def run_token_cls(model_dir: Path, samples: list, device: str, notes: list):
             text = sample["text"]
             t0 = _time.perf_counter()
             # Character-level models need no word alignment; batch of one.
+            model_max = getattr(tokenizer, "model_max_length", None) or 512
+            if model_max > 100000:  # sentinel for unset
+                model_max = 512
             inputs = tokenizer(text, return_tensors="pt", return_offsets_mapping=True,
-                               truncation=True, max_length=4096)
+                               truncation=True, max_length=model_max)
             offset_mapping = inputs.pop("offset_mapping")[0].tolist()
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
             logits = model(**inputs).logits[0]
@@ -572,6 +664,9 @@ def main() -> int:
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     parser.add_argument("--limit", type=int, default=0, help="Evaluate only first N samples (0 = all)")
     parser.add_argument("--json-out", default=None, help="Write raw results JSON to this path")
+    parser.add_argument("--force-adapter", default=None,
+                        help="Override adapter detection (e.g. native_token_cls for a "
+                             "benchmark-only runtime that natively registers the arch)")
     args = parser.parse_args()
 
     try:
@@ -623,8 +718,9 @@ def main() -> int:
                 "gliner": run_gliner,
                 "ms_ner": run_ms_ner,
                 "token_cls": run_token_cls,
+                "native_token_cls": run_native_token_cls,
                 "generative": run_generative,
-            }[adapter]
+            }[args.force_adapter or adapter]
             predictions, sample_latencies = runner(model_dir, samples, device, notes)
         except Exception as exc:
             print(f"\n>>> {name}: FAILED ({type(exc).__name__}: {exc})")
