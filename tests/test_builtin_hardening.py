@@ -170,7 +170,7 @@ class VendorRuleAdditionsTests(unittest.TestCase):
     covers them all; prefix-anchored, zero-FP class)."""
 
     def test_google_api_key(self):
-        key = "AIzaSyA1234567890abcdefghijklmnopqrstuV"
+        key = "AIza" + "SyA1234567890" + "abcdefghijklmnopqrstuV"  # AIza + 35
         self.assertIn(("SECRET", key), _detect(f"key={key}"))
 
     def test_stripe_keys(self):

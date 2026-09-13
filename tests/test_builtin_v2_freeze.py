@@ -1,9 +1,10 @@
-"""Built-in v2 freeze gate (v0.6.5).
+"""Built-in v2 freeze gate (v0.6.5/v0.6.6).
 
 Freezes the deterministic fast path with three permanent gates:
-  1. Negative corpus FPR < 1% (391 samples across 14 adversarial categories;
-     format-perfect fakes and RFC-2606 reserved-documentation samples are
-     scored in their own buckets, never folded into FPR).
+  1. Negative corpus FPR < 1% (407 samples total: 388 strict-negative samples
+     across 14 adversarial categories; format-perfect fakes (14) and RFC-2606
+     reserved-documentation samples (5) are scored in their own buckets,
+     never folded into strict-negative FPR).
   2. Placeholder idempotence on the 100-doc corpus:
      mask(mask(text)) == mask(text), zero new hits, zero placeholder hits.
   3. Performance: linear scaling to 128KB with no pathological backtracking.
@@ -46,17 +47,24 @@ def _mask(text: str) -> str:
 
 
 class NegativeCorpusFPRGate(unittest.TestCase):
+    def test_exact_corpus_composition(self):
+        docs = [json.loads(l) for l in NEGATIVE_CORPUS.read_text(encoding="utf-8").splitlines() if l.strip()]
+        self.assertEqual(len(docs), 407, "Total fixture docs must be exactly 407")
+        strict_neg = [r for r in docs if r["category"] not in SKIP_CATEGORIES]
+        self.assertEqual(len(strict_neg), 388, "Strict negative docs must be exactly 388")
+        reserved = [r for r in docs if r["category"] == "reserved_documentation"]
+        self.assertEqual(len(reserved), 5, "Reserved documentation docs must be exactly 5")
+        fakes = [r for r in docs if r["category"] == "format_perfect_fake"]
+        self.assertEqual(len(fakes), 14, "Format-perfect fake docs must be exactly 14")
+
     def test_fpr_below_one_percent(self):
         d = MultilingualRuleDetector()
         docs = [json.loads(l) for l in NEGATIVE_CORPUS.read_text(encoding="utf-8").splitlines() if l.strip()]
         clear = [r for r in docs if r["category"] not in SKIP_CATEGORIES]
-        self.assertGreaterEqual(len(clear), 380, "负样本语料规模不足")
+        self.assertEqual(len(clear), 388, "负样本语料规模不符 (expected 388 strict negatives)")
         fp_docs = [(r["id"], r["category"], r["text"][:60])
                    for r in clear if d.detect(r["text"])]
-        self.assertLess(
-            len(fp_docs) / len(clear), 0.01,
-            f"Negative-corpus FPR >= 1%: {fp_docs}",
-        )
+        self.assertEqual(len(fp_docs), 0, f"Strict-negative FPR must be 0/388: {fp_docs}")
 
     def test_format_perfect_fakes_are_detected(self):
         d = MultilingualRuleDetector()
