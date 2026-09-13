@@ -1,4 +1,4 @@
-"""Tests for Selective Model Downloader (v0.6.7).
+"""Tests for Selective Model Downloader (v0.6.8).
 
 Verifies:
 1. Forbidden models (MemPrivacy, AIguard, Qwen, RANER, etc.) cannot be downloaded.
@@ -201,6 +201,80 @@ class SelectiveDownloaderTests(unittest.TestCase):
             # Temp file must have been deleted
             self.assertFalse(temp_path.exists(), "temp_download file should be cleaned up on error")
             self.assertFalse(target_path.exists(), "target_path should not exist on error")
+
+    def test_selective_downloader_imports_in_current_python(self):
+        """Section 7: True subprocess import gate for benchmark scripts."""
+        import subprocess
+        code = (
+            "import sys; "
+            f"sys.path.insert(0, {str(sys_path)!r}); "
+            "import selective_downloader; "
+            "import benchmark_cache; "
+            "import benchmark_scoring; "
+            "import model_integrity; "
+            "print('ALL_BENCHMARK_MODULES_IMPORTED')"
+        )
+        res = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("ALL_BENCHMARK_MODULES_IMPORTED", res.stdout)
+
+        # Check Python 3.12 if available on host
+        py312 = shutil.which("python3.12")
+        if py312:
+            res312 = subprocess.run([py312, "-c", code], capture_output=True, text=True, check=True)
+            self.assertIn("ALL_BENCHMARK_MODULES_IMPORTED", res312.stdout)
+        else:
+            # Documented: Not Executed: Python 3.12 interpreter unavailable
+            pass
+
+    def test_manifest_path_traversal_rejected(self):
+        """Section 9: Manifest containing '../' or absolute paths must be rejected."""
+        target = self.tmp_dir / "gliner-pii-edge-traversal"
+        target.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "files": [
+                {"path": "../evil.bin", "size": 10, "sha256": "0" * 64},
+                {"path": "/etc/passwd", "size": 10, "sha256": "1" * 64},
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        ok, msg, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok)
+        self.assertIn("path traversal forbidden", msg)
+
+    def test_manifest_missing_sha_rejected(self):
+        """Section 8: Manifest entries without sha256 must be rejected."""
+        target = self.tmp_dir / "gliner-pii-edge-nosha"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "model.bin").write_bytes(b"content")
+        manifest = {
+            "files": [
+                {"path": "model.bin", "size": 7},  # missing sha256
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        ok, msg, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok)
+        self.assertIn("invalid manifest schema", msg)
+
+    def test_manifest_negative_size_rejected(self):
+        """Section 8: Manifest entries with negative size must be rejected."""
+        target = self.tmp_dir / "gliner-pii-edge-negsize"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "model.bin").write_bytes(b"content")
+        manifest = {
+            "files": [
+                {"path": "model.bin", "size": -5, "sha256": "0" * 64},
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        ok, msg, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok)
+        self.assertIn("invalid 'size'", msg)
 
 
 if __name__ == "__main__":

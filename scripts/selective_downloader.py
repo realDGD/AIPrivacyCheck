@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Selective Model Downloader for AI Privacy Check Benchmarks (v0.6.7).
+"""Selective Model Downloader for AI Privacy Check Benchmarks (v0.6.8).
 
 Strict selective download policy:
 - NEVER downloads the entire repository snapshot by default.
@@ -19,9 +19,16 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import urllib.request
 import urllib.error
+
+from model_integrity import (
+    ModelIntegrityError,
+    sha256_file,
+    validate_manifest_schema,
+    verify_existing_model_integrity,
+)
 
 # Allowed models for selective download in benchmark
 DOWNLOADABLE_MODEL_CATALOG = {
@@ -68,7 +75,7 @@ def query_modelscope_repo_files(repo_id: str, revision: str = "master", root: st
     url = f"https://modelscope.cn/api/v1/models/{repo_id}/repo/files?Revision={revision}"
     if root:
         url += f"&Root={urllib.parse.quote(root)}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.7"})
+    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.8"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
         if data.get("Code") != 200:
@@ -107,63 +114,6 @@ def categorize_files(
     return required, optional, rejected
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def verify_existing_model_integrity(
-    target_dir: Path,
-    required_names: Set[str],
-) -> Tuple[bool, str, Optional[Dict], List[str]]:
-    """Verifies target_dir against download-manifest.json.
-
-    Returns: (is_valid: bool, status_message: str, manifest_data: dict|None, corrupted_files: list)
-    """
-    manifest_file = target_dir / "download-manifest.json"
-    if not manifest_file.is_file():
-        return False, "missing download-manifest.json", None, list(required_names)
-
-    try:
-        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return False, f"corrupted download-manifest.json ({exc})", None, list(required_names)
-
-    files_entry = manifest.get("files")
-    manifest_files: Dict[str, Dict[str, Any]] = {}
-    if isinstance(files_entry, list):
-        for item in files_entry:
-            if isinstance(item, dict) and "path" in item:
-                manifest_files[item["path"]] = item
-    elif isinstance(files_entry, dict):
-        manifest_files = files_entry
-
-    corrupted = []
-    for fname in sorted(required_names):
-        fpath = target_dir / fname
-        if not fpath.is_file():
-            corrupted.append(fname)
-            continue
-        entry = manifest_files.get(fname)
-        if not entry:
-            corrupted.append(fname)
-            continue
-        expected_size = entry.get("size")
-        expected_sha = entry.get("sha256")
-        if expected_size is not None and fpath.stat().st_size != expected_size:
-            corrupted.append(fname)
-            continue
-        if expected_sha is not None and sha256_file(fpath) != expected_sha:
-            corrupted.append(fname)
-            continue
-
-    if corrupted:
-        return False, f"{len(corrupted)} required file(s) failed size/hash integrity: {corrupted}", manifest, corrupted
-
-    return True, f"all {len(required_names)} required files verified against manifest", manifest, []
 
 
 def download_single_file(
@@ -189,7 +139,7 @@ def download_single_file(
         temp_path.unlink(missing_ok=True)
 
     url = f"https://modelscope.cn/api/v1/models/{repo_id}/repo?Revision={revision}&FilePath={urllib.parse.quote(remote_path)}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.7"})
+    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.8"})
 
     h = hashlib.sha256()
     downloaded = 0
@@ -352,6 +302,10 @@ def ensure_selective_model(
     manifest_data = {
         "repo_id": repo_id,
         "revision": revision,
+        "requested_revision": revision,
+        "resolved_revision": None,  # Upstream immutable revision not available through current endpoint
+        "revision_provenance_note": "Upstream immutable revision not available through the current endpoint.",
+        "integrity_policy": "local_content_integrity_fingerprint",
         "files": downloaded_files_record,
         "total_download_bytes": total_downloaded,
         "purpose": "benchmark",
