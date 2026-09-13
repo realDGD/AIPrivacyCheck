@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.5)
+# 架构说明 (v0.6.6)
 
 ## 设计目标
 
@@ -23,6 +23,8 @@
 19. **模型运行时依赖契约与安装链净化 (v0.6.4)**：在 Model Catalog 的 `ModelDescriptor` 上引入 `runtime_dependencies` 声明字段，安装流程由 `install_isolated_runtime` → `ensure_model_runtime_dependencies` → 下载/导入 → 完整性校验 → 真实冒烟推理构成完整链路；共享 torch-cpu/torch-cuda 运行时保持不动，模型专属缺失依赖（如 SiameseUIE 的 `addict`/`datasets`/`scipy`/`Pillow`/`simplejson`/`sortedcontainers`，经 ModelScope 1.40 元数据与真实 pipeline 加载实证）通过目标 venv 解释器 `importlib` 探测后增量补装，已满足即快速跳过，绝不重装 PyTorch。共享运行时 transformers 固定 `>=4.51,<5`（Qwen3 下限 / ModelScope legacy `transformers.onnx` 上限）。安装与导入阶段对模型 configuration.json 净化 `allow_remote`/`plugins` 字段，worker 不传 `trust_remote_code`，仅经 ModelScope 内建类加载，杜绝模型目录远程代码执行；并适配 ModelScope 新版 SiameseUIE 输出结构（按 schema 分组嵌套列表 + `offset` 半开区间），修复加载成功但实体恒为空的缺陷。
 
 19a. **Base Runtime Contract、预加载安全门与分层基准 (v0.6.5)**：运行时"已验证即跳过"路径追加基础依赖契约核查与增量迁移（transformers>=4.51,<5，绝不重装 torch）；`privacy/model_security.py` 在任意 worker 加载前净化模型 configuration.json 的远程代码声明；GLiNER 阈值收敛至 `GLiNERDetector.GLINER_DEFAULT_THRESHOLD` 单一定义并依据 100 文档分层语料再调优至 0.50；`tests/fixtures/privacy_benchmark_v2_100.jsonl` 提供 Detection / Should-Redact / 语义三层分离的冻结评测语料，公共联系人（10086、8.8.8.8、test@example.com 等）按"检测正确、不应脱敏"计分。
+
+19b. **Benchmark v2 评分修复、预测缓存与模型精简按需下载 (v0.6.6)**：修复语义评分器在显式负样本黄金实体上的计分逻辑（重叠召回时仅增加 overreach 与 fp，tp 严格保持不变）；将原 redaction_acc 准确更名为 redaction_eligibility_coverage（redCov），精确度量敏感实体的召回覆盖；GLiNER 标签顺序定义为确定性不可变元组 GLINER_LABELS；建立 `benchmark-cache/` 持久化预测缓存，实现单次模型推理、毫秒级离线阈值扫频；建立 `selective_downloader`，严禁全量拉取 ModelScope 快照，按需下载必需权重与配置，节省 60%+ 带宽；统一 Built-in v2 负样本评测口径为 407 条，Strict-negative FPR 严格为 0 / 388 (0.0%)。
 
 ## 系统架构拓扑
 

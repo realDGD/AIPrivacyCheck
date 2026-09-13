@@ -2,10 +2,19 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.5`（fnOS Native 原生应用）
+当前版本：`0.6.6`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **Benchmark v2 评分修复与评测基准可复现性加固 (v0.6.6)**：
+  - **语义评分与显式负样本逻辑修复**：修复 `score_semantic()` 在显式负样本（`sensitive=false`）黄金实体上的计分逻辑——模型重叠检出时仅增加 `overreach` 与 `fp`，绝对不再错误累加 `tp`；重叠与类型判断严格限定在 `sensitive=true` 实体集合内。
+  - **检测与脱敏指标严谨重命名**：将原 `redaction_acc`（脱敏准确率）更名为 `redaction_eligibility_coverage`（脱敏资格覆盖率，命令行输出 `redCov`），准确度量在所有标注为 `should_redact=true` 的法定/敏感实体中被系统成功发现的比例；保留 `redaction_acc` 作为向后兼容别名。公共实体（如 10086、8.8.8.8 等 `should_redact=false`）在 Layer A 中正确计入 Detection TP（检出正确），绝不再误记为 FP。
+  - **GLiNER 标签顺序确定性**：将 GLiNER 实体标签列表由无序的 `list(set(...))` 升级为冻结的有序元组 `GLiNERDetector.GLINER_LABELS`，彻底杜绝 Python hash 随机化导致的轻微推理波动；单一推理基准与生产环境完全保持一致。
+  - **GLiNER 阈值单次推理验证与离线重评分**：GLiNER 在基准测试中以最低阈值（0.30）执行单次推理，并由可持久化的 Raw Prediction Cache 支持毫秒级离线阈值扫频（0.35 - 0.65）；实证表明在 0.50 阈值下消除自然叙述下用户名混淆且维持极佳 Critical FN，确认为最优生产阈值并再次冻结。
+  - **Raw Prediction Cache 评测缓存**：建立 `benchmark-cache/` 持久化预测缓存，深度绑定语料哈希、模型哈希、运行时版本与参数签名，未来仅调整评分逻辑时无需反复加载或重新运行耗时模型。
+  - **模型按需精简下载（Selective Downloader）**：严禁全量下载 ModelScope 快照，仅下载推理必需的 PyTorch 模型文件（`safetensors` / `bin`、配置、分词器），自动过滤 ONNX、README 与 Git 元数据，节省 60%+ 带宽；基准测试脚本强制要求显式 `--download-missing` 参数。
+  - **Built-in v2 负样本基准冻结核验**：统一全库 negative 语料统计口径为 407 条（388 条严格负样本 + 5 条 RFC-2606 保留文档域名 + 14 条高置信虚构样本），Built-in 规则在严格负样本上的假阳性率严格保证为 `Strict-negative FPR = 0 / 388 (0.0%)`。
+  - **历史模型评分状态标注**：历史模型（MemPrivacy、OpenAI Privacy Filter、AIguard、Qwen 等）在 v0.6.6 前的评测得分明确标注为“Historical / pre-v0.6.6 scorer”，其中涉及负样本重叠的 MemPrivacy 语义评分标记为“INVALIDATED FOR FINAL COMPARISON”，杜绝不同口径评分混淆。
 - **Base Runtime Contract 与预加载安全门 (v0.6.5)**：
   - **Base Runtime Contract**：运行时"已验证即跳过"路径新增基础依赖契约核查（modelscope / torch / transformers>=4.51,<5 / accelerate / gliner / numpy / packaging / tqdm）。历史遗留 runtime（如 transformers 5.16.1）即使 torch Probe 通过也会被识别，并仅对违约包做增量修复（pip install "transformers>=4.51,<5"），绝不重装 torch、不重建 venv；缺 torch 的损坏环境拒绝增量修复并提示重建。
   - **预加载模型远程代码安全门**：新增 `privacy/model_security.py`，在任何 worker 加载模型前对 configuration.json 净化 `allow_remote`/`plugins` 声明；GLiNER / MemPrivacy / SiameseUIE 的 load+detect、冒烟测试与安装期净化共用同一实现。v0.6.3 及更早版本安装的存量模型在升级后首次使用时即被自动净化。
@@ -141,7 +150,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.4_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.6_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 
