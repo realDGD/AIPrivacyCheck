@@ -49,10 +49,19 @@ from privacy.python_runtime import (
     UV_VERSION,
     build_uv_env,
     ensure_managed_python,
+    ensure_managed_python_info,
     find_uv,
     find_uv_info,
     probe_base_runtime_contract,
     probe_python_capabilities,
+)
+from privacy.runtime_sources import (
+    CERNET_PYPI_INDEX,
+    OFFICIAL_PYPI_INDEX,
+    get_torch_index_url,
+    is_integrity_or_corruption_error,
+    is_retryable_network_error,
+    format_user_friendly_network_error,
 )
 from privacy.runtime_env import build_runtime_env, prepare_runtime_dirs
 from privacy.worker_client import get_worker_client
@@ -539,23 +548,115 @@ def _default_dependency_runner(
     timeout: int = 15,
 ) -> Tuple[int, str, str]:
     try:
-        res = subprocess.run(
-            cmd,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        return res.returncode, res.stdout, res.stderr
+        run_kwargs: Dict[str, Any] = {"check": False}
+        if env is not None:
+            run_kwargs["env"] = env
+        if cwd is not None:
+            run_kwargs["cwd"] = cwd
+        try:
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                **run_kwargs,
+            )
+        except TypeError:
+            # Fallback for simple unit test mocks with signature (cmd, check=..., env=...)
+            res = subprocess.run(cmd, **run_kwargs)
+        retcode = getattr(res, "returncode", 0)
+        stdout = getattr(res, "stdout", "") or ""
+        stderr = getattr(res, "stderr", "") or ""
+        return retcode, stdout, stderr
     except FileNotFoundError:
         return 127, "", f"command not found: {cmd[0] if cmd else ''}"
     except subprocess.TimeoutExpired:
         return 124, "", "dependency command timed out"
     except Exception as exc:
         return 1, "", str(exc)
+
+
+def run_install_pypi_with_fallback(
+    runner: Callable[..., Tuple[int, str, str]],
+    uv_bin: Optional[str],
+    interp: Path,
+    venv_dir: Path,
+    packages: List[str],
+    env: Dict[str, str],
+    emit_fn: Optional[Callable[[str], None]] = None,
+    timeout: int = 1800,
+) -> str:
+    """Installs PyPI packages using Cernet mirror with official fallback.
+
+    Returns download_source ("cernet-mirror" or "official").
+    Fails closed immediately on SHA mismatch or archive corruption.
+    """
+    primary_index = CERNET_PYPI_INDEX
+    cmd_primary = _pip_install_command(uv_bin, interp, venv_dir, [*packages, "-i", primary_index])
+    retcode, stdout, stderr = runner(cmd_primary, env=env, timeout=timeout)
+    if retcode == 0:
+        return "cernet-mirror"
+
+    err1 = stderr.strip() or stdout.strip() or f"exit code {retcode}"
+    if is_integrity_or_corruption_error(err1):
+        raise RuntimeError(f"PyPI 镜像包校验失败 (不可降级重试): {err1}")
+
+    if is_retryable_network_error(err1):
+        if emit_fn:
+            emit_fn(f"Cernet PyPI 镜像安装失败 ({err1})，正在降级回退至官方源重试...")
+        official_index = OFFICIAL_PYPI_INDEX
+        cmd_official = _pip_install_command(uv_bin, interp, venv_dir, [*packages, "-i", official_index])
+        retcode2, stdout2, stderr2 = runner(cmd_official, env=env, timeout=timeout)
+        if retcode2 == 0:
+            return "official"
+        err2 = stderr2.strip() or stdout2.strip() or f"exit code {retcode2}"
+        if is_integrity_or_corruption_error(err2):
+            raise RuntimeError(f"PyPI 官方源包校验失败: {err2}")
+        raise RuntimeError(format_user_friendly_network_error(err2 or err1))
+    else:
+        raise RuntimeError(f"安装依赖失败 ({' '.join(packages[:3])}): {err1}")
+
+
+def run_install_torch_with_fallback(
+    runner: Callable[..., Tuple[int, str, str]],
+    uv_bin: Optional[str],
+    interp: Path,
+    venv_dir: Path,
+    profile: str,
+    env: Dict[str, str],
+    emit_fn: Optional[Callable[[str], None]] = None,
+    timeout: int = 1800,
+) -> str:
+    """Installs PyTorch using Cernet PyTorch wheel mirror with official fallback.
+
+    Returns download_source ("cernet-mirror" or "official").
+    Fails closed immediately on SHA mismatch or archive corruption.
+    """
+    primary_index = get_torch_index_url(profile, use_mirror=True)
+    cmd_primary = _pip_install_command(uv_bin, interp, venv_dir, [PINNED_TORCH_REQUIREMENT, "--index-url", primary_index])
+    retcode, stdout, stderr = runner(cmd_primary, env=env, timeout=timeout)
+    if retcode == 0:
+        return "cernet-mirror"
+
+    err1 = stderr.strip() or stdout.strip() or f"exit code {retcode}"
+    if is_integrity_or_corruption_error(err1):
+        raise RuntimeError(f"PyTorch 镜像包校验失败 (不可降级重试): {err1}")
+
+    if is_retryable_network_error(err1):
+        if emit_fn:
+            emit_fn(f"Cernet PyTorch 镜像安装失败 ({err1})，正在降级回退至官方源重试...")
+        official_index = get_torch_index_url(profile, use_mirror=False)
+        cmd_official = _pip_install_command(uv_bin, interp, venv_dir, [PINNED_TORCH_REQUIREMENT, "--index-url", official_index])
+        retcode2, stdout2, stderr2 = runner(cmd_official, env=env, timeout=timeout)
+        if retcode2 == 0:
+            return "official"
+        err2 = stderr2.strip() or stdout2.strip() or f"exit code {retcode2}"
+        if is_integrity_or_corruption_error(err2):
+            raise RuntimeError(f"PyTorch 官方源包校验失败: {err2}")
+        raise RuntimeError(format_user_friendly_network_error(err2 or err1))
+    else:
+        raise RuntimeError(f"安装 PyTorch 失败: {err1}")
 
 
 # Base runtime compatibility contract: checked EVEN when the profile probe
@@ -644,12 +745,19 @@ def ensure_base_runtime_contract(
     emit(f"运行时 [{profile}] Base Contract 迁移: 补齐 {', '.join(missing)}...")
     uv_bin = _find_uv()
     venv_dir = rt_manager.venv_dir(profile)
-    install_cmd = _pip_install_command(uv_bin, python_bin, venv_dir, [*missing, "-i", PYPI_MIRROR_URL])
-    env_pip = build_runtime_env(data_dir)
-    retcode, stdout, stderr = runner(install_cmd, env=env_pip, timeout=1800)
-    if retcode != 0:
-        err_msg = stderr.strip() or stdout.strip() or f"依赖安装退出码 {retcode}"
-        raise RuntimeError(f"运行时 [{profile}] Base Contract 修复失败 ({', '.join(missing)}): {err_msg}")
+    env_pip = build_uv_env(data_dir) if uv_bin else build_runtime_env(data_dir)
+    try:
+        run_install_pypi_with_fallback(
+            runner=runner,
+            uv_bin=uv_bin,
+            interp=python_bin,
+            venv_dir=venv_dir,
+            packages=missing,
+            env=env_pip,
+            emit_fn=emit,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"运行时 [{profile}] Base Contract 修复失败 ({', '.join(missing)}): {exc}")
 
     missing_after, probe_err = _probe_dependency_specs(python_bin, BASE_RUNTIME_REQUIREMENTS, runner)
     if probe_err is not None:
@@ -717,12 +825,19 @@ def ensure_model_runtime_dependencies(
     emit(f"模型 [{model_id}] 缺少专属运行依赖: {', '.join(missing)}，开始增量安装...")
     uv_bin = _find_uv()
     venv_dir = rt_manager.venv_dir(profile)
-    install_cmd = _pip_install_command(uv_bin, python_bin, venv_dir, [*missing, "-i", PYPI_MIRROR_URL])
-    env_pip = build_runtime_env(data_dir)
-    retcode, stdout, stderr = runner(install_cmd, env=env_pip, timeout=1800)
-    if retcode != 0:
-        err_msg = stderr.strip() or stdout.strip() or f"依赖安装退出码 {retcode}"
-        raise RuntimeError(f"模型 [{model_id}] 专属依赖安装失败 ({', '.join(missing)}): {err_msg}")
+    env_pip = build_uv_env(data_dir) if uv_bin else build_runtime_env(data_dir)
+    try:
+        run_install_pypi_with_fallback(
+            runner=runner,
+            uv_bin=uv_bin,
+            interp=python_bin,
+            venv_dir=venv_dir,
+            packages=missing,
+            env=env_pip,
+            emit_fn=emit,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"模型 [{model_id}] 专属依赖安装失败 ({', '.join(missing)}): {exc}")
 
     missing_after, probe_err = probe()
     if probe_err is not None:
@@ -891,7 +1006,9 @@ def rebuild_runtime(
         log_emit(f"已选择 AIPrivacyCheck {uv_source_desc} uv: {uv_bin} (版本: {UV_VERSION})")
 
         try:
-            managed_python = ensure_managed_python(data_dir, uv_bin=uv_bin, runner=command_runner, emit_fn=log_emit)
+            managed_python, py_download_source = ensure_managed_python_info(
+                data_dir, uv_bin=uv_bin, runner=command_runner, emit_fn=log_emit
+            )
         except Exception as exc:
             err_msg = f"准备托管 Python 失败: {exc}"
             log_emit(f"错误: {err_msg}")
@@ -914,30 +1031,86 @@ def rebuild_runtime(
             if ret != 0:
                 raise RuntimeError(f"创建临时虚拟环境失败: {stderr.strip() or stdout.strip()}")
 
-            def run_install_staging(*args: str) -> None:
-                cmd = _pip_install_command(uv_bin, staging_interp, staging_venv, list(args))
-                retcode, out, err = runner(cmd, env=uv_env, timeout=1800)
-                if retcode != 0:
-                    raise RuntimeError(f"安装依赖失败 ({' '.join(args[:3])}): {err.strip() or out.strip()}")
+            pypi_sources: set[str] = set()
+            torch_source: str = "unknown"
 
             log_emit(f"正在临时环境中安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
-            run_install_staging("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
+            s1 = run_install_pypi_with_fallback(
+                runner=runner,
+                uv_bin=uv_bin,
+                interp=staging_interp,
+                venv_dir=staging_venv,
+                packages=["modelscope", "numpy", "packaging", "tqdm"],
+                env=uv_env,
+                emit_fn=log_emit,
+            )
+            pypi_sources.add(s1)
 
             if profile == PROFILE_TORCH_CPU:
                 log_emit(f"正在安装 PyTorch CPU ({PINNED_TORCH_REQUIREMENT})...")
-                run_install_staging(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CPU_INDEX)
+                torch_source = run_install_torch_with_fallback(
+                    runner=runner,
+                    uv_bin=uv_bin,
+                    interp=staging_interp,
+                    venv_dir=staging_venv,
+                    profile=profile,
+                    env=uv_env,
+                    emit_fn=log_emit,
+                )
                 log_emit("正在恢复 Base Runtime Contract (transformers, accelerate, gliner)...")
-                run_install_staging(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+                s2 = run_install_pypi_with_fallback(
+                    runner=runner,
+                    uv_bin=uv_bin,
+                    interp=staging_interp,
+                    venv_dir=staging_venv,
+                    packages=[TRANSFORMERS_REQUIREMENT, "accelerate", "gliner"],
+                    env=uv_env,
+                    emit_fn=log_emit,
+                )
+                pypi_sources.add(s2)
             elif profile == PROFILE_TORCH_CUDA:
                 log_emit(f"正在安装 PyTorch CUDA ({PINNED_TORCH_REQUIREMENT})...")
-                run_install_staging(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CUDA_INDEX)
+                torch_source = run_install_torch_with_fallback(
+                    runner=runner,
+                    uv_bin=uv_bin,
+                    interp=staging_interp,
+                    venv_dir=staging_venv,
+                    profile=profile,
+                    env=uv_env,
+                    emit_fn=log_emit,
+                )
                 log_emit("正在恢复 Base Runtime Contract (transformers, accelerate, gliner)...")
-                run_install_staging(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+                s2 = run_install_pypi_with_fallback(
+                    runner=runner,
+                    uv_bin=uv_bin,
+                    interp=staging_interp,
+                    venv_dir=staging_venv,
+                    packages=[TRANSFORMERS_REQUIREMENT, "accelerate", "gliner"],
+                    env=uv_env,
+                    emit_fn=log_emit,
+                )
+                pypi_sources.add(s2)
 
             if aggregated_deps:
                 deps_list = sorted(aggregated_deps)
                 log_emit(f"正在恢复已安装模型依赖 ({len(deps_list)} 项): {', '.join(deps_list)}...")
-                run_install_staging(*deps_list, "-i", PYPI_MIRROR_URL)
+                s3 = run_install_pypi_with_fallback(
+                    runner=runner,
+                    uv_bin=uv_bin,
+                    interp=staging_interp,
+                    venv_dir=staging_venv,
+                    packages=deps_list,
+                    env=uv_env,
+                    emit_fn=log_emit,
+                )
+                pypi_sources.add(s3)
+
+            pypi_source_final = "official" if "official" in pypi_sources else "cernet-mirror"
+            download_sources_telemetry = {
+                "python": py_download_source,
+                "pypi": pypi_source_final,
+                "torch": torch_source,
+            }
 
             # Validate staging interpreter native capabilities
             log_emit("正在验证临时环境 Python 原生能力...")
@@ -1001,17 +1174,49 @@ def rebuild_runtime(
                 "framework_version": actual_torch_version,
                 "torch_version": actual_torch_version,
                 "cuda_available": profile == PROFILE_TORCH_CUDA,
+                "download_sources": download_sources_telemetry,
             }
             (staging_venv / "runtime-manifest.json").write_text(
                 json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
-            # Transactional atomic swap
+            # Transactional atomic swap with metadata consistency
             old_backup = profile_dir / f"venv.old.{staging_id}"
+            old_manifest_backup = profile_dir / f"runtime-manifest.old.{staging_id}"
+            old_installed_backup = profile_dir / f"installed.old.{staging_id}"
+
+            manifest_target = profile_dir / "runtime-manifest.json"
+            installed_target = profile_dir / "installed.json"
+            manifest_tmp = profile_dir / "runtime-manifest.json.tmp"
+            installed_tmp = profile_dir / "installed.json.tmp"
+
             old_moved = False
             new_promoted = False
+            old_manifest_backed = False
+            old_installed_backed = False
+
+            installed_meta = {
+                "profile": profile,
+                "installed_at": int(time.time()),
+                "rebuilt_at": int(time.time()),
+                "python_runtime_source": "uv-managed",
+                "python_runtime_version": MANAGED_PYTHON_VERSION,
+                "torch_version": actual_torch_version,
+                "transformers_requirement": TRANSFORMERS_REQUIREMENT,
+                "packages": staged_packages,
+                "download_sources": download_sources_telemetry,
+            }
 
             try:
+                # 1. Back up existing metadata if present
+                if manifest_target.is_file():
+                    shutil.copy2(manifest_target, old_manifest_backup)
+                    old_manifest_backed = True
+                if installed_target.is_file():
+                    shutil.copy2(installed_target, old_installed_backup)
+                    old_installed_backed = True
+
+                # 2. Swap venv
                 if venv_dir.exists():
                     if old_backup.exists():
                         shutil.rmtree(old_backup, ignore_errors=True)
@@ -1021,24 +1226,7 @@ def rebuild_runtime(
                 os.replace(staging_venv, venv_dir)
                 new_promoted = True
 
-                (profile_dir / "runtime-manifest.json").write_text(
-                    json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                installed_meta = {
-                    "profile": profile,
-                    "installed_at": int(time.time()),
-                    "rebuilt_at": int(time.time()),
-                    "python_runtime_source": "uv-managed",
-                    "python_runtime_version": MANAGED_PYTHON_VERSION,
-                    "torch_version": actual_torch_version,
-                    "transformers_requirement": TRANSFORMERS_REQUIREMENT,
-                    "packages": staged_packages,
-                }
-                (profile_dir / "installed.json").write_text(
-                    json.dumps(installed_meta, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-
-                # Final verification probe on promoted runtime
+                # 3. Final verification probe on promoted runtime FIRST
                 clear_dependency_probe_cache()
                 final_probe = rt_manager.probe_profile(profile, force_refresh=True)
                 if not final_probe.get("verified", False) or final_probe.get("runtime_rebuild_required", False):
@@ -1046,12 +1234,31 @@ def rebuild_runtime(
                         f"最终验证探针未通过: {final_probe.get('error') or 'Promoted runtime not verified'}"
                     )
 
-                # Only after new venv promoted, manifest written, metadata written, and final probe passed:
+                # 4. ONLY after final probe PASSES, write .tmp files and atomically replace
+                manifest_tmp.write_text(
+                    json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                installed_tmp.write_text(
+                    json.dumps(installed_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                os.replace(manifest_tmp, manifest_target)
+                os.replace(installed_tmp, installed_target)
+
+                # 5. Success: clean up backups
                 if old_backup.exists():
                     shutil.rmtree(old_backup, ignore_errors=True)
+                if old_manifest_backup.exists():
+                    old_manifest_backup.unlink(missing_ok=True)
+                if old_installed_backup.exists():
+                    old_installed_backup.unlink(missing_ok=True)
 
             except Exception as swap_exc:
                 log_emit(f"运行时切换/验证发生异常: {swap_exc}，启动事务回滚...")
+                if manifest_tmp.exists():
+                    manifest_tmp.unlink(missing_ok=True)
+                if installed_tmp.exists():
+                    installed_tmp.unlink(missing_ok=True)
+
                 rb_err = None
                 try:
                     if new_promoted and venv_dir.exists():
@@ -1059,6 +1266,17 @@ def rebuild_runtime(
                     if old_moved and old_backup.exists():
                         os.replace(old_backup, venv_dir)
                         log_emit(f"旧运行环境已成功恢复回原路径: {venv_dir}")
+
+                    if old_manifest_backed and old_manifest_backup.exists():
+                        os.replace(old_manifest_backup, manifest_target)
+                    elif not old_manifest_backed and manifest_target.exists():
+                        manifest_target.unlink(missing_ok=True)
+
+                    if old_installed_backed and old_installed_backup.exists():
+                        os.replace(old_installed_backup, installed_target)
+                    elif not old_installed_backed and installed_target.exists():
+                        installed_target.unlink(missing_ok=True)
+
                 except Exception as rollback_exc:
                     rb_err = f"CRITICAL RECOVERY ERROR: 运行环境回滚失败 ({rollback_exc})，旧环境备份保留在 {old_backup}"
                     log_emit(f"严重错误: {rb_err}")
@@ -1269,22 +1487,70 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         else:
             subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, env=env_init)
 
-    def run_install(*args: str) -> None:
-        cmd = _pip_install_command(uv_bin, interp, venv_dir, list(args))
-        env_pip = build_uv_env(data_dir) if uv_bin else build_runtime_env(data_dir)
-        subprocess.run(cmd, check=True, env=env_pip)
+    env_pip = build_uv_env(data_dir) if uv_bin else build_runtime_env(data_dir)
 
+    pypi_sources: set[str] = set()
     emit(f"正在安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
-    run_install("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
+    s1 = run_install_pypi_with_fallback(
+        runner=_default_dependency_runner,
+        uv_bin=uv_bin,
+        interp=interp,
+        venv_dir=venv_dir,
+        packages=["modelscope", "numpy", "packaging", "tqdm"],
+        env=env_pip,
+        emit_fn=emit,
+    )
+    pypi_sources.add(s1)
 
+    torch_source: str = "unknown"
     if profile == PROFILE_TORCH_CPU:
         emit(f"正在安装 [{profile}] PyTorch CPU ({PINNED_TORCH_REQUIREMENT})...")
-        run_install(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CPU_INDEX)
-        run_install(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+        torch_source = run_install_torch_with_fallback(
+            runner=_default_dependency_runner,
+            uv_bin=uv_bin,
+            interp=interp,
+            venv_dir=venv_dir,
+            profile=profile,
+            env=env_pip,
+            emit_fn=emit,
+        )
+        s2 = run_install_pypi_with_fallback(
+            runner=_default_dependency_runner,
+            uv_bin=uv_bin,
+            interp=interp,
+            venv_dir=venv_dir,
+            packages=[TRANSFORMERS_REQUIREMENT, "accelerate", "gliner"],
+            env=env_pip,
+            emit_fn=emit,
+        )
+        pypi_sources.add(s2)
     elif profile == PROFILE_TORCH_CUDA:
         emit(f"正在安装 [{profile}] PyTorch CUDA (cu124) ({PINNED_TORCH_REQUIREMENT})...")
-        run_install(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CUDA_INDEX)
-        run_install(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+        torch_source = run_install_torch_with_fallback(
+            runner=_default_dependency_runner,
+            uv_bin=uv_bin,
+            interp=interp,
+            venv_dir=venv_dir,
+            profile=profile,
+            env=env_pip,
+            emit_fn=emit,
+        )
+        s2 = run_install_pypi_with_fallback(
+            runner=_default_dependency_runner,
+            uv_bin=uv_bin,
+            interp=interp,
+            venv_dir=venv_dir,
+            packages=[TRANSFORMERS_REQUIREMENT, "accelerate", "gliner"],
+            env=env_pip,
+            emit_fn=emit,
+        )
+        pypi_sources.add(s2)
+
+    download_sources_telemetry = {
+        "python": "managed" if managed_python else "system",
+        "pypi": "official" if "official" in pypi_sources else "cernet-mirror",
+        "torch": torch_source,
+    }
 
     # Run genuine probe verification via isolated interpreter
     emit(f"正在对 [{profile}] 运行环境执行真实子进程 Probe 验证...")
@@ -1309,6 +1575,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "framework_version": probed_torch,
         "torch_version": probed_torch,
         "cuda_available": probe_result.get("cuda_available", False),
+        "download_sources": download_sources_telemetry,
     }
     (profile_dir / "runtime-manifest.json").write_text(
         json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1321,6 +1588,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "torch_version": probed_torch,
         "packages": probe_result.get("packages", {}),
         "transformers_requirement": TRANSFORMERS_REQUIREMENT,
+        "download_sources": download_sources_telemetry,
     }
     installed_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     emit(f"运行时 [{profile}] 环境部署完成。")

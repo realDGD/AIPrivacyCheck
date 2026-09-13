@@ -27,6 +27,9 @@ if [ -z "$FNPACK_BIN" ] || [ ! -x "$FNPACK_BIN" ]; then
   exit 1
 fi
 
+cp -f "$PROJECT_DIR/THIRD_PARTY_NOTICES.md" "$PACKAGE_DIR/THIRD_PARTY_NOTICES.md"
+cp -f "$PROJECT_DIR/THIRD_PARTY_NOTICES.md" "$PACKAGE_DIR/app/THIRD_PARTY_NOTICES.md"
+
 "$PROJECT_DIR/scripts/test.sh"
 python3 "$PROJECT_DIR/scripts/verify_bundled_uv.py"
 mkdir -p "$DIST_DIR"

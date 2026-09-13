@@ -125,12 +125,27 @@ def main() -> int:
         except Exception as exc:
             errors.append(f"  [FAIL] {arch}: {exc}")
 
+    # Verify third-party notices packaging
+    for notice_rel in (
+        "packaging/ai-privacy-check/THIRD_PARTY_NOTICES.md",
+        "packaging/ai-privacy-check/app/THIRD_PARTY_NOTICES.md",
+    ):
+        notice_path = repo_root / notice_rel
+        if not notice_path.is_file():
+            errors.append(f"  [FAIL] Missing package notice: {notice_rel}")
+        else:
+            text = notice_path.read_text(encoding="utf-8")
+            if "Astral" not in text or "uv" not in text:
+                errors.append(f"  [FAIL] Notice file {notice_rel} does not mention Astral / uv")
+            else:
+                print(f"  [OK] Notice verified: {notice_rel}")
+
     if errors:
         print("\n".join(errors), file=sys.stderr)
-        print("\nBundled uv verification FAILED!", file=sys.stderr)
+        print("\nBundled uv / notice verification FAILED!", file=sys.stderr)
         return 1
 
-    print("All bundled uv binaries verified successfully.")
+    print("All bundled uv binaries and license notices verified successfully.")
     return 0
 
 

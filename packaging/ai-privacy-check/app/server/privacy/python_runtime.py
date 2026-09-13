@@ -7,6 +7,7 @@ Never relies on fnOS host system Python for ML execution.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,22 @@ import shutil
 import subprocess
 import sys
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+
+from .runtime_sources import (
+    UV_SYSTEM_CERTS,
+    CERNET_PYTHON_INSTALL_MIRROR,
+    OFFICIAL_PYTHON_INSTALL_SOURCE,
+    is_integrity_or_corruption_error,
+    is_retryable_network_error,
+    format_user_friendly_network_error,
+)
+
+_VERIFIED_BUNDLED_UV_PATHS: set[str] = set()
+
+
+def clear_verified_uv_cache() -> None:
+    """Clears cached bundled uv SHA verification results (for testing)."""
+    _VERIFIED_BUNDLED_UV_PATHS.clear()
 
 # Pinned official Astral uv binary distribution for Linux
 UV_VERSION = "0.12.13"
@@ -154,13 +171,38 @@ def verify_bundled_uv(
     uv_path: Union[str, Path],
     runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
     expected_version: str = UV_VERSION,
+    verify_sha: bool = True,
+    expected_sha256: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    """Verifies that the specified uv executable exists, is executable, and matches expected version."""
+    """Verifies that the specified uv executable exists, is executable, matches expected version and SHA-256."""
     path = Path(uv_path)
     if not path.is_file():
         return False, f"bundled uv binary not found: {path}"
     if not os.access(path, os.X_OK):
         return False, f"bundled uv binary is not executable: {path}"
+
+    if verify_sha:
+        resolved_str = str(path.resolve())
+        if resolved_str not in _VERIFIED_BUNDLED_UV_PATHS:
+            target_sha = expected_sha256
+            if not target_sha:
+                path_lower = str(path).lower()
+                if "x86_64" in path_lower or "amd64" in path_lower:
+                    target_sha = UV_X86_64_SHA256
+                elif "aarch64" in path_lower or "arm64" in path_lower:
+                    target_sha = UV_AARCH64_SHA256
+            if target_sha:
+                try:
+                    h = hashlib.sha256()
+                    with path.open("rb") as f:
+                        while chunk := f.read(65536):
+                            h.update(chunk)
+                    actual_sha = h.hexdigest()
+                    if actual_sha != target_sha:
+                        return False, f"bundled uv SHA-256 mismatch: expected {target_sha}, got {actual_sha}"
+                    _VERIFIED_BUNDLED_UV_PATHS.add(resolved_str)
+                except Exception as exc:
+                    return False, f"failed to compute bundled uv SHA-256: {exc}"
 
     cmd = [str(path), "--version"]
     if runner is not None:
@@ -221,7 +263,7 @@ def find_uv_info(
 
             for cand in bundled_candidates:
                 if cand.is_file():
-                    valid, err = verify_bundled_uv(cand, runner=runner)
+                    valid, err = verify_bundled_uv(cand, runner=runner, verify_sha=(runner is None))
                     if valid:
                         return str(cand), "bundled"
                     else:
@@ -353,6 +395,7 @@ def build_uv_env(
 
     env["UV_PYTHON_INSTALL_DIR"] = str(install_dir)
     env["UV_CACHE_DIR"] = str(uv_cache)
+    env["UV_SYSTEM_CERTS"] = UV_SYSTEM_CERTS
 
     return env
 
@@ -441,13 +484,19 @@ def probe_python_capabilities(
         }
 
 
-def ensure_managed_python(
+def ensure_managed_python_info(
     data_dir: Path,
     uv_bin: Optional[str] = None,
     runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
     emit_fn: Optional[Callable[[str], None]] = None,
-) -> Path:
-    """Ensures pinned uv-managed CPython is installed in private app directory and returns its path."""
+) -> Tuple[Path, str]:
+    """Ensures pinned uv-managed CPython is installed in private app directory.
+
+    Reuses existing valid installation if available (0 bytes downloaded).
+    Otherwise downloads using Cernet mirror with automatic fallback to official source.
+    Returns (interpreter_path, download_source) where download_source is:
+    "existing-local", "cernet-mirror", or "official".
+    """
     uv_path, uv_source = (uv_bin, "custom") if uv_bin else find_uv_info(data_dir=data_dir, runner=runner)
     if not uv_path:
         raise RuntimeError("未找到 uv 工具，无法管理或部署 Python 运行环境。")
@@ -470,7 +519,7 @@ def ensure_managed_python(
     }.get(uv_source, "可用")
     log(f"已选择 AIPrivacyCheck {uv_source_desc} uv: {uv}")
 
-    # 1. Try to find existing managed Python
+    # 1. Try to find existing managed Python (via uv python find or direct scan)
     find_cmd = [uv, "python", "find", "--managed-python", MANAGED_PYTHON_VERSION]
     if runner is not None:
         retcode, stdout, stderr = runner(find_cmd, env=env, timeout=15)
@@ -486,12 +535,19 @@ def ensure_managed_python(
             if probe.get("ok"):
                 existing_path = cand
 
+    if existing_path is None and install_dir.is_dir():
+        for cand in sorted(install_dir.glob(f"cpython-{MANAGED_PYTHON_VERSION}*/bin/python3*")):
+            if cand.is_file() and os.access(cand, os.X_OK):
+                probe = probe_python_capabilities(cand, runner=runner)
+                if probe.get("ok"):
+                    existing_path = cand.resolve()
+                    break
+
     if existing_path is not None:
-        log(f"已找到受管理的 Python {MANAGED_PYTHON_VERSION}: {existing_path}")
-        return existing_path
+        log(f"已复用现有托管 Python {MANAGED_PYTHON_VERSION} (0 字节下载): {existing_path}")
+        return existing_path, "existing-local"
 
     # 2. Install pinned Python using uv into private app installations directory
-    log(f"正在安装 AIPrivacyCheck 受管理的 Python {MANAGED_PYTHON_VERSION} 至 {install_dir}...")
     install_cmd = [
         uv,
         "python",
@@ -501,15 +557,46 @@ def ensure_managed_python(
         str(install_dir),
         MANAGED_PYTHON_VERSION,
     ]
+
+    # Supply Chain A - Attempt 1: Primary Cernet Mirror
+    log(f"正在通过 Cernet 镜像源安装 AIPrivacyCheck 受管理的 Python {MANAGED_PYTHON_VERSION} 至 {install_dir}...")
+    env_primary = dict(env)
+    env_primary["UV_PYTHON_INSTALL_MIRROR"] = CERNET_PYTHON_INSTALL_MIRROR
+    env_primary["UV_SYSTEM_CERTS"] = UV_SYSTEM_CERTS
+
+    download_source = "cernet-mirror"
     if runner is not None:
-        retcode, stdout, stderr = runner(install_cmd, env=env, timeout=600)
+        retcode, stdout, stderr = runner(install_cmd, env=env_primary, timeout=600)
     else:
-        res = subprocess.run(install_cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(install_cmd, env=env_primary, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         retcode, stdout, stderr = res.returncode, res.stdout, res.stderr
 
     if retcode != 0:
-        err = stderr.strip() or stdout.strip() or f"exit code {retcode}"
-        raise RuntimeError(f"Managed Python {MANAGED_PYTHON_VERSION} 安装失败: {err}")
+        err1 = stderr.strip() or stdout.strip() or f"exit code {retcode}"
+        # Fail closed immediately on archive corruption or SHA mismatch
+        if is_integrity_or_corruption_error(err1):
+            raise RuntimeError(f"Managed Python 镜像包完整性校验失败 (不可降级重试): {err1}")
+
+        if is_retryable_network_error(err1):
+            log(f"Cernet 镜像下载 Python 失败 ({err1})，正在降级回退至官方源重试...")
+            env_official = dict(env)
+            env_official.pop("UV_PYTHON_INSTALL_MIRROR", None)
+            env_official["UV_SYSTEM_CERTS"] = UV_SYSTEM_CERTS
+            download_source = "official"
+
+            if runner is not None:
+                retcode2, stdout2, stderr2 = runner(install_cmd, env=env_official, timeout=600)
+            else:
+                res2 = subprocess.run(install_cmd, env=env_official, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                retcode2, stdout2, stderr2 = res2.returncode, res2.stdout, res2.stderr
+
+            if retcode2 != 0:
+                err2 = stderr2.strip() or stdout2.strip() or f"exit code {retcode2}"
+                if is_integrity_or_corruption_error(err2):
+                    raise RuntimeError(f"Managed Python 官方源完整性校验失败: {err2}")
+                raise RuntimeError(format_user_friendly_network_error(err2 or err1))
+        else:
+            raise RuntimeError(f"Managed Python {MANAGED_PYTHON_VERSION} 安装失败: {err1}")
 
     # 3. Locate installed interpreter
     if runner is not None:
@@ -538,6 +625,17 @@ def ensure_managed_python(
             f"新安装的 Managed Python 缺少必要能力: {', '.join(missing)} ({probe.get('error')})"
         )
 
-    log(f"Managed Python 部署验证成功: {resolved} (版本: {probe.get('version')})")
+    log(f"Managed Python 部署验证成功: {resolved} (版本: {probe.get('version')}, 来源: {download_source})")
     log("Python Capability Contract: PASS")
+    return resolved, download_source
+
+
+def ensure_managed_python(
+    data_dir: Path,
+    uv_bin: Optional[str] = None,
+    runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+    emit_fn: Optional[Callable[[str], None]] = None,
+) -> Path:
+    """Ensures pinned uv-managed CPython is installed in private app directory and returns its path."""
+    resolved, _ = ensure_managed_python_info(data_dir=data_dir, uv_bin=uv_bin, runner=runner, emit_fn=emit_fn)
     return resolved

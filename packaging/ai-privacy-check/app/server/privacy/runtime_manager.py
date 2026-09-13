@@ -30,12 +30,20 @@ from .python_runtime import (
     probe_base_runtime_contract,
     probe_python_capabilities,
 )
+from .runtime_sources import (
+    CERNET_PYPI_INDEX,
+    OFFICIAL_PYPI_INDEX,
+    CERNET_TORCH_INDEX_CPU,
+    OFFICIAL_TORCH_INDEX_CPU,
+    CERNET_TORCH_INDEX_CUDA,
+    OFFICIAL_TORCH_INDEX_CUDA,
+)
 
 
-PYPI_MIRROR_URL = "https://mirrors.aliyun.com/pypi/simple/"
-PYPI_OFFICIAL_URL = "https://pypi.org/simple"
-PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu124"
+PYPI_MIRROR_URL = CERNET_PYPI_INDEX
+PYPI_OFFICIAL_URL = OFFICIAL_PYPI_INDEX
+PYTORCH_CPU_INDEX = CERNET_TORCH_INDEX_CPU
+PYTORCH_CUDA_INDEX = CERNET_TORCH_INDEX_CUDA
 
 PROFILE_TORCH_CPU = "torch-cpu"
 PROFILE_TORCH_CUDA = "torch-cuda"
@@ -188,7 +196,7 @@ class RuntimeManager:
                 "framework_version": packages.get("torch"),
                 "torch_version": packages.get("torch"),
                 "base_contract_verified": True,
-                "created_by": "AIPrivacyCheck/0.6.12",
+                "created_by": "AIPrivacyCheck/0.6.13",
                 "created_at": int(time.time()),
             }
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -331,6 +339,7 @@ class RuntimeManager:
                 "missing_base_packages": list(PROBE_BASE_PACKAGES),
                 "base_contract_violations": [],
                 "packages": {},
+                "download_sources": None,
                 "error": f"运行时验证失败: {err_msg}",
             }
         else:
@@ -354,9 +363,11 @@ class RuntimeManager:
                     packages["torch"] = fw_version
 
                 manifest_path = self.manifest_file(profile)
+                download_sources = None
                 if manifest_path.is_file():
                     try:
                         manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        download_sources = manifest_data.get("download_sources")
                         rebuild_required = not py_ready or bool(manifest_data.get("schema_version", 1) < 3 and not py_ready)
                     except Exception:
                         rebuild_required = not py_ready
@@ -391,6 +402,7 @@ class RuntimeManager:
                         "missing_base_packages": missing_base_pkgs,
                         "base_contract_violations": base_contract_violations,
                         "packages": packages,
+                        "download_sources": download_sources,
                         "error": f"Python 原生能力缺失: {', '.join(missing_caps)}",
                     }
                 else:
@@ -434,6 +446,7 @@ class RuntimeManager:
                         "missing_base_packages": missing_base_pkgs,
                         "base_contract_violations": base_contract_violations,
                         "packages": packages,
+                        "download_sources": download_sources,
                         "error": err,
                     }
 
@@ -447,7 +460,7 @@ class RuntimeManager:
                                 except Exception:
                                     cur_manifest = {}
                             if cur_manifest.get("schema_version", 1) < 3:
-                                cur_manifest.update({
+                                update_fields = {
                                     "schema_version": 3,
                                     "profile": profile,
                                     "python_runtime_source": py_source,
@@ -458,7 +471,10 @@ class RuntimeManager:
                                     "framework_version": fw_version,
                                     "torch_version": fw_version,
                                     "adopted_at": int(time.time()),
-                                })
+                                }
+                                if cur_manifest.get("download_sources"):
+                                    update_fields["download_sources"] = cur_manifest.get("download_sources")
+                                cur_manifest.update(update_fields)
                                 manifest_file.write_text(
                                     json.dumps(cur_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
                                 )
@@ -488,7 +504,8 @@ class RuntimeManager:
                     "missing_base_packages": list(PROBE_BASE_PACKAGES),
                     "base_contract_violations": [],
                     "packages": {},
-                    "error": f"无法解析验证输出: {parse_exc}",
+                    "download_sources": None,
+                    "error": f"解析探测输出异常: {parse_exc}",
                 }
 
         with self._lock:
