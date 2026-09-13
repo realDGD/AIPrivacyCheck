@@ -1,0 +1,144 @@
+=== SECTION 1: Personal Identification ===
+Resident identification:
+公民身份号码：11010519491231002X
+US Social Security Number: SSN: 123-45-6789
+Passport Record: 护照号：G12345678
+
+=== SECTION 2: Contact Information ===
+Primary contacts:
+联系人手机：13800138000
+备用电话：13912345678
+International support line: +1-202-555-0123
+Email inbox: developer.ops@example.com
+Secondary email: privacy-team@internal.corp.net
+
+=== SECTION 3: Chinese Birth Dates ===
+Personnel date of birth records:
+档案一：张三，出生日期：1992年11月18日，北京市朝阳区。
+档案二：李四，出生年月：1985-05-20，上海市浦东新区。
+档案三：王五，生日为 2001.08.15，广州市天河区。
+档案四：赵六，出生日期 1999年2月，深圳市南山区。
+
+=== SECTION 4: Structured Passwords ===
+Production environment credentials:
+APP_PASSWORD=SYNTH_APP_PASS_9981!
+Temporary Password:
+TempP@ss2026!
+临时密码：
+TmpPass#9981
+كلمة المرور التجريبية: Arab!cPass2026
+Configured password="SYNTH_SECRET_PW123"
+Fallback token: password='SYNTH_ANOTHER_PW456'
+Initial root key: 初始密码: InitPass9988!
+
+=== SECTION 5: Password Negative Cases ===
+System notices and code patterns that must NOT match as passwords:
+passwordManager 同步完成
+setPassword(value) 后请刷新会话
+getPassword() 返回 None
+password = ${DB_PASSWORD}
+password: ******（见保险箱）
+config.password = os.environ['DB_PASS']
+密码：[已隐藏]
+user.settings.password_policy.enabled
+password: (from prompt)
+密码策略要求至少 16 个字符。
+密码找回流程见帮助中心。
+
+=== SECTION 6: Financial Cards & Luhn Validation ===
+Payment details:
+Valid VISA Card: 4532 0151 1283 0366
+Invalid Checksum Card: 4532 0151 1283 0367
+Valid Card Expiry: 有效期：12/28
+Card Security Code: 安全码：789
+
+=== SECTION 7: OTP Backup Code Multi-line Blocks ===
+Two-factor backup recovery codes (must NOT be detected as credit cards):
+OTP backup codes:
+123456
+234567
+345678
+456789
+567890
+678901
+Keep these codes in a secure location.
+
+=== SECTION 8: Chinese Address & Postal Information ===
+Mailing address:
+收货地址：上海市浦东新区世纪大道100号环球金融中心45层
+送货地址：北京市海淀区中关村南大街5号理工科技大厦
+
+=== SECTION 9: Multilingual Addresses ===
+International postal addresses:
+English: The office address is 742 Evergreen Terrace, Springfield, OR 97477.
+French: L'adresse de livraison est 10 Rue de la Paix, 75002 Paris.
+German: Die Firmenadresse lautet Friedrichstraße 43, 10117 Berlin.
+Japanese: 配送先住所は東京都新宿区西新宿2丁目8-1です。
+
+=== SECTION 10: Corporate Identifiers ===
+Business entity registration:
+统一社会信用代码：91350211M000100Y4
+Company: 厦门测试软件技术开发有限公司
+
+=== SECTION 11: Network Addresses & Credentials ===
+Network infrastructure config:
+Private gateway: 192.168.1.100
+IPv6 address: 2001:0db8:85a3:0000:0000:8a2e:0370:7334
+Database connection string:
+postgresql://dbuser:SYNTH_DB_PW_2026@internal-db.local:5432/production_data
+
+=== SECTION 12: Synthetic API Keys & Tokens ===
+Bearer authentication credentials:
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IlN5bnRoZXRpYyBEZXYifQ.sK7R42zE3x1Y5sZ9q0pL_uVw8tM6jN2bA4cF7eH9gK0
+Internal API token: API_TOKEN=SYNTH_INTERNAL_TOKEN_KEY_9988776655
+
+=== SECTION 13: Account Numbers & Employee IDs ===
+Internal directory identifiers:
+员工工号：EMP-987654
+学号：STU-20261102
+客户编号：CUST-8839201
+
+=== SECTION 14: Medical & Insurance Records ===
+Healthcare records:
+病历号：MED-2026-9912
+社保号：INS-7718290
+Patient diagnostics confirmed normal.
+
+=== SECTION 15: Vehicle Identification & License Plates ===
+Fleet management:
+车辆号牌：京A·88888
+车架号：VIN: LSGJA52U7ES012345
+
+=== SECTION 16: Usernames & Handles ===
+User account profiles:
+username: jsmith_dev
+用户名：张三丰
+登录ID: user_admin_99
+
+=== SECTION 17: CJK Ambiguous Entities & Overlap Arbitration ===
+Compound narrative:
+联系人：王小明，送至北京市朝阳区酒仙桥路4号，联系电话：13800138000。
+APP_PASSWORD=v3ry_s3cr3t_p@ssw0rd!
+Verified password priority must take precedence over username substrings.
+
+=== SECTION 18: Project / Product Names (Known GLiNER FP Reference) ===
+Project documentation note:
+Project Aurora is the next generation cloud storage platform for internal deployment.
+(Known note: 'Project Aurora' may be flagged as candidate entity under broad GLiNER NER models).
+
+=== SECTION 19: Public Entities & Allowlist Exclusions ===
+Public services and local addresses:
+Public customer service: 10086
+Public DNS: 8.8.8.8
+Local loopback: 127.0.0.1
+
+=== SECTION 20: Multi-line Logs & Structured Configuration ===
+Server configuration snippet:
+server:
+  host: 192.168.1.50
+  port: 8080
+auth:
+  admin_user: admin_root
+  APP_PASSWORD: "SYNTH_CONFIG_PASS_2026"
+  Temporary Password:
+    TempPassSecret#2026
