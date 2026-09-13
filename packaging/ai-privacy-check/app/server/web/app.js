@@ -1219,7 +1219,8 @@ function deriveModelRuntimeState(slot, deviceData = {}, catalogModel = null) {
   const det = (slot && slot.detector) || {};
   const isInstalled = Boolean(det.installed);
   const isReady = Boolean(det.ready);
-  const isRepairable = Boolean(det.repairable);
+  const isRebuildRequired = Boolean(det.runtime_rebuild_required || det.python_runtime_ready === false);
+  const isRepairable = Boolean(det.repairable || isRebuildRequired);
   const reqDevice = (deviceData.requested_device || "auto").toLowerCase();
   const hw = deviceData.hardware || {};
   const hasNvidia = Boolean(hw.nvidia_available);
@@ -1238,6 +1239,8 @@ function deriveModelRuntimeState(slot, deviceData = {}, catalogModel = null) {
 
   if (!isInstalled) {
     installButtonText = "从魔搭下载安装";
+  } else if (isRebuildRequired) {
+    installButtonText = "重建/升级运行环境";
   } else if (isRepairable) {
     installButtonText = "修复运行环境";
   } else if (!isReady) {
@@ -1267,6 +1270,7 @@ function deriveModelRuntimeState(slot, deviceData = {}, catalogModel = null) {
     isInstalled,
     isReady,
     isRepairable,
+    isRebuildRequired,
     runtimeMissing,
     missingRuntimeName,
     installButtonText,
@@ -1315,7 +1319,9 @@ function updateModelUI(data) {
     } else if (glinerReady) {
       elements.glinerInlineStatus.textContent = "就绪";
     } else if (glinerInstalled) {
-      elements.glinerInlineStatus.textContent = glinerSlot.detector && glinerSlot.detector.repairable ? "待修复" : "环境未就绪";
+      const gDet = glinerSlot.detector || {};
+      const needsRebuild = Boolean(gDet.runtime_rebuild_required || gDet.python_runtime_ready === false);
+      elements.glinerInlineStatus.textContent = needsRebuild ? "需升级重建" : (gDet.repairable ? "待修复" : "环境未就绪");
     } else {
       elements.glinerInlineStatus.textContent = "未安装";
     }
@@ -1340,7 +1346,9 @@ function updateModelUI(data) {
     } else if (memReady) {
       elements.memprivacyInlineStatus.textContent = "就绪 (1.7B)";
     } else if (memInstalled) {
-      elements.memprivacyInlineStatus.textContent = memSlot.detector && memSlot.detector.repairable ? "待修复" : "环境未就绪";
+      const mDet = memSlot.detector || {};
+      const needsRebuild = Boolean(mDet.runtime_rebuild_required || mDet.python_runtime_ready === false);
+      elements.memprivacyInlineStatus.textContent = needsRebuild ? "需升级重建" : (mDet.repairable ? "待修复" : "环境未就绪");
     } else {
       elements.memprivacyInlineStatus.textContent = "未安装";
     }
@@ -1499,6 +1507,9 @@ function updateModelUI(data) {
         if (isInstalled && isReady) {
           badge.textContent = "已加载 SiameseUIE";
           badge.className = "status-badge is-ready";
+        } else if (isInstalled && runtimeState.isRebuildRequired) {
+          badge.textContent = "运行环境需升级重建";
+          badge.className = "status-badge";
         } else if (isInstalled && det.repairable) {
           badge.textContent = "权重已就绪 (运行环境需修复)";
           badge.className = "status-badge";
@@ -1515,6 +1526,9 @@ function updateModelUI(data) {
       } else if (isReady) {
         badge.textContent = "已就绪";
         badge.className = "status-badge is-ready";
+      } else if (isInstalled && runtimeState.isRebuildRequired) {
+        badge.textContent = "运行环境需升级重建";
+        badge.className = "status-badge";
       } else if (isInstalled && det.repairable) {
         badge.textContent = "权重已就绪 (运行环境需修复)";
         badge.className = "status-badge";
@@ -1595,7 +1609,22 @@ function updateModelUI(data) {
       controls.append(actions);
       item.append(header, desc, controls);
 
-      if (det.repairable && det.missing_dependencies && det.missing_dependencies.length > 0) {
+      if (runtimeState.isRebuildRequired) {
+        const rebuildNotice = document.createElement("div");
+        rebuildNotice.className = "slot-item-notice";
+        rebuildNotice.style.fontSize = "11px";
+        rebuildNotice.style.color = "var(--brand-amber, #b06000)";
+        rebuildNotice.style.background = "rgba(255, 170, 0, 0.08)";
+        rebuildNotice.style.padding = "6px 10px";
+        rebuildNotice.style.borderRadius = "6px";
+        rebuildNotice.style.marginTop = "6px";
+        rebuildNotice.style.lineHeight = "1.4";
+        const missingCaps = (det.missing_python_capabilities && det.missing_python_capabilities.length > 0)
+          ? `（缺失底层能力: ${det.missing_python_capabilities.join(", ")}）`
+          : "";
+        rebuildNotice.textContent = `⚠️ 当前 Python 运行环境不满足要求或缺少关键 C 扩展模块${missingCaps}。点击「重建/升级运行环境」将自动采用 uv 托管完整 Python，零模型重载、无损升级。`;
+        item.append(rebuildNotice);
+      } else if (det.repairable && det.missing_dependencies && det.missing_dependencies.length > 0) {
         const repairNotice = document.createElement("div");
         repairNotice.className = "slot-item-notice";
         repairNotice.style.fontSize = "11px";
@@ -1710,7 +1739,7 @@ async function refreshModelStatus() {
 }
 
 async function repairModel(modelId = "siamese-uie") {
-  const confirmed = window.confirm(`将为您修复模型 [${modelId}] 的专属运行依赖（不会重新下载模型权重）。继续吗？`);
+  const confirmed = window.confirm(`将为您修复/升级模型 [${modelId}] 的运行环境与专属依赖（不会重新下载模型权重）。继续吗？`);
   if (!confirmed) return;
   try {
     const result = await api("/api/model/runtime/repair", {
@@ -1719,7 +1748,7 @@ async function repairModel(modelId = "siamese-uie") {
     });
     updateModelUI({ ...result.status, is_admin: true });
     if ($("installLogPanel")) $("installLogPanel").open = true;
-    toast("已开始在后台修复运行环境…");
+    toast("已开始在后台修复/升级运行环境…");
   } catch (error) {
     toast(`修复启动失败: ${error.message}`);
     await refreshModelStatus();

@@ -183,6 +183,55 @@ class ModelLifecycleController:
         threading.Thread(target=wait_for_repair, daemon=True).start()
         return True
 
+    def start_rebuild(self, profile: str) -> bool:
+        if profile not in (runtime_manager.PROFILE_TORCH_CPU, runtime_manager.PROFILE_TORCH_CUDA):
+            return False
+        with self._lock:
+            if self._process is not None:
+                return False
+            try:
+                with model_installer.runtime_operation_lock(self.data_dir, profile, non_blocking=True):
+                    pass
+            except RuntimeError:
+                return False
+            status_dir = self.data_dir / "status"
+            status_dir.mkdir(parents=True, exist_ok=True)
+            log_handle = self.log_file.open("ab", buffering=0)
+            from privacy.python_runtime import build_uv_env
+            env = build_uv_env(self.data_dir, base_env=os.environ.copy())
+            env["APP_DATA_DIR"] = str(self.data_dir)
+            env["PYTHONUNBUFFERED"] = "1"
+            self._process = subprocess.Popen(
+                [sys.executable, str(APP_DIR / "model_installer.py"), "rebuild", profile],
+                cwd=str(APP_DIR),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+            process = self._process
+
+        def wait_for_rebuild() -> None:
+            try:
+                process.wait()
+                log_handle.close()
+                DEVICE_MANAGER.invalidate_runtime_state()
+                model_installer.clear_dependency_probe_cache()
+                if process.returncode == 0:
+                    try:
+                        DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
+                    finally:
+                        PRIVACY.reset_models()
+            finally:
+                if not log_handle.closed:
+                    log_handle.close()
+                with self._lock:
+                    if self._process is process:
+                        self._process = None
+
+        threading.Thread(target=wait_for_rebuild, daemon=True).start()
+        return True
+
     def import_model(self, model_name: str, source_path: str) -> Tuple[bool, str]:
         path = Path(source_path).resolve()
         ok, msg = model_installer.import_local_model(self.data_dir, model_name, path)
@@ -370,6 +419,32 @@ class AppHandler(BaseHTTPRequestHandler):
                     "ok": started,
                     "started": started,
                     "message": f"已开始修复模型 [{model_name}] 的运行环境" if started else "已有其他任务正在执行",
+                    "status": INSTALLER.status(),
+                },
+            )
+            return
+
+        if route in ("/api/runtime/rebuild", "/api/model/runtime/rebuild"):
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以重建运行环境"})
+                return
+            try:
+                payload = self._read_json()
+            except Exception:
+                payload = {}
+            profile = str(payload.get("profile", runtime_manager.PROFILE_TORCH_CPU)).strip()
+            if profile not in (runtime_manager.PROFILE_TORCH_CPU, runtime_manager.PROFILE_TORCH_CUDA):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": f"未知运行时 Profile: {profile}"})
+                return
+            started = INSTALLER.start_rebuild(profile)
+            status = HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT
+            self._json(
+                status,
+                {
+                    "ok": started,
+                    "started": started,
+                    "profile": profile,
+                    "message": f"已开始重建运行时环境 [{profile}]" if started else "已有其他任务正在执行",
                     "status": INSTALLER.status(),
                 },
             )

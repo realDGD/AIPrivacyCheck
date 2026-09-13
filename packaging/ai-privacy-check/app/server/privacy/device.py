@@ -50,6 +50,9 @@ class DeviceManager:
             self._diagnostics_cache = None
             self._diagnostics_generation += 1
 
+    def get_runtime_manager(self) -> RuntimeManager:
+        return self._rt_manager
+
     def get_requested_device(self) -> str:
         env_dev = os.environ.get("AI_PRIVACY_DEVICE")
         if env_dev and env_dev.strip().lower() in ("auto", "cpu", "cuda"):

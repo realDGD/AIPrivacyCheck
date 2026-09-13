@@ -310,6 +310,8 @@ def resolve_for_model(
         and cuda_status.get("installed")
         and cuda_status.get("verified")
         and cuda_status.get("cuda_available")
+        and cuda_status.get("python_runtime_ready", True)
+        and not cuda_status.get("runtime_rebuild_required", False)
     )
 
     # Check CPU runtime
@@ -319,6 +321,8 @@ def resolve_for_model(
         descriptor.supports_cpu
         and cpu_status.get("installed")
         and cpu_status.get("verified")
+        and cpu_status.get("python_runtime_ready", True)
+        and not cpu_status.get("runtime_rebuild_required", False)
     )
 
     if req == "cuda":

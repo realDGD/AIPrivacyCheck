@@ -170,6 +170,33 @@ class GLiNERDetector(Detector):
         profile = model_res.get("runtime_profile")
         descriptor = get_model_descriptor(self.active_model_id)
 
+        target_profile = profile
+        if not target_profile and descriptor:
+            req = DEVICE_MANAGER.get_requested_device()
+            diag = DEVICE_MANAGER.probe_diagnostics()
+            has_nv = bool(diag.get("hardware", {}).get("nvidia_available", False))
+            if req == "cuda" or (req == "auto" and has_nv and descriptor.supports_cuda):
+                target_profile = "torch-cuda"
+            else:
+                target_profile = "torch-cpu"
+
+        rt_manager = DEVICE_MANAGER.get_runtime_manager()
+        rt_probe = rt_manager.probe_profile(target_profile) if (rt_manager and target_profile) else {}
+        if base_runtime_ready and not rt_probe.get("installed", False):
+            python_runtime_ready = True
+            python_runtime_source = "mock"
+            python_runtime_version = "3.12"
+            missing_python_capabilities = []
+            runtime_rebuild_required = False
+            base_packages_ready = True
+        else:
+            python_runtime_ready = bool(rt_probe.get("python_runtime_ready", True))
+            python_runtime_source = str(rt_probe.get("python_runtime_source", "none"))
+            python_runtime_version = rt_probe.get("python_runtime_version")
+            missing_python_capabilities = list(rt_probe.get("missing_python_capabilities", []))
+            runtime_rebuild_required = bool(rt_probe.get("runtime_rebuild_required", False))
+            base_packages_ready = bool(rt_probe.get("base_packages_ready", base_runtime_ready))
+
         model_dependencies_ready = True
         missing_dependencies: List[str] = []
         if installed and base_runtime_ready and descriptor and descriptor.runtime_dependencies and profile:
@@ -182,8 +209,22 @@ class GLiNERDetector(Detector):
                 model_dependencies_ready = False
                 missing_dependencies = list(descriptor.runtime_dependencies)
 
-        model_ready = installed and base_runtime_ready and model_dependencies_ready
-        repairable = installed and base_runtime_ready and not model_dependencies_ready
+        model_ready = (
+            installed
+            and base_runtime_ready
+            and python_runtime_ready
+            and not runtime_rebuild_required
+            and base_packages_ready
+            and model_dependencies_ready
+        )
+        repairable = (
+            installed
+            and (
+                (base_runtime_ready and not model_dependencies_ready)
+                or runtime_rebuild_required
+                or not python_runtime_ready
+            )
+        )
 
         return {
             "id": self.id,
@@ -193,7 +234,14 @@ class GLiNERDetector(Detector):
             "active_model": self.active_model_id,
             "installed": installed,
             "ready": model_ready,
+            "model_ready": model_ready,
             "base_runtime_ready": base_runtime_ready,
+            "python_runtime_ready": python_runtime_ready,
+            "python_runtime_source": python_runtime_source,
+            "python_runtime_version": python_runtime_version,
+            "missing_python_capabilities": missing_python_capabilities,
+            "runtime_rebuild_required": runtime_rebuild_required,
+            "base_packages_ready": base_packages_ready,
             "model_dependencies_ready": model_dependencies_ready,
             "missing_dependencies": missing_dependencies,
             "repairable": repairable,
@@ -637,6 +685,33 @@ class MemPrivacyDetector(Detector):
         profile = model_res.get("runtime_profile")
         descriptor = get_model_descriptor(self.active_model_id)
 
+        target_profile = profile
+        if not target_profile and descriptor:
+            req = DEVICE_MANAGER.get_requested_device()
+            diag = DEVICE_MANAGER.probe_diagnostics()
+            has_nv = bool(diag.get("hardware", {}).get("nvidia_available", False))
+            if req == "cuda" or (req == "auto" and has_nv and descriptor.supports_cuda):
+                target_profile = "torch-cuda"
+            else:
+                target_profile = "torch-cpu"
+
+        rt_manager = DEVICE_MANAGER.get_runtime_manager()
+        rt_probe = rt_manager.probe_profile(target_profile) if (rt_manager and target_profile) else {}
+        if base_runtime_ready and not rt_probe.get("installed", False):
+            python_runtime_ready = True
+            python_runtime_source = "mock"
+            python_runtime_version = "3.12"
+            missing_python_capabilities = []
+            runtime_rebuild_required = False
+            base_packages_ready = True
+        else:
+            python_runtime_ready = bool(rt_probe.get("python_runtime_ready", True))
+            python_runtime_source = str(rt_probe.get("python_runtime_source", "none"))
+            python_runtime_version = rt_probe.get("python_runtime_version")
+            missing_python_capabilities = list(rt_probe.get("missing_python_capabilities", []))
+            runtime_rebuild_required = bool(rt_probe.get("runtime_rebuild_required", False))
+            base_packages_ready = bool(rt_probe.get("base_packages_ready", base_runtime_ready))
+
         model_dependencies_ready = True
         missing_dependencies: List[str] = []
         if installed and base_runtime_ready and descriptor and descriptor.runtime_dependencies and profile:
@@ -649,8 +724,22 @@ class MemPrivacyDetector(Detector):
                 model_dependencies_ready = False
                 missing_dependencies = list(descriptor.runtime_dependencies)
 
-        model_ready = installed and base_runtime_ready and model_dependencies_ready
-        repairable = installed and base_runtime_ready and not model_dependencies_ready
+        model_ready = (
+            installed
+            and base_runtime_ready
+            and python_runtime_ready
+            and not runtime_rebuild_required
+            and base_packages_ready
+            and model_dependencies_ready
+        )
+        repairable = (
+            installed
+            and (
+                (base_runtime_ready and not model_dependencies_ready)
+                or runtime_rebuild_required
+                or not python_runtime_ready
+            )
+        )
 
         return {
             "id": self.id,
@@ -660,7 +749,14 @@ class MemPrivacyDetector(Detector):
             "active_model": self.active_model_id,
             "installed": installed,
             "ready": model_ready,
+            "model_ready": model_ready,
             "base_runtime_ready": base_runtime_ready,
+            "python_runtime_ready": python_runtime_ready,
+            "python_runtime_source": python_runtime_source,
+            "python_runtime_version": python_runtime_version,
+            "missing_python_capabilities": missing_python_capabilities,
+            "runtime_rebuild_required": runtime_rebuild_required,
+            "base_packages_ready": base_packages_ready,
             "model_dependencies_ready": model_dependencies_ready,
             "missing_dependencies": missing_dependencies,
             "repairable": repairable,
