@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Selective Model Downloader for AI Privacy Check Benchmarks (v0.6.6).
+"""Selective Model Downloader for AI Privacy Check Benchmarks (v0.6.7).
 
 Strict selective download policy:
 - NEVER downloads the entire repository snapshot by default.
@@ -23,13 +23,11 @@ from typing import Dict, List, Optional, Set, Tuple
 import urllib.request
 import urllib.error
 
-# Catalog of known model repositories for benchmarks
-BENCHMARK_MODEL_CATALOG = {
+# Allowed models for selective download in benchmark
+DOWNLOADABLE_MODEL_CATALOG = {
     "gliner-pii-edge": {
         "repo_id": "knowledgator/gliner-pii-edge-v1.0",
         "revision": "master",
-        "allowed_in_v066": True,
-        # Exact file patterns required for PyTorch GLiNER inference:
         "required_files": {
             "gliner_config.json",
             "configuration.json",
@@ -40,13 +38,21 @@ BENCHMARK_MODEL_CATALOG = {
         },
         "forbidden_files_prefix": ("onnx", ".git", "README"),
     },
-    # Historical models: strictly blocked from re-downloading in v0.6.6
-    "memprivacy-1.7b": {"repo_id": "DAMO_NLP/MemPrivacy-1.7B", "allowed_in_v066": False},
-    "openai-privacy-filter": {"repo_id": "openai/privacy-filter", "allowed_in_v066": False},
-    "aiguard": {"repo_id": "aiguard/aiguard-pii", "allowed_in_v066": False},
-    "qwen3.5-0.8b": {"repo_id": "Qwen/Qwen2.5-0.5B", "allowed_in_v066": False},
-    "qwen3.5-2b": {"repo_id": "Qwen/Qwen2.5-1.5B", "allowed_in_v066": False},
-    "raner": {"repo_id": "damo/nlp_raner_named-entity-recognition_chinese-base-news", "allowed_in_v066": False},
+}
+
+# Backward compatibility alias
+BENCHMARK_MODEL_CATALOG = DOWNLOADABLE_MODEL_CATALOG
+
+# Blocked challenger models: strictly prohibited from downloading in this release
+BLOCKED_MODELS = {
+    "memprivacy-1.7b",
+    "memprivacy-4b",
+    "openai-privacy-filter",
+    "aiguard",
+    "qwen3.5-0.8b",
+    "qwen3.5-2b",
+    "raner",
+    "vault-engine",
 }
 
 
@@ -62,7 +68,7 @@ def query_modelscope_repo_files(repo_id: str, revision: str = "master", root: st
     url = f"https://modelscope.cn/api/v1/models/{repo_id}/repo/files?Revision={revision}"
     if root:
         url += f"&Root={urllib.parse.quote(root)}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.6"})
+    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.7"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
         if data.get("Code") != 200:
@@ -109,48 +115,113 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def verify_existing_model_integrity(
+    target_dir: Path,
+    required_names: Set[str],
+) -> Tuple[bool, str, Optional[Dict], List[str]]:
+    """Verifies target_dir against download-manifest.json.
+
+    Returns: (is_valid: bool, status_message: str, manifest_data: dict|None, corrupted_files: list)
+    """
+    manifest_file = target_dir / "download-manifest.json"
+    if not manifest_file.is_file():
+        return False, "missing download-manifest.json", None, list(required_names)
+
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"corrupted download-manifest.json ({exc})", None, list(required_names)
+
+    files_entry = manifest.get("files")
+    manifest_files: Dict[str, Dict[str, Any]] = {}
+    if isinstance(files_entry, list):
+        for item in files_entry:
+            if isinstance(item, dict) and "path" in item:
+                manifest_files[item["path"]] = item
+    elif isinstance(files_entry, dict):
+        manifest_files = files_entry
+
+    corrupted = []
+    for fname in sorted(required_names):
+        fpath = target_dir / fname
+        if not fpath.is_file():
+            corrupted.append(fname)
+            continue
+        entry = manifest_files.get(fname)
+        if not entry:
+            corrupted.append(fname)
+            continue
+        expected_size = entry.get("size")
+        expected_sha = entry.get("sha256")
+        if expected_size is not None and fpath.stat().st_size != expected_size:
+            corrupted.append(fname)
+            continue
+        if expected_sha is not None and sha256_file(fpath) != expected_sha:
+            corrupted.append(fname)
+            continue
+
+    if corrupted:
+        return False, f"{len(corrupted)} required file(s) failed size/hash integrity: {corrupted}", manifest, corrupted
+
+    return True, f"all {len(required_names)} required files verified against manifest", manifest, []
+
+
 def download_single_file(
     repo_id: str,
     revision: str,
     remote_path: str,
     target_path: Path,
     expected_size: int,
+    expected_sha256: Optional[str] = None,
 ) -> Tuple[bool, int, str]:
     """Downloads a single file from ModelScope with integrity check."""
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Check if existing file is already complete
+    # Check if existing file is already verified
     if target_path.is_file() and target_path.stat().st_size == expected_size:
-        print(f"  [REUSE] {remote_path} ({expected_size:,} bytes, verified)")
-        return True, expected_size, sha256_file(target_path)
+        actual_sha = sha256_file(target_path)
+        if expected_sha256 is None or actual_sha == expected_sha256:
+            print(f"  [REUSE] {remote_path} ({expected_size:,} bytes, verified)")
+            return True, expected_size, actual_sha
 
     temp_path = target_path.with_name(target_path.name + ".tmp_download")
+    if temp_path.exists():
+        temp_path.unlink(missing_ok=True)
+
     url = f"https://modelscope.cn/api/v1/models/{repo_id}/repo?Revision={revision}&FilePath={urllib.parse.quote(remote_path)}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.6"})
+    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.7"})
 
     h = hashlib.sha256()
     downloaded = 0
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        with open(temp_path, "wb") as out:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                out.write(chunk)
-                h.update(chunk)
-                downloaded += len(chunk)
-                if expected_size > 0:
-                    pct = downloaded / expected_size * 100
-                    sys.stdout.write(f"\r  [DOWNLOADING] {remote_path} ... {downloaded:,}/{expected_size:,} bytes ({pct:.1f}%)")
-                    sys.stdout.flush()
+    success = False
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            with open(temp_path, "wb") as out:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    h.update(chunk)
+                    downloaded += len(chunk)
+                    if expected_size > 0:
+                        pct = downloaded / expected_size * 100
+                        sys.stdout.write(f"\r  [DOWNLOADING] {remote_path} ... {downloaded:,}/{expected_size:,} bytes ({pct:.1f}%)")
+                        sys.stdout.flush()
 
-    sys.stdout.write("\n")
-    if expected_size > 0 and downloaded != expected_size:
-        temp_path.unlink(missing_ok=True)
-        raise IOError(f"Downloaded size mismatch for {remote_path}: got {downloaded}, expected {expected_size}")
+        sys.stdout.write("\n")
+        if expected_size > 0 and downloaded != expected_size:
+            raise IOError(f"Downloaded size mismatch for {remote_path}: got {downloaded}, expected {expected_size}")
+        digest = h.hexdigest()
+        if expected_sha256 and digest != expected_sha256:
+            raise IOError(f"Downloaded SHA-256 mismatch for {remote_path}: got {digest}, expected {expected_sha256}")
 
-    os.replace(temp_path, target_path)
-    return True, downloaded, h.hexdigest()
+        os.replace(temp_path, target_path)
+        success = True
+        return True, downloaded, digest
+    finally:
+        if not success:
+            temp_path.unlink(missing_ok=True)
 
 
 def ensure_selective_model(
@@ -162,7 +233,13 @@ def ensure_selective_model(
 
     Returns: (success: bool, status_message: str, manifest: dict|None)
     """
-    spec = BENCHMARK_MODEL_CATALOG.get(model_name)
+    if model_name in BLOCKED_MODELS:
+        return False, (
+            f"FORBIDDEN: Re-downloading '{model_name}' is strictly prohibited "
+            "(Historical challenger model policy: historical results preserved, no expensive re-download)"
+        ), None
+
+    spec = DOWNLOADABLE_MODEL_CATALOG.get(model_name)
     if not spec:
         # Check if model folder exists locally
         target_dir = models_dir / model_name
@@ -170,29 +247,33 @@ def ensure_selective_model(
             return True, f"Custom model directory {target_dir} exists", None
         return False, f"Unknown model '{model_name}' and folder does not exist", None
 
-    if not spec.get("allowed_in_v066", True):
-        return False, (
-            f"FORBIDDEN: Re-downloading '{model_name}' is strictly prohibited in v0.6.6 "
-            "(PHASE 1 / PHASE 31 policy: historical results preserved, no expensive re-download)"
-        ), None
-
     repo_id = spec["repo_id"]
     revision = spec.get("revision", "master")
     target_dir = models_dir / model_name
     required_names = spec["required_files"]
     forbidden_prefixes = spec.get("forbidden_files_prefix", ())
-
     manifest_file = target_dir / "download-manifest.json"
 
-    # Check if target already has all required files
-    if target_dir.is_dir():
-        missing_required = [f for f in required_names if not (target_dir / f).is_file()]
-        if not missing_required:
-            manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.is_file() else None
-            return True, f"Model '{model_name}' already installed and complete ({len(required_names)} required files verified)", manifest
+    files_to_download_names = set(required_names)
 
-    if not download_missing:
-        return False, f"MODEL NOT INSTALLED: '{model_name}' is missing under {models_dir} (pass --download-missing to selectively download)", None
+    # Check if target already has verified files
+    if target_dir.is_dir():
+        if manifest_file.is_file():
+            is_valid, msg, manifest, corrupted = verify_existing_model_integrity(target_dir, required_names)
+            if is_valid:
+                return True, f"Model '{model_name}' already installed and complete ({len(required_names)} files verified against manifest)", manifest
+            if not download_missing:
+                return False, f"MODEL CORRUPTED: '{model_name}' failed integrity check ({msg}). Pass --download-missing to repair.", None
+            print(f"Model integrity check failed: {msg}. Repairing {len(corrupted)} files...")
+            files_to_download_names = set(corrupted)
+        else:
+            if not download_missing:
+                return False, f"UNVERIFIED MODEL DIRECTORY: '{model_name}' exists under {models_dir} without download-manifest.json. Pass --download-missing to verify.", None
+            files_to_download_names = set(required_names)
+    else:
+        if not download_missing:
+            return False, f"MODEL NOT INSTALLED: '{model_name}' is missing under {models_dir} (pass --download-missing to selectively download)", None
+        files_to_download_names = set(required_names)
 
     print("\n" + "=" * 80)
     print(f"  Selective Model Downloader: {model_name} ({repo_id})")
@@ -206,7 +287,12 @@ def ensure_selective_model(
         onnx_files = query_modelscope_repo_files(repo_id, revision, root="onnx")
     except Exception:
         pass
-    all_remote = remote_files + onnx_files
+    all_remote = []
+    seen_paths = set()
+    for f in remote_files + onnx_files:
+        if f.path not in seen_paths:
+            seen_paths.add(f.path)
+            all_remote.append(f)
 
     required, optional, rejected = categorize_files(all_remote, required_names, forbidden_prefixes)
 
@@ -229,17 +315,38 @@ def ensure_selective_model(
     print("-" * 80)
 
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preserve existing valid records from manifest if repairing
+    existing_records: Dict[str, Dict[str, Any]] = {}
+    if manifest_file.is_file():
+        try:
+            m = json.loads(manifest_file.read_text(encoding="utf-8"))
+            f_list = m.get("files", [])
+            if isinstance(f_list, list):
+                for item in f_list:
+                    if isinstance(item, dict) and "path" in item:
+                        existing_records[item["path"]] = item
+        except Exception:
+            pass
+
     downloaded_files_record = []
     total_downloaded = 0
 
     for f in required:
         dest = target_dir / f.path
+        if f.path not in files_to_download_names and dest.is_file() and f.path in existing_records:
+            # File is verified and not corrupted
+            rec = existing_records[f.path]
+            downloaded_files_record.append(rec)
+            continue
+
         ok, sz, digest = download_single_file(repo_id, revision, f.path, dest, f.size)
-        downloaded_files_record.append({
+        rec = {
             "path": f.path,
             "size": sz,
             "sha256": digest,
-        })
+        }
+        downloaded_files_record.append(rec)
         total_downloaded += sz
 
     manifest_data = {
