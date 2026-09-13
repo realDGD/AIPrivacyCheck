@@ -12,6 +12,8 @@ def get_runtime_storage_map(data_dir: Path) -> Dict[str, Path]:
     return {
         "HOME": data_path.parent / "home",
         "XDG_CACHE_HOME": data_path / "cache",
+        "UV_CACHE_DIR": data_path / "cache" / "uv",
+        "UV_PYTHON_INSTALL_DIR": data_path / "python" / "installations",
         "MODELSCOPE_HOME": data_path / "modelscope-home",
         "MODELSCOPE_CACHE": data_path / "modelscope",
         "HF_HOME": data_path / "huggingface",
