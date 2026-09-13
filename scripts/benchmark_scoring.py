@@ -55,6 +55,27 @@ TYPE_COMPAT = {
     "DATE_OF_BIRTH": {"CN_BIRTH_DATE", "DATE", "PRIVATE_DATE"},
 }
 
+CRITICAL_ENTITY_TYPES = {
+    "CN_ID_CARD",
+    "GOVERNMENT_ID",
+    "US_SSN",
+    "CN_BANK_CARD",
+    "CREDIT_CARD",
+    "CN_PHONE_NUMBER",
+    "PHONE",
+    "EMAIL",
+    "private_email",
+    "private_phone",
+    "SECRET",
+    "secret",
+    "PASSWORD",
+    "API_TOKEN",
+    "PRIVATE_KEY",
+    "DATABASE_URI",
+    "PASSPORT",
+    "CN_PASSPORT",
+}
+
 
 def matches_type(pred_type: str, true_type: str) -> bool:
     if pred_type == true_type:
@@ -280,7 +301,15 @@ def score_semantic(text: str, gold_semantic: list, predictions: list) -> dict:
     and PL-style type labels, so strict exact-span scoring does not apply).
     Gold scope: semantic_privacy entries; sensitive=false golds are explicit
     negatives - a sensitive prediction overlapping them counts as overreach (FP only,
-    never TP)."""
+    never TP).
+
+    TODO (Future semantic benchmark refinement):
+    Currently, one prediction overlapping multiple golds marks all of them hit (many-to-one),
+    while multiple predictions overlapping one gold each count as +1 TP (one-to-many).
+    In a future semantic benchmark release, migrate to strict 1-to-1 bipartite matching
+    (each prediction matches at most one gold, each gold matched at most once) and
+    provide a dedicated `semantic_span_coverage` metric to measure character overlap.
+    """
     tp = fp = fn = 0
     overreach = 0
     gold_hit = [False] * len(gold_semantic)

@@ -39,7 +39,13 @@ sys.path.insert(0, str(SERVER_DIR))
 sys.path.insert(0, str(SERVER_DIR / "privacy" / "workers"))
 sys.path.insert(0, str(PROJECT_DIR / "scripts"))
 
-from benchmark_scoring import MetricBucket, matches_type, percentile, score_sample  # noqa: E402
+from benchmark_scoring import (  # noqa: E402
+    CRITICAL_ENTITY_TYPES,
+    MetricBucket,
+    matches_type,
+    percentile,
+    score_sample,
+)
 from benchmark_cache import BenchmarkPredictionCache  # noqa: E402
 from selective_downloader import ensure_selective_model  # noqa: E402
 
@@ -310,6 +316,7 @@ def evaluate_gliner_threshold_sweep(samples: list, all_predictions: list, thresh
         pii_free_total = pii_free_flagged = 0
         person_to_username = 0
         username_to_person = 0
+        redactable_fn = 0
         critical_fn = 0
         type_correct = 0
 
@@ -323,7 +330,7 @@ def evaluate_gliner_threshold_sweep(samples: list, all_predictions: list, thresh
                     pii_free_flagged += 1
             bucket.add(score, is_pii_free=is_pii_free)
 
-            # Check confusion and critical FN
+            # Check confusion, redactable FN, and critical FN
             for true_ent in sample["entities"]:
                 true_type = true_ent["type"]
                 should_redact = true_ent.get("should_redact", True)
@@ -333,7 +340,9 @@ def evaluate_gliner_threshold_sweep(samples: list, all_predictions: list, thresh
                     for p in t_preds
                 )
                 if not matched and should_redact:
-                    critical_fn += 1
+                    redactable_fn += 1
+                    if true_type in CRITICAL_ENTITY_TYPES:
+                        critical_fn += 1
 
                 # Overlap-based confusion
                 overlaps = [
@@ -376,6 +385,7 @@ def evaluate_gliner_threshold_sweep(samples: list, all_predictions: list, thresh
             "pii_free_total": pii_free_total,
             "person_to_username": person_to_username,
             "username_to_person": username_to_person,
+            "redactable_fn": redactable_fn,
             "critical_fn": critical_fn,
         }
         rows.append(row)
@@ -761,7 +771,7 @@ def main() -> int:
     # Offline score-cache mode: score directly without model weights or GPU
     if args.score_cache:
         print("=" * 100)
-        print("  AI Privacy Check - Benchmark Cache Offline Scoring (v0.6.6)")
+        print("  AI Privacy Check - Benchmark Cache Offline Scoring (v0.6.7)")
         print("=" * 100)
         cfg, cached_preds, _ = cache_mgr.load(Path(args.score_cache))
         print(f"Loaded cache from: {args.score_cache}")
@@ -789,7 +799,7 @@ def main() -> int:
     target_models = list(args.model) if args.model else [p.name for p in models_dir.iterdir() if p.is_dir() and not p.name.startswith(".")] if models_dir.is_dir() else []
 
     print("=" * 100)
-    print("  AI Privacy Check - Model Benchmark Harness (v0.6.6)")
+    print("  AI Privacy Check - Model Benchmark Harness (v0.6.7)")
     print("=" * 100)
     print(f"Fixture: {args.fixture} ({len(samples)} samples) | device: {device}"
           + ("" if cuda_ok else "  [CUDA: Not Executed - no CUDA device in this environment]"))
@@ -954,15 +964,15 @@ def main() -> int:
 
 
 def _print_gliner_sweep_tables(sweep_rows: list, hard_cases: dict, thresholds: list) -> None:
-    print("\n" + "=" * 116)
+    print("\n" + "=" * 128)
     print("  GLiNER Offline Threshold Sweep (Deterministic Labels: 33 types, Single-pass Inference)")
-    print("=" * 116)
-    print(f"{'Thresh':<8} | {'Precision':>10} | {'Recall':>8} | {'F1':>8} | {'TypeAcc':>8} | {'PII-free FPR':>12} | {'P->USER':>8} | {'USER->P':>8} | {'Crit FN':>8}")
-    print("-" * 116)
+    print("=" * 128)
+    print(f"{'Thresh':<8} | {'Precision':>10} | {'Recall':>8} | {'F1':>8} | {'TypeAcc':>8} | {'PII-free FPR':>12} | {'P->USER':>8} | {'USER->P':>8} | {'Redactable FN':>13} | {'Critical FN':>11}")
+    print("-" * 128)
     for r in sweep_rows:
         print(f"{r['threshold']:<8.2f} | {r['precision']*100:>9.1f}% | {r['recall']*100:>7.1f}% | {r['f1']*100:>7.1f}% | {r['type_acc']*100:>7.1f}% | "
-              f"{r['pii_free_flagged']}/{r['pii_free_total']} ({r['pii_free_fpr']*100:>4.1f}%) | {r['person_to_username']:>8} | {r['username_to_person']:>8} | {r['critical_fn']:>8}")
-    print("-" * 116)
+              f"{r['pii_free_flagged']}/{r['pii_free_total']} ({r['pii_free_fpr']*100:>4.1f}%) | {r['person_to_username']:>8} | {r['username_to_person']:>8} | {r['redactable_fn']:>13} | {r['critical_fn']:>11}")
+    print("-" * 128)
 
     print("\n" + "=" * 116)
     print("  Hard Cases Detailed Predictions Across Thresholds")
