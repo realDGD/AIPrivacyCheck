@@ -241,12 +241,29 @@ class ChineseIEDetector:
 
     def status(self) -> Dict[str, object]:
         model_dir = self._get_model_dir()
-        from .model_catalog import check_model_integrity
+        from .model_catalog import check_model_integrity, get_model_descriptor
         installed, _ = check_model_integrity(self.active_model_id, model_dir)
 
         model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
         actual_device = model_res.get("actual_device", "cpu")
-        model_ready = installed and bool(model_res.get("ready", False))
+        base_runtime_ready = bool(model_res.get("ready", False))
+        profile = model_res.get("runtime_profile")
+        descriptor = get_model_descriptor(self.active_model_id)
+
+        model_dependencies_ready = True
+        missing_dependencies: List[str] = []
+        if installed and base_runtime_ready and descriptor and descriptor.runtime_dependencies and profile:
+            try:
+                from model_installer import probe_model_runtime_dependencies
+                probe_res = probe_model_runtime_dependencies(self.data_dir, self.active_model_id, profile)
+                model_dependencies_ready = bool(probe_res.get("satisfied", False))
+                missing_dependencies = list(probe_res.get("missing", []))
+            except Exception:
+                model_dependencies_ready = False
+                missing_dependencies = list(descriptor.runtime_dependencies)
+
+        model_ready = installed and base_runtime_ready and model_dependencies_ready
+        repairable = installed and base_runtime_ready and not model_dependencies_ready
 
         return {
             "id": self.id,
@@ -257,22 +274,22 @@ class ChineseIEDetector:
             "installed": installed,
             "ready": True,  # Built-in is always ready
             "model_ready": model_ready,
+            "base_runtime_ready": base_runtime_ready,
+            "model_dependencies_ready": model_dependencies_ready,
+            "missing_dependencies": missing_dependencies,
+            "repairable": repairable,
             "device": actual_device,
             "path": str(model_dir) if installed else None,
         }
 
     def load(self) -> None:
-        # Pre-warm worker if model is installed
+        # Pre-warm worker if model is installed and fully ready
+        st = self.status()
+        if not st.get("model_ready"):
+            return
+
         model_dir = self._get_model_dir()
-        from .model_catalog import check_model_integrity
-        installed, _ = check_model_integrity(self.active_model_id, model_dir)
-        if not installed:
-            return
-
         model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
-        if not model_res.get("ready"):
-            return
-
         profile = model_res.get("runtime_profile")
         actual_dev = model_res.get("actual_device", "cpu")
         if profile:
@@ -327,15 +344,13 @@ class ChineseIEDetector:
             )
 
         # 2. Query isolated SiameseUIE worker if installed and ready
-        model_dir = self._get_model_dir()
-        from .model_catalog import check_model_integrity
-        installed, _ = check_model_integrity(self.active_model_id, model_dir)
-        if installed:
+        st = self.status()
+        if st.get("model_ready"):
+            model_dir = self._get_model_dir()
             model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
-            if model_res.get("ready"):
-                profile = model_res.get("runtime_profile")
-                device = model_res.get("actual_device", "cpu")
-                if profile:
+            profile = model_res.get("runtime_profile")
+            device = model_res.get("actual_device", "cpu")
+            if profile:
                     try:
                         from .worker_client import get_worker_client
                         worker_client = get_worker_client(self.data_dir)

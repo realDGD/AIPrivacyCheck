@@ -135,6 +135,54 @@ class ModelLifecycleController:
         threading.Thread(target=wait_for_install, daemon=True).start()
         return True
 
+    def start_repair(self, model_name: str) -> bool:
+        with self._lock:
+            if self._process is not None:
+                return False
+            try:
+                with model_installer.model_operation_lock(self.data_dir, model_name, non_blocking=True):
+                    pass
+            except RuntimeError:
+                return False
+            status_dir = self.data_dir / "status"
+            status_dir.mkdir(parents=True, exist_ok=True)
+            log_handle = self.log_file.open("ab", buffering=0)
+            env = os.environ.copy()
+            from privacy.runtime_env import build_runtime_env
+            env = build_runtime_env(self.data_dir, base_env=env)
+            env["APP_DATA_DIR"] = str(self.data_dir)
+            env["PYTHONUNBUFFERED"] = "1"
+            self._process = subprocess.Popen(
+                [sys.executable, str(APP_DIR / "model_installer.py"), "repair", model_name],
+                cwd=str(APP_DIR),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+            process = self._process
+
+        def wait_for_repair() -> None:
+            try:
+                process.wait()
+                log_handle.close()
+                DEVICE_MANAGER.invalidate_runtime_state()
+                model_installer.clear_dependency_probe_cache()
+                if process.returncode == 0:
+                    try:
+                        DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
+                    finally:
+                        PRIVACY.reset_models()
+            finally:
+                if not log_handle.closed:
+                    log_handle.close()
+                with self._lock:
+                    if self._process is process:
+                        self._process = None
+
+        threading.Thread(target=wait_for_repair, daemon=True).start()
+        return True
+
     def import_model(self, model_name: str, source_path: str) -> Tuple[bool, str]:
         path = Path(source_path).resolve()
         ok, msg = model_installer.import_local_model(self.data_dir, model_name, path)
@@ -297,6 +345,34 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "检测服务暂时不可用，请稍后重试"})
+            return
+
+        if route == "/api/model/runtime/repair":
+            if not self._is_admin():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "只有 fnOS 管理员可以修复模型运行环境"})
+                return
+            try:
+                payload = self._read_json()
+            except Exception:
+                payload = {}
+            model_name = str(payload.get("model", "")).strip()
+            if not model_name:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "缺少 model 参数"})
+                return
+            if not get_model_descriptor(model_name):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": f"未知模型标识: {model_name}"})
+                return
+            started = INSTALLER.start_repair(model_name)
+            status = HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT
+            self._json(
+                status,
+                {
+                    "ok": started,
+                    "started": started,
+                    "message": f"已开始修复模型 [{model_name}] 的运行环境" if started else "已有其他任务正在执行",
+                    "status": INSTALLER.status(),
+                },
+            )
             return
 
         if route == "/api/model/install":

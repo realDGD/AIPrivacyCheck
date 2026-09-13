@@ -1204,6 +1204,7 @@ function deriveModelRuntimeState(slot, deviceData = {}, catalogModel = null) {
   const det = (slot && slot.detector) || {};
   const isInstalled = Boolean(det.installed);
   const isReady = Boolean(det.ready);
+  const isRepairable = Boolean(det.repairable);
   const reqDevice = (deviceData.requested_device || "auto").toLowerCase();
   const hw = deviceData.hardware || {};
   const hasNvidia = Boolean(hw.nvidia_available);
@@ -1222,6 +1223,8 @@ function deriveModelRuntimeState(slot, deviceData = {}, catalogModel = null) {
 
   if (!isInstalled) {
     installButtonText = "从魔搭下载安装";
+  } else if (isRepairable) {
+    installButtonText = "修复运行环境";
   } else if (!isReady) {
     runtimeMissing = true;
     if (reqDevice === "cpu") {
@@ -1248,6 +1251,7 @@ function deriveModelRuntimeState(slot, deviceData = {}, catalogModel = null) {
   return {
     isInstalled,
     isReady,
+    isRepairable,
     runtimeMissing,
     missingRuntimeName,
     installButtonText,
@@ -1427,14 +1431,28 @@ function updateModelUI(data) {
         badge.textContent = "系统内置 (始终运行)";
         badge.className = "status-badge is-ready";
       } else if (slotId === "chinese_ie") {
-        badge.textContent = isInstalled ? (isReady ? "已加载 SiameseUIE" : "权重已就绪 (缺少运行时)") : "系统内置语法 (始终就绪)";
-        badge.className = (isInstalled && isReady) || !isInstalled ? "status-badge is-ready" : "status-badge";
+        if (isInstalled && isReady) {
+          badge.textContent = "已加载 SiameseUIE";
+          badge.className = "status-badge is-ready";
+        } else if (isInstalled && det.repairable) {
+          badge.textContent = "权重已就绪 (运行环境需修复)";
+          badge.className = "status-badge";
+        } else if (isInstalled) {
+          badge.textContent = "权重已就绪 (缺少运行时)";
+          badge.className = "status-badge";
+        } else {
+          badge.textContent = "系统内置语法 (始终就绪)";
+          badge.className = "status-badge is-ready";
+        }
       } else if (installState && installState.state === "installing") {
         badge.textContent = "正在安装";
         badge.className = "status-badge";
       } else if (isReady) {
         badge.textContent = "已就绪";
         badge.className = "status-badge is-ready";
+      } else if (isInstalled && det.repairable) {
+        badge.textContent = "权重已就绪 (运行环境需修复)";
+        badge.className = "status-badge";
       } else if (isInstalled) {
         badge.textContent = "权重已就绪 (缺少运行时)";
         badge.className = "status-badge";
@@ -1492,7 +1510,11 @@ function updateModelUI(data) {
           installBtn.className = "button button-primary button-small";
           installBtn.textContent = runtimeState.installButtonText;
           installBtn.disabled = !data.is_admin || data.installing;
-          installBtn.addEventListener("click", () => installModel(slot.active_model, isInstalled));
+          if (runtimeState.isRepairable) {
+            installBtn.addEventListener("click", () => repairModel(slot.active_model));
+          } else {
+            installBtn.addEventListener("click", () => installModel(slot.active_model, isInstalled));
+          }
           actions.append(installBtn);
         }
         if (runtimeState.showUninstall && slot.active_model) {
@@ -1507,6 +1529,20 @@ function updateModelUI(data) {
 
       controls.append(actions);
       item.append(header, desc, controls);
+
+      if (det.repairable && det.missing_dependencies && det.missing_dependencies.length > 0) {
+        const repairNotice = document.createElement("div");
+        repairNotice.className = "slot-item-notice";
+        repairNotice.style.fontSize = "11px";
+        repairNotice.style.color = "var(--brand-amber, #b06000)";
+        repairNotice.style.background = "rgba(255, 170, 0, 0.08)";
+        repairNotice.style.padding = "6px 10px";
+        repairNotice.style.borderRadius = "6px";
+        repairNotice.style.marginTop = "6px";
+        repairNotice.style.lineHeight = "1.4";
+        repairNotice.textContent = `⚠️ 模型专属运行依赖不完整，缺失: ${det.missing_dependencies.join(", ")}。请点击「修复运行环境」增量补齐。`;
+        item.append(repairNotice);
+      }
 
       if (slotId === "semantic_privacy") {
         const isCpuMode = dev.actual_device === "cpu" || (dev.requested_device || "").toLowerCase() === "cpu";
@@ -1605,6 +1641,23 @@ async function refreshModelStatus() {
     updateModelUI(await api("/api/model/status"));
   } catch (error) {
     if (elements.modelInlineStatus) elements.modelInlineStatus.textContent = "无法读取模型状态";
+  }
+}
+
+async function repairModel(modelId = "siamese-uie") {
+  const confirmed = window.confirm(`将为您修复模型 [${modelId}] 的专属运行依赖（不会重新下载模型权重）。继续吗？`);
+  if (!confirmed) return;
+  try {
+    const result = await api("/api/model/runtime/repair", {
+      method: "POST",
+      body: JSON.stringify({ model: modelId }),
+    });
+    updateModelUI({ ...result.status, is_admin: true });
+    if ($("installLogPanel")) $("installLogPanel").open = true;
+    toast("已开始在后台修复运行环境…");
+  } catch (error) {
+    toast(`修复启动失败: ${error.message}`);
+    await refreshModelStatus();
   }
 }
 
@@ -1830,10 +1883,12 @@ refreshModelStatus();
 
 if (typeof window !== "undefined") {
   window.deriveModelRuntimeState = deriveModelRuntimeState;
+  window.repairModel = repairModel;
 }
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     deriveModelRuntimeState,
+    repairModel,
     allocateReplacementToken,
     resetAnnotationInteractionState,
     invalidateRedactedState,

@@ -166,8 +166,24 @@ class GLiNERDetector(Detector):
         installed, _ = check_model_integrity(self.active_model_id, model_dir)
         model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
         actual_device = model_res.get("actual_device", "cpu")
-        model_ready = installed and bool(model_res.get("ready", False))
+        base_runtime_ready = bool(model_res.get("ready", False))
+        profile = model_res.get("runtime_profile")
         descriptor = get_model_descriptor(self.active_model_id)
+
+        model_dependencies_ready = True
+        missing_dependencies: List[str] = []
+        if installed and base_runtime_ready and descriptor and descriptor.runtime_dependencies and profile:
+            try:
+                from model_installer import probe_model_runtime_dependencies
+                probe_res = probe_model_runtime_dependencies(self.data_dir, self.active_model_id, profile)
+                model_dependencies_ready = bool(probe_res.get("satisfied", False))
+                missing_dependencies = list(probe_res.get("missing", []))
+            except Exception:
+                model_dependencies_ready = False
+                missing_dependencies = list(descriptor.runtime_dependencies)
+
+        model_ready = installed and base_runtime_ready and model_dependencies_ready
+        repairable = installed and base_runtime_ready and not model_dependencies_ready
 
         return {
             "id": self.id,
@@ -177,6 +193,10 @@ class GLiNERDetector(Detector):
             "active_model": self.active_model_id,
             "installed": installed,
             "ready": model_ready,
+            "base_runtime_ready": base_runtime_ready,
+            "model_dependencies_ready": model_dependencies_ready,
+            "missing_dependencies": missing_dependencies,
+            "repairable": repairable,
             "device": actual_device,
             "path": str(model_dir) if installed else None,
             "descriptor": descriptor.to_dict() if descriptor else None,
@@ -349,6 +369,13 @@ class GLiNERDetector(Detector):
 
                 if mapped_type == "USERNAME" and not self._is_plausible_username(text, start, end, actual_text):
                     continue
+                if mapped_type == "CREDIT_CARD":
+                    # Reject multi-line blocks (e.g. multi-line OTP backup codes) or non-standard digit counts
+                    if "\n" in actual_text or "\r" in actual_text:
+                        continue
+                    digits_only = [c for c in actual_text if c.isdigit()]
+                    if not (12 <= len(digits_only) <= 19):
+                        continue
                 pl = resolve_privacy_level(mapped_type, semantic_type=sem_type)
                 entities.append(
                     Entity(
@@ -606,8 +633,24 @@ class MemPrivacyDetector(Detector):
         installed, _ = check_model_integrity(self.active_model_id, model_dir)
         model_res = DEVICE_MANAGER.resolve_for_model(self.active_model_id)
         actual_device = model_res.get("actual_device", "cpu")
-        model_ready = installed and bool(model_res.get("ready", False))
+        base_runtime_ready = bool(model_res.get("ready", False))
+        profile = model_res.get("runtime_profile")
         descriptor = get_model_descriptor(self.active_model_id)
+
+        model_dependencies_ready = True
+        missing_dependencies: List[str] = []
+        if installed and base_runtime_ready and descriptor and descriptor.runtime_dependencies and profile:
+            try:
+                from model_installer import probe_model_runtime_dependencies
+                probe_res = probe_model_runtime_dependencies(self.data_dir, self.active_model_id, profile)
+                model_dependencies_ready = bool(probe_res.get("satisfied", False))
+                missing_dependencies = list(probe_res.get("missing", []))
+            except Exception:
+                model_dependencies_ready = False
+                missing_dependencies = list(descriptor.runtime_dependencies)
+
+        model_ready = installed and base_runtime_ready and model_dependencies_ready
+        repairable = installed and base_runtime_ready and not model_dependencies_ready
 
         return {
             "id": self.id,
@@ -617,6 +660,10 @@ class MemPrivacyDetector(Detector):
             "active_model": self.active_model_id,
             "installed": installed,
             "ready": model_ready,
+            "base_runtime_ready": base_runtime_ready,
+            "model_dependencies_ready": model_dependencies_ready,
+            "missing_dependencies": missing_dependencies,
+            "repairable": repairable,
             "device": actual_device,
             "path": str(model_dir) if installed else None,
             "descriptor": descriptor.to_dict() if descriptor else None,

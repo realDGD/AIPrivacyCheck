@@ -643,8 +643,213 @@ def ensure_model_runtime_dependencies(
 
     summary["installed"] = list(missing)
     summary["satisfied"] = True
+    clear_dependency_probe_cache()
     emit(f"模型 [{model_id}] 专属运行依赖安装完成: {', '.join(missing)}")
     return summary
+
+
+_PROBE_CACHE: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+_PROBE_CACHE_LOCK = threading.Lock()
+
+
+def clear_dependency_probe_cache() -> None:
+    """Clears in-memory dependency probe cache."""
+    with _PROBE_CACHE_LOCK:
+        _PROBE_CACHE.clear()
+
+
+def probe_model_runtime_dependencies(
+    data_dir: Path,
+    model_id: str,
+    profile: str,
+    command_runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Lightweight, read-only probe for model-specific runtime dependency satisfaction.
+
+    Uses stdlib importlib inside the isolated target venv without loading weights
+    or importing heavy machine learning frameworks.
+    """
+    descriptor = get_model_descriptor(model_id)
+    if not descriptor:
+        raise ValueError(f"未知的 ModelScope 模型标识: {model_id}")
+
+    required = list(descriptor.runtime_dependencies)
+    if not required:
+        return {
+            "model_id": model_id,
+            "profile": profile,
+            "required": [],
+            "missing": [],
+            "satisfied": True,
+            "error": None,
+        }
+
+    cache_key = (str(Path(data_dir).resolve()), model_id, profile)
+    if not force_refresh and command_runner is None:
+        with _PROBE_CACHE_LOCK:
+            if cache_key in _PROBE_CACHE:
+                return dict(_PROBE_CACHE[cache_key])
+
+    rt_manager = get_runtime_manager(data_dir)
+    python_bin = rt_manager.get_python_bin(profile)
+    if not python_bin.is_file():
+        res = {
+            "model_id": model_id,
+            "profile": profile,
+            "required": required,
+            "missing": required,
+            "satisfied": False,
+            "error": f"运行时 [{profile}] 解释器不存在: {python_bin}",
+        }
+        return res
+
+    runner = command_runner or _default_dependency_runner
+    missing, probe_err = _probe_dependency_specs(python_bin, tuple(required), runner)
+    if probe_err is not None:
+        res = {
+            "model_id": model_id,
+            "profile": profile,
+            "required": required,
+            "missing": required,
+            "satisfied": False,
+            "error": probe_err,
+        }
+    else:
+        missing_list = list(missing or [])
+        res = {
+            "model_id": model_id,
+            "profile": profile,
+            "required": required,
+            "missing": missing_list,
+            "satisfied": len(missing_list) == 0,
+            "error": None,
+        }
+
+    if command_runner is None:
+        with _PROBE_CACHE_LOCK:
+            _PROBE_CACHE[cache_key] = res
+
+    return res
+
+
+def repair_model_runtime(
+    data_dir: Path,
+    model_id: str,
+    command_runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+) -> Tuple[bool, str]:
+    """Repairs runtime environment and model-specific dependencies for an already-installed model.
+
+    Preserves existing weights and intact runtime:
+    - Never re-downloads model weights
+    - Never rebuilds functional venv or reinstalls intact PyTorch
+    - Idempotently migrates base runtime contract
+    - Installs only missing model-specific dependencies
+    - Runs real worker smoke test to verify readiness
+    - Invalidates runtime caches and resets models
+    """
+    descriptor = validate_model_id(model_id)
+    target_dir = get_model_dir(data_dir, model_id)
+    weights_ok, integrity_err = verify_model_integrity(target_dir, model_id)
+    if not weights_ok:
+        return False, f"模型权重校验失败，无法仅修复运行环境: {integrity_err}"
+
+    runner = command_runner or _default_dependency_runner
+
+    with model_operation_lock(data_dir, model_id):
+        DEVICE_MANAGER.set_data_dir(data_dir)
+        diag = DEVICE_MANAGER.probe_diagnostics(force_refresh=True)
+        req = DEVICE_MANAGER.get_requested_device()
+        has_nv = bool(diag["hardware"].get("nvidia_available", False))
+
+        target_profile: str
+        target_device: str
+
+        if req == "cuda":
+            if not descriptor.supports_cuda:
+                return False, f"模型 [{model_id}] 不支持 CUDA 加速。"
+            if not has_nv:
+                return False, "当前配置为 CUDA 模式，但主机未检测到可用 NVIDIA GPU 或驱动。"
+            target_profile = PROFILE_TORCH_CUDA
+            target_device = "cuda"
+        elif req == "cpu":
+            if not descriptor.supports_cpu:
+                return False, f"模型 [{model_id}] 仅支持 CUDA 运行，不支持 CPU 模式。"
+            target_profile = PROFILE_TORCH_CPU
+            target_device = "cpu"
+        else:  # "auto"
+            if has_nv and descriptor.supports_cuda:
+                target_profile = PROFILE_TORCH_CUDA
+                target_device = "cuda"
+            else:
+                if not descriptor.supports_cpu:
+                    return False, f"主机未检测到可用 NVIDIA GPU，且模型 [{model_id}] 不支持 CPU。"
+                target_profile = PROFILE_TORCH_CPU
+                target_device = "cpu"
+
+        rt_manager = get_runtime_manager(data_dir)
+        python_bin = rt_manager.get_python_bin(target_profile)
+        if not python_bin.is_file():
+            return False, f"运行时 [{target_profile}] 解释器不存在，请先安装运行时环境: {python_bin}"
+
+        emit(f"正在检查 [{target_profile}] 基础运行环境...")
+        write_state(data_dir, "installing", f"正在检查 [{target_profile}] 基础运行环境...", model_id)
+        try:
+            ensure_base_runtime_contract(data_dir, target_profile, command_runner=runner)
+            emit("基础运行环境已就绪。")
+        except Exception as exc:
+            write_state(data_dir, "error", f"基础运行环境校验失败: {exc}", model_id)
+            return False, f"基础运行环境校验失败: {exc}"
+
+        emit(f"正在检查 [{descriptor.display_name}] 模型专属依赖...")
+        write_state(data_dir, "installing", f"正在检查并补齐模型 [{model_id}] 专属依赖...", model_id)
+        try:
+            ensure_model_runtime_dependencies(data_dir, model_id, target_profile, command_runner=runner)
+        except Exception as exc:
+            write_state(data_dir, "error", f"模型专属依赖安装失败: {exc}", model_id)
+            return False, f"模型专属依赖安装失败: {exc}"
+
+        emit("正在执行模型专属依赖 Probe...")
+        probe_res = probe_model_runtime_dependencies(
+            data_dir, model_id, target_profile, command_runner=runner, force_refresh=True
+        )
+        if not probe_res.get("satisfied"):
+            missing = probe_res.get("missing", [])
+            err_msg = f"依赖复核未通过，仍缺少: {', '.join(missing)}"
+            write_state(data_dir, "error", err_msg, model_id)
+            return False, err_msg
+        emit("模型专属运行依赖已就绪。")
+
+        # Worker smoke test
+        emit(f"正在执行 {descriptor.display_name} 冒烟推理...")
+        write_state(data_dir, "testing", "正在执行端到端冒烟推理验证...", model_id)
+        client = get_worker_client(data_dir)
+        smoke_ok, smoke_err = client.run_smoke_test(
+            model_id=model_id,
+            model_path=target_dir,
+            profile=target_profile,
+            device=target_device,
+        )
+        if not smoke_ok:
+            write_state(data_dir, "error", f"冒烟推理验证未通过: {smoke_err}", model_id)
+            emit(f"错误: 冒烟推理未通过 ({smoke_err})，模型权重已保留供排查。")
+            return False, f"冒烟推理验证未通过: {smoke_err}"
+
+        emit("冒烟推理通过。")
+        write_state(data_dir, "ready", f"模型已就绪: {target_dir}", model_id)
+        emit("运行环境修复完成。")
+
+        # Invalidate caches
+        clear_dependency_probe_cache()
+        DEVICE_MANAGER.invalidate_runtime_state()
+        DEVICE_MANAGER.invalidate_cache()
+        try:
+            from privacy.service import PRIVACY
+            PRIVACY.reset_models()
+        except Exception:
+            pass
+
+        return True, "运行环境修复完成"
 
 
 def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
@@ -1036,6 +1241,10 @@ def main() -> int:
                 write_state(data_dir, "ready", f"模型已就绪: {checkpoint_dir}", model_id)
                 emit("安装流程全部完成。")
                 return 0
+        elif action == "repair":
+            write_state(data_dir, "installing", f"正在检查并修复模型 [{model_id}] 运行环境...", model_id)
+            ok, msg = repair_model_runtime(data_dir, model_id)
+            return 0 if ok else 1
         elif action == "import":
             if len(sys.argv) < 4:
                 emit("用法: python model_installer.py import <model_id> <source_path>")

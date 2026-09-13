@@ -76,6 +76,11 @@ class DeviceManager:
         with self._lock:
             self._diagnostics_cache = None
             self._diagnostics_generation += 1
+        try:
+            from model_installer import clear_dependency_probe_cache
+            clear_dependency_probe_cache()
+        except Exception:
+            pass
 
     def invalidate_runtime_state(self) -> None:
         """Thread-safely invalidates both underlying runtime probe cache and diagnostics cache."""
