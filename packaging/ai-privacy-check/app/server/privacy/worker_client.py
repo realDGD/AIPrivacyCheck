@@ -659,6 +659,21 @@ class WorkerClient:
             except Exception as exc:
                 logger.warning(f"终止 worker [{getattr(worker, 'model_id', '')}] 异常: {exc}")
 
+    def stop_workers_for_profile(self, profile: str) -> List[str]:
+        """Stops all active workers utilizing a specific runtime profile."""
+        stopped = []
+        with self._lock:
+            keys_to_stop = [k for k, w in self._workers.items() if getattr(w, "profile", None) == profile]
+            for k in keys_to_stop:
+                worker = self._workers.pop(k, None)
+                if worker:
+                    try:
+                        worker.retire()
+                        stopped.append(k)
+                    except Exception:
+                        pass
+        return stopped
+
     def stop_all(self) -> None:
         with self._lock:
             victims = list(self._workers.values())
@@ -679,9 +694,15 @@ class WorkerClient:
         model_path: Path,
         profile: str,
         device: str = "cpu",
+        python_bin: Optional[Path] = None,
     ) -> Tuple[bool, Optional[str]]:
-        """Executes a synthetic end-to-end smoke inference test to verify model + worker readiness."""
-        _, infer_timeout = self.get_timeout_for_model(model_id, device=device)
+        """Executes a synthetic end-to-end smoke inference test to verify model + worker readiness.
+
+        When python_bin is supplied (e.g. during staging environment verification),
+        creates a dedicated ephemeral worker targeting the specified interpreter.
+        """
+        startup_timeout, infer_timeout = self.get_timeout_for_model(model_id, device=device)
+        ephemeral_worker: Optional[RuntimeWorkerProcess] = None
         try:
             from .model_security import gate_model_security
             gate_model_security(model_path)
@@ -689,7 +710,20 @@ class WorkerClient:
                 if device == "cuda" and "memprivacy" in model_id.lower():
                     self.stop_other_cuda_workers(keep_model_id=model_id)
 
-                worker = self.get_worker(model_id, profile, device=device)
+                if python_bin is not None:
+                    worker_script = self._get_worker_script(model_id)
+                    ephemeral_worker = RuntimeWorkerProcess(
+                        python_bin=python_bin,
+                        worker_script=worker_script,
+                        model_id=model_id,
+                        profile=profile,
+                        device=device,
+                        startup_timeout=startup_timeout,
+                        data_dir=self.data_dir,
+                    )
+                    worker = ephemeral_worker
+                else:
+                    worker = self.get_worker(model_id, profile, device=device)
 
                 if "gliner" in model_id.lower():
                     sample_text = "My email is test@example.com."
@@ -728,6 +762,11 @@ class WorkerClient:
         except Exception as exc:
             return False, f"冒烟测试异常: {exc}"
         finally:
+            if ephemeral_worker is not None:
+                try:
+                    ephemeral_worker.retire()
+                except Exception:
+                    pass
             if device == "cuda" and "memprivacy" in model_id.lower():
                 self.stop_worker_for_model(model_id)
 

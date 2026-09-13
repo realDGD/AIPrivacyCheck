@@ -16,9 +16,17 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from .python_runtime import (
+    MANAGED_PYTHON_VERSION,
+    REQUIRED_PYTHON_CAPABILITIES,
+    RUNTIME_MANIFEST_SCHEMA_VERSION,
+    probe_python_capabilities,
+)
 
 
 PYPI_MIRROR_URL = "https://mirrors.aliyun.com/pypi/simple/"
@@ -141,6 +149,39 @@ class RuntimeManager:
             else:
                 self._probe_cache.pop(profile, None)
 
+    def manifest_file(self, profile: str) -> Path:
+        return self.profile_dir(profile) / "runtime-manifest.json"
+
+    def adopt_legacy_runtime(self, profile: str) -> bool:
+        """Adopts an existing healthy legacy virtual environment into schema v3."""
+        interp = self.interpreter_path(profile)
+        if not interp:
+            return False
+        manifest_path = self.manifest_file(profile)
+        if manifest_path.is_file():
+            return False
+        py_cap = probe_python_capabilities(interp, runner=self._runner)
+        if not py_cap.get("ok"):
+            return False
+        try:
+            manifest = {
+                "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
+                "profile": profile,
+                "python": {
+                    "provider": "adopted-legacy",
+                    "version": py_cap.get("version"),
+                    "executable": str(interp),
+                    "capabilities_verified": True,
+                },
+                "base_contract_version": 2,
+                "created_by": "AIPrivacyCheck/0.6.11",
+                "created_at": int(time.time()),
+            }
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
     def probe_profile(self, profile: str, force_refresh: bool = False) -> Dict[str, Any]:
         """Probes an isolated runtime profile via its dedicated interpreter."""
         with self._lock:
@@ -167,6 +208,12 @@ class RuntimeManager:
                 "device_name": None,
                 "device_count": 0,
                 "interpreter": None,
+                "python_runtime_ready": False,
+                "python_runtime_source": "none",
+                "python_runtime_version": None,
+                "missing_python_capabilities": [],
+                "runtime_rebuild_required": False,
+                "base_packages_ready": False,
                 "error": "运行时未安装",
             }
             with self._lock:
@@ -174,17 +221,37 @@ class RuntimeManager:
                     self._probe_cache[profile] = status
             return status
 
-        # Execute framework-specific verification probe in isolated subprocess
+        # Unified single-subprocess probe: verifies stdlib/native Python capabilities first,
+        # then framework (torch/cuda).
         probe_code = (
-            "import json, sys, torch\n"
-            "is_cuda = bool(torch.cuda.is_available())\n"
+            "import json, sys\n"
+            "cap_names = ['lzma', '_lzma', 'bz2', '_bz2', 'ssl', '_ssl', 'sqlite3', '_sqlite3', 'ctypes', '_ctypes', 'zlib', 'hashlib', 'json', 'multiprocessing', 'subprocess', 'venv', 'ensurepip']\n"
+            "missing_caps = []\n"
+            "for m in cap_names:\n"
+            "    try: __import__(m)\n"
+            "    except Exception: missing_caps.append(m)\n"
+            "py_ok = len(missing_caps) == 0\n"
+            "base_prefix = getattr(sys, 'base_prefix', sys.prefix)\n"
+            "py_source = 'uv-managed' if 'installations' in base_prefix else ('legacy-system-python' if any(base_prefix.startswith(p) for p in ('/usr', '/lib', '/bin', '/System', '/private')) else 'custom')\n"
             "res = {\n"
-            "  'framework_version': torch.__version__,\n"
-            "  'cuda_version': getattr(torch.version, 'cuda', None),\n"
-            "  'cuda_available': is_cuda,\n"
-            "  'device_count': torch.cuda.device_count() if is_cuda else 0,\n"
-            "  'device_name': torch.cuda.get_device_name(0) if is_cuda and torch.cuda.device_count() > 0 else None\n"
+            "  'python_runtime_ready': py_ok,\n"
+            "  'python_runtime_source': py_source,\n"
+            "  'python_runtime_version': '.'.join(map(str, sys.version_info[:3])),\n"
+            "  'missing_python_capabilities': missing_caps,\n"
             "}\n"
+            "if py_ok:\n"
+            "    try:\n"
+            "        import torch\n"
+            "        is_cuda = bool(torch.cuda.is_available())\n"
+            "        res.update({\n"
+            "          'framework_version': torch.__version__,\n"
+            "          'cuda_version': getattr(torch.version, 'cuda', None),\n"
+            "          'cuda_available': is_cuda,\n"
+            "          'device_count': torch.cuda.device_count() if is_cuda else 0,\n"
+            "          'device_name': torch.cuda.get_device_name(0) if is_cuda and torch.cuda.device_count() > 0 else None\n"
+            "        })\n"
+            "    except Exception as e:\n"
+            "        res.update({'torch_error': str(e), 'cuda_available': False})\n"
             "print(json.dumps(res))\n"
         )
 
@@ -205,34 +272,91 @@ class RuntimeManager:
                 "device_name": None,
                 "device_count": 0,
                 "interpreter": str(interp),
+                "python_runtime_ready": False,
+                "python_runtime_source": "unknown",
+                "python_runtime_version": None,
+                "missing_python_capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                "runtime_rebuild_required": True,
+                "base_packages_ready": False,
                 "error": f"运行时验证失败: {err_msg}",
             }
         else:
             try:
                 data = json.loads(stdout.strip())
-                cuda_avail = bool(data.get("cuda_available", False))
-                if descriptor.device_target == "cuda":
-                    verified = cuda_avail
-                    err = None if cuda_avail else "框架已安装，但未检测到可用 CUDA 驱动与硬件。"
-                else:
-                    verified = True
-                    err = None
+                py_ready = bool(data.get("python_runtime_ready", True))
+                py_source = str(data.get("python_runtime_source", "uv-managed"))
+                py_ver = data.get("python_runtime_version")
+                missing_caps = list(data.get("missing_python_capabilities", []))
 
-                status = {
-                    "profile": profile,
-                    "framework": descriptor.framework,
-                    "device_target": descriptor.device_target,
-                    "display_name": descriptor.display_name,
-                    "installed": True,
-                    "verified": verified,
-                    "cuda_available": cuda_avail,
-                    "framework_version": data.get("framework_version"),
-                    "cuda_version": data.get("cuda_version"),
-                    "device_name": data.get("device_name"),
-                    "device_count": data.get("device_count", 0),
-                    "interpreter": str(interp),
-                    "error": err,
-                }
+                manifest_path = self.manifest_file(profile)
+                if manifest_path.is_file():
+                    try:
+                        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        rebuild_required = not py_ready or bool(manifest_data.get("schema_version", 1) < 3 and not py_ready)
+                    except Exception:
+                        rebuild_required = not py_ready
+                else:
+                    if py_ready:
+                        self.adopt_legacy_runtime(profile)
+                        rebuild_required = False
+                    else:
+                        rebuild_required = True
+
+                if not py_ready:
+                    status = {
+                        "profile": profile,
+                        "framework": descriptor.framework,
+                        "device_target": descriptor.device_target,
+                        "display_name": descriptor.display_name,
+                        "installed": True,
+                        "verified": False,
+                        "cuda_available": False,
+                        "framework_version": None,
+                        "cuda_version": None,
+                        "device_name": None,
+                        "device_count": 0,
+                        "interpreter": str(interp),
+                        "python_runtime_ready": False,
+                        "python_runtime_source": py_source,
+                        "python_runtime_version": py_ver,
+                        "missing_python_capabilities": missing_caps,
+                        "runtime_rebuild_required": True,
+                        "base_packages_ready": False,
+                        "error": f"Python 原生能力缺失: {', '.join(missing_caps)}",
+                    }
+                else:
+                    cuda_avail = bool(data.get("cuda_available", False))
+                    fw_version = data.get("framework_version")
+                    base_pkgs_ready = fw_version is not None
+                    if descriptor.device_target == "cuda":
+                        fw_verified = cuda_avail
+                        err = None if cuda_avail else "框架已安装，但未检测到可用 CUDA 驱动与硬件。"
+                    else:
+                        fw_verified = base_pkgs_ready
+                        err = None if base_pkgs_ready else data.get("torch_error", "PyTorch 基础框架未就绪")
+
+                    verified = fw_verified and not rebuild_required
+                    status = {
+                        "profile": profile,
+                        "framework": descriptor.framework,
+                        "device_target": descriptor.device_target,
+                        "display_name": descriptor.display_name,
+                        "installed": True,
+                        "verified": verified,
+                        "cuda_available": cuda_avail,
+                        "framework_version": fw_version,
+                        "cuda_version": data.get("cuda_version"),
+                        "device_name": data.get("device_name"),
+                        "device_count": data.get("device_count", 0),
+                        "interpreter": str(interp),
+                        "python_runtime_ready": True,
+                        "python_runtime_source": py_source,
+                        "python_runtime_version": py_ver,
+                        "missing_python_capabilities": [],
+                        "runtime_rebuild_required": rebuild_required,
+                        "base_packages_ready": base_pkgs_ready,
+                        "error": err,
+                    }
             except Exception as parse_exc:
                 status = {
                     "profile": profile,
@@ -247,6 +371,12 @@ class RuntimeManager:
                     "device_name": None,
                     "device_count": 0,
                     "interpreter": str(interp),
+                    "python_runtime_ready": False,
+                    "python_runtime_source": "unknown",
+                    "python_runtime_version": None,
+                    "missing_python_capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                    "runtime_rebuild_required": True,
+                    "base_packages_ready": False,
                     "error": f"无法解析验证输出: {parse_exc}",
                 }
 

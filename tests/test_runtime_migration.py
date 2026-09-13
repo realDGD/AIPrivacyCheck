@@ -56,10 +56,32 @@ class RuntimeMigrationTests(unittest.TestCase):
         return m_dir
 
     def _create_mock_runtime(self, profile: str = "torch-cpu") -> Path:
-        venv_bin = self.data_dir / "runtimes" / profile / "venv" / "bin"
+        rt_dir = self.data_dir / "runtimes" / profile
+        venv_bin = rt_dir / "venv" / "bin"
         venv_bin.mkdir(parents=True, exist_ok=True)
         py_bin = venv_bin / "python"
-        py_bin.touch(mode=0o755)
+        py_bin.write_text(
+            '#!/bin/sh\n'
+            'echo \'{"python_runtime_ready": true, "python_runtime_source": "uv-managed", "python_runtime_version": "3.12.9", "missing_python_capabilities": [], "framework_version": "2.6.0+cpu", "cuda_available": false}\'\n'
+        )
+        py_bin.chmod(0o755)
+        manifest = {
+            "schema_version": 3,
+            "profile": profile,
+            "created_at": 1741500000,
+            "python_runtime_source": "managed",
+            "python_runtime_version": "3.12.9",
+            "python_interpreter": str(py_bin),
+            "managed_python_path": "/fake/managed/python",
+            "capabilities": [
+                "lzma", "_lzma", "bz2", "_bz2", "ssl", "_ssl", "sqlite3", "_sqlite3",
+                "ctypes", "_ctypes", "zlib", "hashlib", "json", "multiprocessing",
+                "subprocess", "venv", "ensurepip"
+            ],
+            "capabilities_verified_at": 1741500000,
+            "framework_version": "2.6.0+cpu",
+        }
+        (rt_dir / "runtime-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         return py_bin
 
     def test_case_a_dependency_drift_detection(self):

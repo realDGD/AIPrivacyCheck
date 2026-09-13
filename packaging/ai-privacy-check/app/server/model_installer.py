@@ -40,6 +40,15 @@ from privacy.runtime_manager import (
     RuntimeManager,
     get_runtime_manager,
 )
+from privacy.python_runtime import (
+    MANAGED_PYTHON_VERSION,
+    RUNTIME_MANIFEST_SCHEMA_VERSION,
+    REQUIRED_PYTHON_CAPABILITIES,
+    build_uv_env,
+    ensure_managed_python,
+    find_uv,
+    probe_python_capabilities,
+)
 from privacy.runtime_env import build_runtime_env, prepare_runtime_dirs
 from privacy.worker_client import get_worker_client
 
@@ -173,6 +182,85 @@ def model_operation_lock(data_dir: Path, model_id: str, non_blocking: bool = Tru
         except (BlockingIOError, OSError) as exc:
             os.close(fd)
             raise RuntimeError(f"模型 [{model_id}] 当前正在执行安装、导入或卸载操作，请稍后重试。") from exc
+
+        _LOCK_STATE.acquired[key] = {"fd": fd, "count": 1}
+        try:
+            yield lock_file
+        finally:
+            if key in _LOCK_STATE.acquired:
+                _LOCK_STATE.acquired[key]["count"] -= 1
+                if _LOCK_STATE.acquired[key]["count"] <= 0:
+                    del _LOCK_STATE.acquired[key]
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    except Exception:
+        raise
+
+
+MIN_FREE_DISK_BYTES_CPU = 2 * 1024 * 1024 * 1024  # 2.0 GB
+MIN_FREE_DISK_BYTES_CUDA = int(4.5 * 1024 * 1024 * 1024)  # 4.5 GB
+
+
+def check_disk_space_for_rebuild(data_dir: Path, profile: str) -> Tuple[bool, Optional[str]]:
+    """Checks whether sufficient free disk space is available for staging runtime rebuild."""
+    try:
+        usage = shutil.disk_usage(data_dir)
+        free_bytes = usage.free
+    except Exception:
+        return True, None
+
+    required_bytes = MIN_FREE_DISK_BYTES_CUDA if profile == PROFILE_TORCH_CUDA else MIN_FREE_DISK_BYTES_CPU
+    if free_bytes < required_bytes:
+        req_gb = required_bytes / (1024 ** 3)
+        avail_gb = free_bytes / (1024 ** 3)
+        return False, f"磁盘剩余空间不足: 重建 [{profile}] 需要至少 {req_gb:.1f} GB 可用空间，当前仅有 {avail_gb:.1f} GB"
+    return True, None
+
+
+@contextmanager
+def runtime_operation_lock(data_dir: Path, profile: str, non_blocking: bool = True):
+    """Acquires a cross-process mutual exclusion file lock for a runtime profile operation.
+
+    Uses fcntl.flock on ${DATA_DIR}/locks/runtime_{profile}.lock.
+    Re-entrant within the same thread.
+    """
+    if profile not in (PROFILE_TORCH_CPU, PROFILE_TORCH_CUDA):
+        raise ValueError(f"不支持的运行时 Profile: {profile}")
+    locks_dir = (Path(data_dir) / "locks").resolve()
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = (locks_dir / f"runtime_{profile}.lock").resolve()
+
+    if not hasattr(_LOCK_STATE, "acquired"):
+        _LOCK_STATE.acquired = {}
+
+    key = str(lock_file)
+    if key in _LOCK_STATE.acquired:
+        _LOCK_STATE.acquired[key]["count"] += 1
+        try:
+            yield lock_file
+        finally:
+            _LOCK_STATE.acquired[key]["count"] -= 1
+            if _LOCK_STATE.acquired[key]["count"] <= 0:
+                del _LOCK_STATE.acquired[key]
+        return
+
+    fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o666)
+    flags = fcntl.LOCK_EX
+    if non_blocking:
+        flags |= fcntl.LOCK_NB
+
+    try:
+        try:
+            fcntl.flock(fd, flags)
+        except (BlockingIOError, OSError) as exc:
+            os.close(fd)
+            raise RuntimeError(f"运行时 [{profile}] 当前正在执行环境部署或重建操作，请稍后重试。") from exc
 
         _LOCK_STATE.acquired[key] = {"fd": fd, "count": 1}
         try:
@@ -424,13 +512,7 @@ def sanitize_model_config(model_dir: Path) -> Tuple[bool, str]:
 
 
 def _find_uv() -> Optional[str]:
-    uv_bin = shutil.which("uv")
-    if uv_bin:
-        return uv_bin
-    for p in ("/usr/local/bin/uv", "/opt/homebrew/bin/uv", os.path.expanduser("~/.cargo/bin/uv")):
-        if os.path.isfile(p) and os.access(p, os.X_OK):
-            return p
-    return None
+    return find_uv()
 
 
 def _pip_install_command(uv_bin: Optional[str], interp: Path, venv_dir: Path, args: List[str]) -> List[str]:
@@ -733,6 +815,206 @@ def probe_model_runtime_dependencies(
     return res
 
 
+def rebuild_runtime(
+    data_dir: Path,
+    profile: str,
+    command_runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+    emit_fn: Optional[Callable[[str], None]] = None,
+) -> Tuple[bool, str]:
+    """Atomically rebuilds an isolated runtime venv using uv-managed Python.
+
+    1. Acquires runtime_operation_lock.
+    2. Verifies disk space preflight (fail-fast without mutating state).
+    3. Finds all installed models that utilize this profile, and unions their runtime_dependencies.
+       NEVER touches or re-downloads model weights in ${DATA_DIR}/models/*.
+    4. Ensures uv-managed Python 3.12.9 is provisioned in ${DATA_DIR}/python/installations.
+    5. Creates a staging venv in ${DATA_DIR}/runtime/${profile}/venv.rebuild-<timestamp>.
+    6. Installs base ML packages in staging venv.
+    7. Installs aggregated model dependencies in staging venv.
+    8. Validates staging interpreter capabilities and runs real worker smoke tests.
+    9. On success: stops running profile workers, atomically swaps staging -> venv, writes manifest v3.
+    10. On failure: deletes staging venv, leaves existing venv untouched.
+    """
+    if profile not in (PROFILE_TORCH_CPU, PROFILE_TORCH_CUDA):
+        raise ValueError(f"不支持的运行时 Profile: {profile}")
+
+    log_emit = emit_fn or emit
+    runner = command_runner or _default_dependency_runner
+
+    with runtime_operation_lock(data_dir, profile):
+        # 1. Disk space check
+        space_ok, space_err = check_disk_space_for_rebuild(data_dir, profile)
+        if not space_ok:
+            log_emit(f"运行时 [{profile}] 重建中止: {space_err}")
+            return False, space_err or "磁盘剩余空间不足"
+
+        # 2. Discover installed models using this profile and aggregate dependencies
+        installed_models: List[str] = []
+        aggregated_deps: set = set()
+        for mid, desc in MODEL_CATALOG.items():
+            m_dir = get_model_dir(data_dir, mid)
+            if m_dir.is_dir():
+                integ_ok, _ = verify_model_integrity(m_dir, mid)
+                if integ_ok:
+                    if profile == PROFILE_TORCH_CUDA and desc.supports_cuda:
+                        installed_models.append(mid)
+                        aggregated_deps.update(desc.runtime_dependencies)
+                    elif profile == PROFILE_TORCH_CPU and desc.supports_cpu:
+                        installed_models.append(mid)
+                        aggregated_deps.update(desc.runtime_dependencies)
+
+        log_emit(f"运行时 [{profile}] 准备重建，关联已安装模型: {installed_models or '无'}")
+
+        # 3. Ensure uv and managed Python
+        uv_bin = find_uv()
+        if not uv_bin:
+            err_msg = "未找到 uv 工具，无法构建托管 Python 运行环境"
+            log_emit(f"错误: {err_msg}")
+            return False, err_msg
+
+        try:
+            managed_python = ensure_managed_python(data_dir, uv_bin=uv_bin, runner=command_runner, emit_fn=log_emit)
+        except Exception as exc:
+            err_msg = f"准备托管 Python 失败: {exc}"
+            log_emit(f"错误: {err_msg}")
+            return False, err_msg
+
+        # 4. Prepare staging directory
+        rt_manager = get_runtime_manager(data_dir)
+        profile_dir = rt_manager.profile_dir(profile)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        venv_dir = rt_manager.venv_dir(profile)
+        staging_id = int(time.time() * 1000)
+        staging_venv = profile_dir / f"venv.rebuild-{staging_id}"
+        staging_interp = staging_venv / "bin" / "python"
+
+        try:
+            log_emit(f"正在创建临时重建运行环境: {staging_venv}...")
+            uv_env = build_uv_env(data_dir)
+            create_cmd = [uv_bin, "venv", "--python", str(managed_python), str(staging_venv)]
+            ret, stdout, stderr = runner(create_cmd, env=uv_env)
+            if ret != 0:
+                raise RuntimeError(f"创建临时虚拟环境失败: {stderr.strip() or stdout.strip()}")
+
+            def run_install_staging(*args: str) -> None:
+                cmd = _pip_install_command(uv_bin, staging_interp, staging_venv, list(args))
+                retcode, out, err = runner(cmd, env=uv_env, timeout=1800)
+                if retcode != 0:
+                    raise RuntimeError(f"安装依赖失败 ({' '.join(args[:3])}): {err.strip() or out.strip()}")
+
+            log_emit(f"正在临时环境中安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
+            run_install_staging("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
+
+            if profile == PROFILE_TORCH_CPU:
+                log_emit(f"正在临时环境中安装 [{profile}] PyTorch CPU 轮子...")
+                run_install_staging("torch", "--index-url", PYTORCH_CPU_INDEX)
+                run_install_staging(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+            elif profile == PROFILE_TORCH_CUDA:
+                log_emit(f"正在临时环境中安装 [{profile}] PyTorch CUDA (cu124) 轮子...")
+                run_install_staging("torch", "--index-url", PYTORCH_CUDA_INDEX)
+                run_install_staging(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
+
+            if aggregated_deps:
+                deps_list = sorted(aggregated_deps)
+                log_emit(f"正在临时环境中安装关联模型的专属依赖 ({len(deps_list)} 项): {', '.join(deps_list)}...")
+                run_install_staging(*deps_list, "-i", PYPI_MIRROR_URL)
+
+            # Validate staging interpreter native capabilities
+            log_emit("正在验证临时环境 Python 原生能力...")
+            caps_ok, missing_caps = probe_python_capabilities(staging_interp, runner=command_runner)
+            if not caps_ok:
+                raise RuntimeError(f"临时环境 Python 原生能力缺失: {', '.join(missing_caps)}")
+
+            # Smoke test installed models using staging interpreter
+            client = get_worker_client(data_dir)
+            for mid in installed_models:
+                desc = get_model_descriptor(mid)
+                m_dir = get_model_dir(data_dir, mid)
+                m_device = "cuda" if profile == PROFILE_TORCH_CUDA else "cpu"
+                log_emit(f"正在对模型 [{desc.display_name if desc else mid}] 进行临时环境冒烟测试...")
+                smoke_ok, smoke_err = client.run_smoke_test(
+                    model_id=mid,
+                    model_path=m_dir,
+                    profile=profile,
+                    device=m_device,
+                    python_bin=staging_interp,
+                )
+                if not smoke_ok:
+                    raise RuntimeError(f"模型 [{mid}] 在临时环境中冒烟测试未通过: {smoke_err}")
+
+            # All tests passed! Proceed with atomic switch
+            log_emit(f"临时环境验证通过，正在停止 [{profile}] 旧 Worker 并原子切换...")
+            client.stop_workers_for_profile(profile)
+
+            manifest_data = {
+                "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
+                "profile": profile,
+                "created_at": int(time.time()),
+                "python_runtime_source": "managed",
+                "python_runtime_version": MANAGED_PYTHON_VERSION,
+                "python_interpreter": str(venv_dir / "bin" / "python"),
+                "managed_python_path": str(managed_python),
+                "capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                "capabilities_verified_at": int(time.time()),
+                "framework_version": "2.6.0+cpu" if profile == PROFILE_TORCH_CPU else "2.6.0+cu124",
+                "cuda_available": profile == PROFILE_TORCH_CUDA,
+            }
+            (staging_venv / "runtime-manifest.json").write_text(
+                json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+            # Atomic swap
+            old_backup = profile_dir / f"venv.old.{staging_id}"
+            if venv_dir.exists():
+                if old_backup.exists():
+                    shutil.rmtree(old_backup, ignore_errors=True)
+                os.replace(venv_dir, old_backup)
+            os.replace(staging_venv, venv_dir)
+
+            (profile_dir / "runtime-manifest.json").write_text(
+                json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            installed_meta = {
+                "profile": profile,
+                "installed_at": int(time.time()),
+                "rebuilt_at": int(time.time()),
+                "python_runtime_source": "managed",
+                "python_runtime_version": MANAGED_PYTHON_VERSION,
+                "transformers_requirement": TRANSFORMERS_REQUIREMENT,
+            }
+            (profile_dir / "installed.json").write_text(
+                json.dumps(installed_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+            if old_backup.exists():
+                shutil.rmtree(old_backup, ignore_errors=True)
+
+            for mid in installed_models:
+                write_state(data_dir, "ready", f"环境重建完成，模型已就绪: {get_model_dir(data_dir, mid)}", mid)
+
+            clear_dependency_probe_cache()
+            rt_manager.probe_profile(profile, force_refresh=True)
+            DEVICE_MANAGER.invalidate_runtime_state()
+            DEVICE_MANAGER.invalidate_cache()
+            try:
+                from privacy.service import PRIVACY
+                PRIVACY.reset_models()
+            except Exception:
+                pass
+
+            log_emit(f"运行时 [{profile}] 重建并切换完成。")
+            return True, f"运行时 [{profile}] 重建完成"
+
+        except Exception as exc:
+            log_emit(f"运行时 [{profile}] 重建失败: {exc}，保留原环境")
+            if staging_venv.exists():
+                try:
+                    shutil.rmtree(staging_venv, ignore_errors=True)
+                except Exception:
+                    pass
+            return False, f"运行时 [{profile}] 重建失败: {exc}"
+
+
 def repair_model_runtime(
     data_dir: Path,
     model_id: str,
@@ -743,6 +1025,7 @@ def repair_model_runtime(
     Preserves existing weights and intact runtime:
     - Never re-downloads model weights
     - Never rebuilds functional venv or reinstalls intact PyTorch
+    - Triggers atomic rebuild if Python native capabilities are missing
     - Idempotently migrates base runtime contract
     - Installs only missing model-specific dependencies
     - Runs real worker smoke test to verify readiness
@@ -791,6 +1074,19 @@ def repair_model_runtime(
         python_bin = rt_manager.get_python_bin(target_profile)
         if not python_bin.is_file():
             return False, f"运行时 [{target_profile}] 解释器不存在，请先安装运行时环境: {python_bin}"
+
+        # Two-tier check: if Python native capabilities are missing or rebuild is required, rebuild runtime atomically!
+        profile_probe = rt_manager.probe_profile(target_profile)
+        if not profile_probe.get("python_runtime_ready", True) or profile_probe.get("runtime_rebuild_required", False):
+            missing_caps = profile_probe.get("missing_python_capabilities", [])
+            caps_desc = f" ({', '.join(missing_caps)})" if missing_caps else ""
+            emit(f"检测到运行时 [{target_profile}] Python 原生能力不满足{caps_desc}，需要重建隔离环境...")
+            write_state(data_dir, "installing", f"正在为 [{target_profile}] 重建完整 Python 隔离运行环境...", model_id)
+            rebuild_ok, rebuild_err = rebuild_runtime(data_dir, target_profile, command_runner=runner)
+            if not rebuild_ok:
+                write_state(data_dir, "error", f"环境重建失败: {rebuild_err}", model_id)
+                return False, f"环境重建失败: {rebuild_err}"
+            emit(f"运行时 [{target_profile}] 隔离环境重建完成，继续校验模型专属状态...")
 
         emit(f"正在检查 [{target_profile}] 基础运行环境...")
         write_state(data_dir, "installing", f"正在检查 [{target_profile}] 基础运行环境...", model_id)
@@ -867,7 +1163,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
 
     if interp.is_file() and installed_file.is_file():
         probe = rt_manager.probe_profile(profile)
-        if probe.get("verified", False):
+        if probe.get("verified", False) and not probe.get("runtime_rebuild_required", False):
             emit(f"运行时 [{profile}] 已就绪并通过验证，跳过安装。")
             # Verified only proves torch imports: historical runtimes may still
             # violate the base contract (e.g. transformers 5.x). Repair in place.
@@ -876,19 +1172,28 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
 
     emit(f"正在为 [{profile}] 创建隔离 Python 运行环境: {venv_dir}...")
 
-    uv_bin = _find_uv()
+    uv_bin = find_uv()
+    managed_python: Optional[Path] = None
+    if uv_bin:
+        try:
+            managed_python = ensure_managed_python(data_dir, uv_bin=uv_bin)
+        except Exception as exc:
+            emit(f"获取托管 Python 提示: {exc}")
 
     if not interp.is_file():
-        env_init = build_runtime_env(data_dir)
+        env_init = build_uv_env(data_dir) if uv_bin else build_runtime_env(data_dir)
         if uv_bin:
-            cmd = [uv_bin, "venv", str(venv_dir)]
+            cmd = [uv_bin, "venv"]
+            if managed_python and managed_python.is_file():
+                cmd.extend(["--python", str(managed_python)])
+            cmd.append(str(venv_dir))
             subprocess.run(cmd, check=True, env=env_init)
         else:
             subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True, env=env_init)
 
     def run_install(*args: str) -> None:
         cmd = _pip_install_command(uv_bin, interp, venv_dir, list(args))
-        env_pip = build_runtime_env(data_dir)
+        env_pip = build_uv_env(data_dir) if uv_bin else build_runtime_env(data_dir)
         subprocess.run(cmd, check=True, env=env_pip)
 
     emit(f"正在安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
@@ -910,6 +1215,23 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         err = probe_result.get("error") or "探针验证失败"
         emit(f"错误: 运行时 [{profile}] 验证未通过: {err}")
         raise RuntimeError(f"隔离运行时 [{profile}] 验证未通过: {err}")
+
+    manifest_data = {
+        "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
+        "profile": profile,
+        "created_at": int(time.time()),
+        "python_runtime_source": "managed" if managed_python else "system",
+        "python_runtime_version": MANAGED_PYTHON_VERSION if managed_python else sys.version.split()[0],
+        "python_interpreter": str(interp),
+        "managed_python_path": str(managed_python) if managed_python else None,
+        "capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+        "capabilities_verified_at": int(time.time()),
+        "framework_version": probe_result.get("framework_version"),
+        "cuda_available": probe_result.get("cuda_available", False),
+    }
+    (profile_dir / "runtime-manifest.json").write_text(
+        json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     metadata = {
         "profile": profile,
@@ -1149,6 +1471,15 @@ def main() -> int:
     """Entry point for CLI or background installer execution."""
     data_dir = Path(os.environ.get("APP_DATA_DIR", "/data")).resolve()
     action = sys.argv[1] if len(sys.argv) > 1 else "install"
+
+    if action == "rebuild":
+        profile = sys.argv[2] if len(sys.argv) > 2 else PROFILE_TORCH_CPU
+        if profile not in (PROFILE_TORCH_CPU, PROFILE_TORCH_CUDA):
+            emit(f"错误: 无效的运行时 Profile {profile}，必须是 {PROFILE_TORCH_CPU} 或 {PROFILE_TORCH_CUDA}")
+            return 1
+        ok, msg = rebuild_runtime(data_dir, profile)
+        return 0 if ok else 1
+
     model_id = sys.argv[2] if len(sys.argv) > 2 else "gliner-pii-edge"
 
     descriptor = get_model_descriptor(model_id)
