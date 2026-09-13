@@ -3,7 +3,7 @@
 
 Runs a detector backend (default: the deterministic built-in pipeline) over
 tests/fixtures/privacy_benchmark_v2_100.jsonl and reports the layers
-separately (v0.6.8 contract):
+separately (v0.6.9 contract):
 
 - Layer A (Detection): exact-span P/R/F1, type accuracy, relaxed overlap recall.
   Answers "what entity exists here". Public entities (10086/8.8.8.8/test@example.com)

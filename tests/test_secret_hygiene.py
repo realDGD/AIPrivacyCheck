@@ -1,4 +1,4 @@
-"""Repository Secret Hygiene & Static Credential Scanning Tests (v0.6.8).
+"""Repository Secret Hygiene & Static Credential Scanning Tests (v0.6.9).
 
 Verifies that no static fixtures, documentation, or source code files store
 partner-scanner-shaped credential literals that trigger GitHub Secret Scanning alerts.

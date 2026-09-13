@@ -2578,8 +2578,8 @@ class ConcurrencyAndLifecycleHardeningV064Tests(unittest.TestCase):
         self.assertLessEqual(choose_memprivacy_generation_budget("x" * 10000), 512)
 
     def test_version_consistency(self):
-        """14. Version numbers across server.py, manifest, benchmark, lifecycle are consistent at 0.6.8."""
-        expected = "0.6.8"
+        """14. Version numbers across server.py, manifest, benchmark, lifecycle are consistent at 0.6.9."""
+        expected = "0.6.9"
         self.assertIn(f'"AIPrivacyCheck/{expected}"', (SERVER_DIR / "server.py").read_text(encoding="utf-8"))
         self.assertIn(f'"version": "{expected}"', (SERVER_DIR / "server.py").read_text(encoding="utf-8"))
         m_content = (PROJECT_DIR / "packaging" / "ai-privacy-check" / "manifest").read_text(encoding="utf-8")

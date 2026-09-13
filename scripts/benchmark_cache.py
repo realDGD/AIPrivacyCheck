@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent Raw Prediction Cache for AI Privacy Check Benchmarks (v0.6.8).
+"""Persistent Raw Prediction Cache for AI Privacy Check Benchmarks (v0.6.9).
 
 Enables offline re-scoring without re-running expensive model inference:
 - Cache key binds: corpus SHA256, model_id, model revision, model file hash,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Selective Model Downloader for AI Privacy Check Benchmarks (v0.6.8).
+"""Selective Model Downloader for AI Privacy Check Benchmarks (v0.6.9).
 
 Strict selective download policy:
 - NEVER downloads the entire repository snapshot by default.
@@ -75,7 +75,7 @@ def query_modelscope_repo_files(repo_id: str, revision: str = "master", root: st
     url = f"https://modelscope.cn/api/v1/models/{repo_id}/repo/files?Revision={revision}"
     if root:
         url += f"&Root={urllib.parse.quote(root)}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.8"})
+    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.9"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
         if data.get("Code") != 200:
@@ -145,7 +145,7 @@ def download_single_file(
         temp_path.unlink(missing_ok=True)
 
     url = f"https://modelscope.cn/api/v1/models/{repo_id}/repo?Revision={revision}&FilePath={urllib.parse.quote(remote_path)}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.8"})
+    req = urllib.request.Request(url, headers={"User-Agent": "AIPrivacyCheck-Benchmark/0.6.9"})
 
     h = hashlib.sha256()
     downloaded = 0

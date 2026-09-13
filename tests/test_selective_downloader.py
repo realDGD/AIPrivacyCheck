@@ -1,4 +1,4 @@
-"""Tests for Selective Model Downloader (v0.6.8).
+"""Tests for Selective Model Downloader (v0.6.9).
 
 Verifies:
 1. Forbidden models (MemPrivacy, AIguard, Qwen, RANER, etc.) cannot be downloaded.

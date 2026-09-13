@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Centralized Model Integrity & Content Fingerprinting Module (v0.6.8).
+"""Centralized Model Integrity & Content Fingerprinting Module (v0.6.9).
 
 Single Source of Truth for:
 - Streaming SHA-256 computation (sha256_file).

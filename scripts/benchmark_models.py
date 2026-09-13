@@ -773,7 +773,7 @@ def main() -> int:
     # Offline score-cache mode: score directly without model weights or GPU
     if args.score_cache:
         print("=" * 100)
-        print("  AI Privacy Check - Benchmark Cache Offline Scoring (v0.6.8)")
+        print("  AI Privacy Check - Benchmark Cache Offline Scoring (v0.6.9)")
         print("=" * 100)
         cfg, cached_preds, _ = cache_mgr.load(
             Path(args.score_cache),
@@ -804,7 +804,7 @@ def main() -> int:
     target_models = list(args.model) if args.model else [p.name for p in models_dir.iterdir() if p.is_dir() and not p.name.startswith(".")] if models_dir.is_dir() else []
 
     print("=" * 100)
-    print("  AI Privacy Check - Model Benchmark Harness (v0.6.8)")
+    print("  AI Privacy Check - Model Benchmark Harness (v0.6.9)")
     print("=" * 100)
     print(f"Fixture: {args.fixture} ({len(samples)} samples) | device: {device}"
           + ("" if cuda_ok else "  [CUDA: Not Executed - no CUDA device in this environment]"))

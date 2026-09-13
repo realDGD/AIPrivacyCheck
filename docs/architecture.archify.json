@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AI 脱敏器 · 系统架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "architecture-diagram.html",
+    "viewBox": [1370, 780],
+    "repository": {
+      "url": "https://github.com/realDGD/AIPrivacyCheck",
+      "provider": "github",
+      "revision": "61a1e7525c098f38b35e13fa433f203c1c14d43f"
+    }
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "frontend",
+      "label": "浏览器 Web UI",
+      "sublabel": "人工复核 · 实时脱敏",
+      "tag": "app/server/web",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/web/app.js" }
+      ],
+      "pos": [20, 250],
+      "size": [160, 64]
+    },
+    {
+      "id": "gateway",
+      "type": "cloud",
+      "label": "fnOS 统一网关",
+      "sublabel": "NAS 会话统一鉴权",
+      "tag": "/app/ai-privacy-check",
+      "pos": [290, 250],
+      "size": [160, 64]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "控制面主进程",
+      "sublabel": "Python 3.12 · 零 ML 依赖",
+      "tag": "app/server/server.py",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/server.py" },
+        { "path": "packaging/ai-privacy-check/app/server/model_installer.py", "label": "模型生命周期" }
+      ],
+      "pos": [560, 250],
+      "size": [170, 68]
+    },
+    {
+      "id": "registry",
+      "type": "backend",
+      "label": "DetectorRegistry",
+      "sublabel": "插拔式检测器 · 实体仲裁",
+      "tag": "privacy/registry.py",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/privacy/registry.py" },
+        { "path": "packaging/ai-privacy-check/app/server/privacy/merge.py", "label": "实体仲裁" }
+      ],
+      "pos": [840, 250],
+      "size": [170, 68]
+    },
+    {
+      "id": "ipc",
+      "type": "messagebus",
+      "label": "WorkerClient",
+      "sublabel": "行式 JSONL 跨进程通道",
+      "tag": "worker_client.py",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/privacy/worker_client.py" }
+      ],
+      "pos": [1120, 250],
+      "size": [160, 64]
+    },
+    {
+      "id": "settings",
+      "type": "database",
+      "label": "SettingsStore",
+      "sublabel": "settings.json 原子写入",
+      "tag": "settings_store.py",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/privacy/settings_store.py" }
+      ],
+      "pos": [320, 470],
+      "size": [170, 60]
+    },
+    {
+      "id": "hardware",
+      "type": "backend",
+      "label": "HardwareProbe",
+      "sublabel": "nvidia-smi 独立探测",
+      "tag": "hardware.py",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/privacy/hardware.py" }
+      ],
+      "pos": [560, 470],
+      "size": [170, 60]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "RuntimeManager",
+      "sublabel": "隔离 venv · 设备路由",
+      "tag": "runtime_manager.py",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/privacy/runtime_manager.py" },
+        { "path": "packaging/ai-privacy-check/app/server/privacy/device.py", "label": "设备路由" }
+      ],
+      "pos": [840, 470],
+      "size": [170, 60]
+    },
+    {
+      "id": "venv",
+      "type": "database",
+      "label": "隔离运行时 venv",
+      "sublabel": "torch-cpu / torch-cuda · uv",
+      "tag": "${DATA_DIR}/runtimes",
+      "pos": [870, 660],
+      "size": [190, 60]
+    },
+    {
+      "id": "workers",
+      "type": "backend",
+      "label": "Worker 子进程",
+      "sublabel": "GLiNER · SiameseUIE · MemPrivacy",
+      "tag": "privacy/workers/",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/app/server/privacy/workers/gliner_worker.py" },
+        { "path": "packaging/ai-privacy-check/app/server/privacy/workers/siamese_uie_worker.py" },
+        { "path": "packaging/ai-privacy-check/app/server/privacy/workers/memprivacy_worker.py" }
+      ],
+      "pos": [1130, 660],
+      "size": [220, 68]
+    },
+    {
+      "id": "models",
+      "type": "database",
+      "label": "用户共享模型目录",
+      "sublabel": "fnOS data-share 离线导入",
+      "tag": "ai-privacy-check/models",
+      "sources": [
+        { "path": "packaging/ai-privacy-check/config/resource" }
+      ],
+      "pos": [890, 60],
+      "size": [180, 68]
+    },
+    {
+      "id": "modelscope",
+      "type": "external",
+      "label": "ModelScope",
+      "sublabel": "固定 revision 权重源",
+      "pos": [1140, 60],
+      "size": [160, 60]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "控制面 · Zero ML（零框架依赖）",
+      "wraps": ["server", "registry", "ipc", "settings", "hardware", "runtime"],
+      "pad": 20
+    },
+    {
+      "kind": "security-group",
+      "label": "执行面隔离 · 独立 venv",
+      "wraps": ["venv", "workers"],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    { "id": "browser-to-gateway", "from": "browser", "to": "gateway", "label": "NAS 会话凭证", "variant": "emphasis" },
+    { "id": "gateway-to-server", "from": "gateway", "to": "server", "label": "Unix Socket", "variant": "emphasis" },
+    { "id": "server-to-registry", "from": "server", "to": "registry", "label": "检测编排", "variant": "emphasis" },
+    { "id": "registry-to-ipc", "from": "registry", "to": "ipc", "label": "Tier 3/4 推理请求", "variant": "emphasis" },
+    { "id": "ipc-to-workers", "from": "ipc", "to": "workers", "label": "行式 JSONL", "variant": "emphasis", "fromSide": "bottom", "toSide": "top" },
+    { "id": "server-to-settings", "from": "server", "to": "settings", "label": "原子读写" },
+    { "id": "server-to-hardware", "from": "server", "to": "hardware", "label": "nvidia-smi 探测", "variant": "dashed", "labelAt": [645, 332] },
+    { "id": "server-to-runtime", "from": "server", "to": "runtime", "label": "设备策略解析" },
+    { "id": "runtime-to-venv", "from": "runtime", "to": "venv", "label": "uv 安装与验证", "fromSide": "bottom", "toSide": "top" },
+    { "id": "workers-to-venv", "from": "workers", "to": "venv", "label": "加载运行时" },
+    { "id": "modelscope-to-models", "from": "modelscope", "to": "models", "label": "拉取权重", "variant": "dashed" },
+    { "id": "models-to-server", "from": "models", "to": "server", "label": "realpath 安全导入", "variant": "security", "fromSide": "left", "toSide": "top", "via": [[645, 94]] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主链路与数据边界",
+      "items": [
+        "浏览器经 fnOS 统一网关鉴权，由 Unix Socket 进入控制面，不暴露多余端口",
+        "Tier 1–4 实体仲裁合并，校验位验证的法定实体享有绝对优先权",
+        "原文与可逆映射不离开 NAS，本地 Web Crypto AES-256-GCM 加密保险箱"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Zero ML 控制面",
+      "items": [
+        "Python 3.12 主进程不 import 任何深度学习框架",
+        "HardwareProbe 通过 nvidia-smi 独立子进程探测 GPU",
+        "RuntimeManager 用 uv 维护隔离 venv 并探针验证 CUDA"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "执行面与模型",
+      "items": [
+        "GLiNER / SiameseUIE / MemPrivacy 推理于独立 Worker 子进程（JSONL IPC）",
+        "模型从 ModelScope 固定 revision 下载，或经共享目录 realpath 校验导入",
+        "权重安装与运行时就绪状态解耦，可补装运行时复用权重"
+      ]
+    }
+  ]
+}
