@@ -165,11 +165,27 @@ class BenchmarkPredictionCache:
         for cdir in candidate_dirs:
             cfg_file = cdir / "inference_config.json"
             preds_file = cdir / "predictions.jsonl"
+            cmanifest_file = cdir / "cache-manifest.json"
 
-            if not (cfg_file.is_file() and preds_file.is_file()):
+            # Mandatory integrity manifest required for cache hit
+            if not (cfg_file.is_file() and preds_file.is_file() and cmanifest_file.is_file()):
                 continue
 
             try:
+                cmanifest = json.loads(cmanifest_file.read_text(encoding="utf-8"))
+                expected_sha = cmanifest.get("predictions_sha256")
+                expected_count = cmanifest.get("prediction_count")
+                if not expected_sha or not isinstance(expected_count, int):
+                    continue
+
+                actual_sha = sha256_file(preds_file)
+                if actual_sha.lower() != expected_sha.lower():
+                    continue
+
+                line_count = sum(1 for line in preds_file.read_text(encoding="utf-8").splitlines() if line.strip())
+                if line_count != expected_count:
+                    continue
+
                 cached_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
                 # Compare key components:
                 if cached_cfg.get("corpus_sha256") != corpus_sha:
@@ -253,7 +269,11 @@ class BenchmarkPredictionCache:
 
         return cdir
 
-    def load(self, cache_dir: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    def load(
+        self,
+        cache_dir: Path,
+        allow_legacy_unverified: bool = False,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         cache_dir = Path(cache_dir).resolve()
         cfg_file = cache_dir / "inference_config.json"
         preds_file = cache_dir / "predictions.jsonl"
@@ -284,15 +304,26 @@ class BenchmarkPredictionCache:
         if not (cfg_file.is_file() and preds_file.is_file()):
             raise FileNotFoundError(f"Missing cache files in {target_dir}")
 
-        # Check predictions file integrity against cache-manifest.json if present
+        # Mandatory cache-manifest.json verification
         cmanifest_file = target_dir / "cache-manifest.json"
-        if cmanifest_file.is_file():
+        expected_count = None
+        if not cmanifest_file.is_file():
+            if not allow_legacy_unverified:
+                raise LegacyUnverifiedCacheError(
+                    f"Prediction cache integrity verification failed in '{target_dir}': "
+                    "missing mandatory cache-manifest.json. Use --allow-legacy-unverified-cache to override."
+                )
+            print(
+                "WARNING: Loading legacy prediction cache without cache-manifest integrity verification.\n"
+                "Results are not eligible for final benchmark comparison."
+            )
+        else:
             try:
                 cmanifest = json.loads(cmanifest_file.read_text(encoding="utf-8"))
                 expected_sha = cmanifest.get("predictions_sha256")
                 expected_count = cmanifest.get("prediction_count")
                 actual_sha = sha256_file(preds_file)
-                if expected_sha and actual_sha != expected_sha:
+                if expected_sha and actual_sha.lower() != expected_sha.lower():
                     raise CacheCorruptedError(
                         f"Prediction cache integrity verification failed in '{target_dir}': "
                         f"predictions.jsonl checksum mismatch (got {actual_sha}, expected {expected_sha})"
@@ -332,4 +363,9 @@ class AmbiguousCacheError(ValueError):
 
 class CacheCorruptedError(Exception):
     """Raised when predictions file content does not match recorded checksum or count."""
+    pass
+
+
+class LegacyUnverifiedCacheError(CacheCorruptedError):
+    """Raised when a prediction cache lacks mandatory cache-manifest.json."""
     pass

@@ -23,6 +23,7 @@ from benchmark_cache import (
     AmbiguousCacheError,
     BenchmarkPredictionCache,
     CacheCorruptedError,
+    LegacyUnverifiedCacheError,
     ModelIntegrityError,
     SecurityError,
     compute_model_files_hash,
@@ -382,6 +383,96 @@ class BenchmarkPredictionCacheTests(unittest.TestCase):
         with self.assertRaises(CacheCorruptedError) as ctx:
             self.cache.load(cdir)
         self.assertIn("checksum mismatch", str(ctx.exception))
+
+    def test_cache_without_manifest_is_not_valid(self):
+        """P2 Test: has_valid_cache returns False when cache-manifest.json is missing."""
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config)
+        preds = [{"id": "case_1", "entities": [{"text": "Alice", "type": "CN_NAME"}]}]
+        cdir = self.cache.save(key, preds)
+
+        # Cache is valid initially
+        hit, _ = self.cache.has_valid_cache(key)
+        self.assertTrue(hit)
+
+        # Remove cache-manifest.json
+        (cdir / "cache-manifest.json").unlink()
+
+        # Cache must no longer be considered valid
+        hit2, _ = self.cache.has_valid_cache(key)
+        self.assertFalse(hit2, "Missing cache-manifest.json must invalidate cache hit")
+
+    def test_load_cache_without_manifest_rejected(self):
+        """P2 Test: load rejects cache lacking cache-manifest.json with LegacyUnverifiedCacheError."""
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config)
+        preds = [{"id": "case_1", "entities": [{"text": "Alice", "type": "CN_NAME"}]}]
+        cdir = self.cache.save(key, preds)
+
+        (cdir / "cache-manifest.json").unlink()
+
+        # Default load must raise LegacyUnverifiedCacheError
+        with self.assertRaises(LegacyUnverifiedCacheError) as ctx:
+            self.cache.load(cdir)
+        self.assertIn("missing mandatory cache-manifest.json", str(ctx.exception))
+
+        # Explicit override succeeds
+        cfg, loaded_preds, _ = self.cache.load(cdir, allow_legacy_unverified=True)
+        self.assertEqual(len(loaded_preds), 1)
+
+    def test_prediction_cache_checksum_tamper_rejected(self):
+        """P2 Test: predictions.jsonl checksum mismatch with cache-manifest raises CacheCorruptedError."""
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config)
+        preds = [{"id": "case_1", "entities": [{"text": "Alice", "type": "CN_NAME"}]}]
+        cdir = self.cache.save(key, preds)
+
+        # Tamper manifest checksum
+        cman = json.loads((cdir / "cache-manifest.json").read_text(encoding="utf-8"))
+        cman["predictions_sha256"] = "0" * 64
+        (cdir / "cache-manifest.json").write_text(json.dumps(cman), encoding="utf-8")
+
+        with self.assertRaises(CacheCorruptedError) as ctx:
+            self.cache.load(cdir)
+        self.assertIn("checksum mismatch", str(ctx.exception))
+
+    def test_prediction_cache_count_tamper_rejected(self):
+        """P2 Test: prediction_count mismatch with cache-manifest raises CacheCorruptedError."""
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config)
+        preds = [
+            {"id": "case_1", "entities": [{"text": "Alice", "type": "CN_NAME"}]},
+            {"id": "case_2", "entities": [{"text": "Bob", "type": "CN_NAME"}]},
+        ]
+        cdir = self.cache.save(key, preds)
+
+        # Tamper count in manifest
+        cman = json.loads((cdir / "cache-manifest.json").read_text(encoding="utf-8"))
+        cman["prediction_count"] = 999
+        (cdir / "cache-manifest.json").write_text(json.dumps(cman), encoding="utf-8")
+
+        with self.assertRaises(CacheCorruptedError) as ctx:
+            self.cache.load(cdir)
+        self.assertIn("prediction count mismatch", str(ctx.exception))
+
+    def test_has_valid_cache_rejects_tampered_predictions(self):
+        """P2 Test: has_valid_cache returns False if predictions.jsonl was modified."""
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config)
+        preds = [{"id": "case_1", "entities": [{"text": "Alice", "type": "CN_NAME"}]}]
+        cdir = self.cache.save(key, preds)
+
+        hit, _ = self.cache.has_valid_cache(key)
+        self.assertTrue(hit)
+
+        # Tamper predictions.jsonl file
+        (cdir / "predictions.jsonl").write_text(
+            json.dumps({"id": "case_1", "entities": [{"text": "Mallory", "type": "CN_NAME"}]}) + "\n",
+            encoding="utf-8",
+        )
+
+        hit_tampered, _ = self.cache.has_valid_cache(key)
+        self.assertFalse(hit_tampered, "has_valid_cache must reject tampered predictions file")
 
 
 if __name__ == "__main__":

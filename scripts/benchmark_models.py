@@ -761,6 +761,8 @@ def main() -> int:
                         help="Minimum inference threshold for GLiNER single-pass inference (default 0.30)")
     parser.add_argument("--sweep-thresholds", default="0.35,0.40,0.45,0.50,0.55,0.60,0.65",
                         help="Comma-separated threshold sweep values for offline re-scoring")
+    parser.add_argument("--allow-legacy-unverified-cache", action="store_true",
+                        help="Allow loading legacy prediction cache without cache-manifest.json (UNVERIFIED)")
     args = parser.parse_args()
 
     cache_mgr = BenchmarkPredictionCache()
@@ -773,7 +775,10 @@ def main() -> int:
         print("=" * 100)
         print("  AI Privacy Check - Benchmark Cache Offline Scoring (v0.6.8)")
         print("=" * 100)
-        cfg, cached_preds, _ = cache_mgr.load(Path(args.score_cache))
+        cfg, cached_preds, _ = cache_mgr.load(
+            Path(args.score_cache),
+            allow_legacy_unverified=args.allow_legacy_unverified_cache,
+        )
         print(f"Loaded cache from: {args.score_cache}")
         print(f"Model: {cfg.get('model_id')} | Corpus: {cfg.get('corpus_file')} ({len(cached_preds)} predictions)")
 
@@ -847,7 +852,10 @@ def main() -> int:
             cache_hit, cached_dir = cache_mgr.has_valid_cache(key)
             if cache_hit:
                 print(f"\n>>> {name}: [CACHE HIT] Loaded raw predictions from {cached_dir}")
-                _, loaded_raw, _ = cache_mgr.load(cached_dir)
+                _, loaded_raw, _ = cache_mgr.load(
+                    cached_dir,
+                    allow_legacy_unverified=args.allow_legacy_unverified_cache,
+                )
                 predictions = [p["entities"] for p in loaded_raw]
                 sample_latencies = [p.get("latency_ms", 0.0) for p in loaded_raw]
             else:
