@@ -31,6 +31,7 @@ import resource
 import sys
 import time
 import traceback
+from typing import Dict, List, Optional, Tuple
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 SERVER_DIR = PROJECT_DIR / "packaging" / "ai-privacy-check" / "app" / "server"
@@ -38,9 +39,13 @@ sys.path.insert(0, str(SERVER_DIR))
 sys.path.insert(0, str(SERVER_DIR / "privacy" / "workers"))
 sys.path.insert(0, str(PROJECT_DIR / "scripts"))
 
-from benchmark_scoring import MetricBucket, percentile, score_sample  # noqa: E402
+from benchmark_scoring import MetricBucket, matches_type, percentile, score_sample  # noqa: E402
+from benchmark_cache import BenchmarkPredictionCache  # noqa: E402
+from selective_downloader import ensure_selective_model  # noqa: E402
 
-DEFAULT_FIXTURE = PROJECT_DIR / "tests" / "fixtures" / "contextual_privacy_seed.jsonl"
+DEFAULT_FIXTURE = PROJECT_DIR / "tests" / "fixtures" / "privacy_benchmark_v2_100.jsonl"
+if not DEFAULT_FIXTURE.is_file():
+    DEFAULT_FIXTURE = PROJECT_DIR / "tests" / "fixtures" / "contextual_privacy_seed.jsonl"
 
 DEFAULT_SEED_SCHEMA = {
     "人物": None,
@@ -58,47 +63,9 @@ SIAMESE_TYPE_MAP = {
     "职位": "JOB_TITLE",
 }
 
-# Mirrors privacy.detectors.GLiNERDetector.GLINER_LABEL_MAP essentials.
-GLINER_LABEL_MAP = {
-    "person": "CN_NAME",
-    "people": "CN_NAME",
-    "name": "CN_NAME",
-    "organization": "ORGANIZATION",
-    "company": "ORGANIZATION",
-    "phone number": "CN_PHONE_NUMBER",
-    "phone": "CN_PHONE_NUMBER",
-    "mobile phone": "CN_PHONE_NUMBER",
-    "email": "EMAIL",
-    "email address": "EMAIL",
-    "passport number": "CN_PASSPORT",
-    "passport": "CN_PASSPORT",
-    "driver license": "GOVERNMENT_ID",
-    "driving license": "GOVERNMENT_ID",
-    "social security number": "US_SSN",
-    "ssn": "US_SSN",
-    "credit card number": "CREDIT_CARD",
-    "credit card": "CREDIT_CARD",
-    "bank account": "ACCOUNT_NUMBER",
-    "bank account number": "ACCOUNT_NUMBER",
-    "address": "CN_ADDRESS",
-    "street address": "CN_ADDRESS",
-    "location": "LOCATION",
-    "city": "LOCATION",
-    "country": "LOCATION",
-    "username": "USERNAME",
-    "user name": "USERNAME",
-    "date of birth": "CN_BIRTH_DATE",
-    "birth date": "CN_BIRTH_DATE",
-    "ip address": "IP_ADDRESS",
-    "ipv4": "IP_ADDRESS",
-    "ipv6": "IPV6_ADDRESS",
-    "mac address": "MAC_ADDRESS",
-}
-GLINER_LABELS = list(dict.fromkeys([
-    "person", "organization", "phone number", "email", "passport number",
-    "driver license", "social security number", "credit card number",
-    "bank account", "address", "username", "date of birth",
-]))
+# Single source of truth: import directly from production GLiNERDetector
+from privacy.detectors import GLiNERDetector, GLINER_LABELS  # noqa: E402
+GLINER_LABEL_MAP = {k: v[0] for k, v in GLiNERDetector.GLINER_LABEL_MAP.items()}
 
 AIGUARD_TYPE_MAP = {
     "name": "CN_NAME",
@@ -278,27 +245,26 @@ def run_siamese(model_dir: Path, samples: list, device: str, notes: list):
     return out, latencies
 
 
-def run_gliner(model_dir: Path, samples: list, device: str, notes: list):
-    """Mirrors production GLiNERDetector: same label set, threshold 0.40 and the
-    USERNAME plausibility post-filter, imported from the production module as
-    the single source of truth."""
+def run_gliner(model_dir: Path, samples: list, device: str, notes: list, min_threshold: float = 0.30):
+    """Mirrors production GLiNERDetector: deterministic GLINER_LABELS, min_threshold,
+    and USERNAME plausibility post-filter. Retains prediction scores for offline threshold sweep."""
     import time as _time
 
     from gliner import GLiNER  # type: ignore
-    from privacy.detectors import GLiNERDetector  # noqa: E402
+    from privacy.detectors import GLiNERDetector, GLINER_LABELS  # noqa: E402
 
     model = GLiNER.from_pretrained(str(model_dir), local_files_only=True)
     model = model.to("cuda" if device == "cuda" else "cpu")
 
-    labels = list(set(GLiNERDetector.GLINER_LABEL_MAP.keys()))
+    labels = list(GLINER_LABELS)
     detector = GLiNERDetector(Path("/tmp"))
-    threshold = GLiNERDetector.GLINER_DEFAULT_THRESHOLD
+    default_threshold = GLiNERDetector.GLINER_DEFAULT_THRESHOLD
     latencies = []
     out = []
     for sample in samples:
         text = sample["text"]
         t0 = _time.perf_counter()
-        raw_entities = model.predict_entities(text, labels, threshold=threshold)
+        raw_entities = model.predict_entities(text, labels, threshold=min_threshold)
         latencies.append((_time.perf_counter() - t0) * 1000.0)
         entities = []
         for ent in raw_entities:
@@ -309,9 +275,119 @@ def run_gliner(model_dir: Path, samples: list, device: str, notes: list):
             if label_raw == "username" and not detector._is_plausible_username(text, s, e, text[s:e]):
                 continue
             mapped = GLiNERDetector.GLINER_LABEL_MAP.get(label_raw, (label_raw.upper(), label_raw))
-            entities.append({"type": mapped[0], "start": s, "end": e, "text": text[s:e]})
+            score = float(ent.get("score", 0.85))
+            entities.append({
+                "type": mapped[0],
+                "start": s,
+                "end": e,
+                "text": text[s:e],
+                "score": round(score, 4),
+                "label_raw": label_raw,
+            })
         out.append(entities)
     return out, latencies
+
+
+def evaluate_gliner_threshold_sweep(samples: list, all_predictions: list, thresholds: list) -> Tuple[list, dict]:
+    hard_cases_queries = [
+        ("case_001", "张三今天来了，稍后张三又打电话过来。"),
+        ("case_002", "张三，用户名是李四。"),
+        ("case_003", "用户名是张三。"),
+        ("case_004", "张三是用户名。"),
+    ]
+    hard_indices = {}
+    for cid, query in hard_cases_queries:
+        for idx, s in enumerate(samples):
+            if s.get("id") == cid or query in s["text"]:
+                hard_indices[cid] = (idx, query)
+                break
+
+    rows = []
+    hard_case_reports = {cid: [] for cid, _ in hard_cases_queries}
+
+    for t in thresholds:
+        bucket = MetricBucket()
+        pii_free_total = pii_free_flagged = 0
+        person_to_username = 0
+        username_to_person = 0
+        critical_fn = 0
+        type_correct = 0
+
+        for sample, preds in zip(samples, all_predictions):
+            t_preds = [p for p in preds if p.get("score", 1.0) >= t]
+            score = score_sample(sample["text"], sample["entities"], t_preds)
+            is_pii_free = not sample["entities"]
+            if is_pii_free:
+                pii_free_total += 1
+                if score.fp > 0:
+                    pii_free_flagged += 1
+            bucket.add(score, is_pii_free=is_pii_free)
+
+            # Check confusion and critical FN
+            for true_ent in sample["entities"]:
+                true_type = true_ent["type"]
+                should_redact = true_ent.get("should_redact", True)
+                matched = any(
+                    p["start"] == true_ent["start"] and p["end"] == true_ent["end"]
+                    and matches_type(p["type"], true_ent["type"])
+                    for p in t_preds
+                )
+                if not matched and should_redact:
+                    critical_fn += 1
+
+                # Overlap-based confusion
+                overlaps = [
+                    p for p in t_preds
+                    if p["start"] < true_ent["end"] and true_ent["start"] < p["end"]
+                ]
+                for p in overlaps:
+                    if true_type in ("CN_NAME", "PERSON") and p["type"] == "USERNAME":
+                        person_to_username += 1
+                    elif true_type == "USERNAME" and p["type"] in ("CN_NAME", "PERSON"):
+                        username_to_person += 1
+
+            # Check exact type correctness on matched TPs
+            matched_p = set()
+            for true_ent in sample["entities"]:
+                for p_idx, p in enumerate(t_preds):
+                    if p_idx in matched_p:
+                        continue
+                    if p["start"] == true_ent["start"] and p["end"] == true_ent["end"] and matches_type(p["type"], true_ent["type"]):
+                        matched_p.add(p_idx)
+                        if p["type"] == true_ent["type"]:
+                            type_correct += 1
+                        break
+
+        s = bucket.summary()
+        type_acc = type_correct / s["tp"] if s["tp"] else 0.0
+        fpr = pii_free_flagged / pii_free_total if pii_free_total else 0.0
+
+        row = {
+            "threshold": t,
+            "precision": s["precision"],
+            "recall": s["recall"],
+            "f1": s["f1"],
+            "tp": s["tp"],
+            "fp": s["fp"],
+            "fn": s["fn"],
+            "type_acc": type_acc,
+            "pii_free_fpr": fpr,
+            "pii_free_flagged": pii_free_flagged,
+            "pii_free_total": pii_free_total,
+            "person_to_username": person_to_username,
+            "username_to_person": username_to_person,
+            "critical_fn": critical_fn,
+        }
+        rows.append(row)
+
+        for cid, (idx, qtext) in hard_indices.items():
+            t_preds = [p for p in all_predictions[idx] if p.get("score", 1.0) >= t]
+            hard_case_reports[cid].append({
+                "threshold": t,
+                "preds": [(p["type"], p["text"], p.get("score")) for p in t_preds],
+            })
+
+    return rows, hard_case_reports
 
 
 def run_ms_ner(model_dir: Path, samples: list, device: str, notes: list):
@@ -667,7 +743,36 @@ def main() -> int:
     parser.add_argument("--force-adapter", default=None,
                         help="Override adapter detection (e.g. native_token_cls for a "
                              "benchmark-only runtime that natively registers the arch)")
+    parser.add_argument("--download-missing", action="store_true", default=False,
+                        help="Allow selectively downloading required model files if missing")
+    parser.add_argument("--score-cache", default=None,
+                        help="Load and score from benchmark prediction cache directory without re-running inference")
+    parser.add_argument("--min-threshold", type=float, default=0.30,
+                        help="Minimum inference threshold for GLiNER single-pass inference (default 0.30)")
+    parser.add_argument("--sweep-thresholds", default="0.35,0.40,0.45,0.50,0.55,0.60,0.65",
+                        help="Comma-separated threshold sweep values for offline re-scoring")
     args = parser.parse_args()
+
+    cache_mgr = BenchmarkPredictionCache()
+    samples = [json.loads(line) for line in Path(args.fixture).read_text(encoding="utf-8").splitlines() if line.strip()]
+    if args.limit > 0:
+        samples = samples[: args.limit]
+
+    # Offline score-cache mode: score directly without model weights or GPU
+    if args.score_cache:
+        print("=" * 100)
+        print("  AI Privacy Check - Benchmark Cache Offline Scoring (v0.6.6)")
+        print("=" * 100)
+        cfg, cached_preds, _ = cache_mgr.load(Path(args.score_cache))
+        print(f"Loaded cache from: {args.score_cache}")
+        print(f"Model: {cfg.get('model_id')} | Corpus: {cfg.get('corpus_file')} ({len(cached_preds)} predictions)")
+
+        thresholds = [float(x.strip()) for x in args.sweep_thresholds.split(",") if x.strip()]
+        all_preds = [p["entities"] for p in cached_preds]
+        sweep_rows, hard_cases = evaluate_gliner_threshold_sweep(samples, all_preds, thresholds)
+
+        _print_gliner_sweep_tables(sweep_rows, hard_cases, thresholds)
+        return 0
 
     try:
         import torch  # type: ignore
@@ -681,17 +786,10 @@ def main() -> int:
     device = "cuda" if cuda_ok else "cpu"
 
     models_dir = Path(args.models_dir).resolve()
-    samples = [json.loads(line) for line in Path(args.fixture).read_text(encoding="utf-8").splitlines() if line.strip()]
-    if args.limit > 0:
-        samples = samples[: args.limit]
-
-    candidates = sorted(p for p in models_dir.iterdir() if p.is_dir() and not p.name.startswith(".")) if models_dir.is_dir() else []
-    if args.model:
-        wanted = set(args.model)
-        candidates = [c for c in candidates if c.name in wanted]
+    target_models = list(args.model) if args.model else [p.name for p in models_dir.iterdir() if p.is_dir() and not p.name.startswith(".")] if models_dir.is_dir() else []
 
     print("=" * 100)
-    print("  AI Privacy Check - Model Benchmark Harness (v0.6.4)")
+    print("  AI Privacy Check - Model Benchmark Harness (v0.6.6)")
     print("=" * 100)
     print(f"Fixture: {args.fixture} ({len(samples)} samples) | device: {device}"
           + ("" if cuda_ok else "  [CUDA: Not Executed - no CUDA device in this environment]"))
@@ -699,37 +797,85 @@ def main() -> int:
     raw_results = {}
     rows = []
 
-    for model_dir in candidates:
+    for name in target_models:
+        model_dir = models_dir / name
+        if not model_dir.is_dir():
+            ok, msg, manifest = ensure_selective_model(name, models_dir, download_missing=args.download_missing)
+            if not ok:
+                print(f"\n>>> {name}: SKIP ({msg})")
+                continue
+            model_dir = models_dir / name
+
         adapter = detect_adapter(model_dir)
-        name = model_dir.name
         if adapter is None:
             print(f"\n>>> {name}: SKIP (NOT INSTALLED or unrecognized layout)")
-            continue
-        if args.model and name not in set(args.model):
             continue
 
         TOKEN_CLS_MAPS = {name: _pick_token_map(model_dir)}
         notes: list = []
         rss_before = peak_rss_mb()
         t0 = time.perf_counter()
-        try:
-            runner = {
-                "siamese": run_siamese,
-                "gliner": run_gliner,
-                "ms_ner": run_ms_ner,
-                "token_cls": run_token_cls,
-                "native_token_cls": run_native_token_cls,
-                "generative": run_generative,
-            }[args.force_adapter or adapter]
-            predictions, sample_latencies = runner(model_dir, samples, device, notes)
-        except Exception as exc:
-            print(f"\n>>> {name}: FAILED ({type(exc).__name__}: {exc})")
-            traceback.print_exc(limit=3)
-            rows.append({"name": name, "adapter": adapter, "status": f"FAILED: {type(exc).__name__}: {exc}"[:160]})
-            raw_results[name] = {"status": "failed", "error": str(exc)[:400]}
-            gc.collect()
-            continue
-        load_s = time.perf_counter() - t0
+
+        predictions = None
+        sample_latencies = None
+        load_s = 0.0
+
+        # Check raw prediction cache for GLiNER
+        if adapter == "gliner":
+            inference_config = {
+                "device": device,
+                "min_threshold": args.min_threshold,
+                "label_order": list(GLINER_LABELS),
+            }
+            key = cache_mgr.build_cache_key(
+                corpus_path=Path(args.fixture),
+                model_id=name,
+                revision="master",
+                model_dir=model_dir,
+                inference_config=inference_config,
+            )
+            cache_hit, cached_dir = cache_mgr.has_valid_cache(key)
+            if cache_hit:
+                print(f"\n>>> {name}: [CACHE HIT] Loaded raw predictions from {cached_dir}")
+                _, loaded_raw, _ = cache_mgr.load(cached_dir)
+                predictions = [p["entities"] for p in loaded_raw]
+                sample_latencies = [p.get("latency_ms", 0.0) for p in loaded_raw]
+            else:
+                try:
+                    predictions, sample_latencies = run_gliner(model_dir, samples, device, notes, min_threshold=args.min_threshold)
+                    load_s = time.perf_counter() - t0
+                    # Persist to cache
+                    preds_to_cache = [
+                        {"id": s.get("id", f"sample_{i}"), "text": s["text"], "entities": p, "latency_ms": lat}
+                        for i, (s, p, lat) in enumerate(zip(samples, predictions, sample_latencies))
+                    ]
+                    saved_dir = cache_mgr.save(key, preds_to_cache)
+                    print(f"\n>>> {name}: [CACHE SAVED] Persisted {len(preds_to_cache)} raw predictions to {saved_dir}")
+                except Exception as exc:
+                    print(f"\n>>> {name}: FAILED ({type(exc).__name__}: {exc})")
+                    traceback.print_exc(limit=3)
+                    rows.append({"name": name, "adapter": adapter, "status": f"FAILED: {type(exc).__name__}: {exc}"[:160]})
+                    raw_results[name] = {"status": "failed", "error": str(exc)[:400]}
+                    gc.collect()
+                    continue
+        else:
+            try:
+                runner = {
+                    "siamese": run_siamese,
+                    "ms_ner": run_ms_ner,
+                    "token_cls": run_token_cls,
+                    "native_token_cls": run_native_token_cls,
+                    "generative": run_generative,
+                }[args.force_adapter or adapter]
+                predictions, sample_latencies = runner(model_dir, samples, device, notes)
+                load_s = time.perf_counter() - t0
+            except Exception as exc:
+                print(f"\n>>> {name}: FAILED ({type(exc).__name__}: {exc})")
+                traceback.print_exc(limit=3)
+                rows.append({"name": name, "adapter": adapter, "status": f"FAILED: {type(exc).__name__}: {exc}"[:160]})
+                raw_results[name] = {"status": "failed", "error": str(exc)[:400]}
+                gc.collect()
+                continue
 
         if predictions is None:
             print(f"\n>>> {name}: NOT EXECUTED ({'; '.join(notes) or 'adapter refused'})")
@@ -743,7 +889,11 @@ def main() -> int:
         latencies = sample_latencies or [0.0] * len(samples)
         per_sample = []
         for sample, preds in zip(samples, predictions):
-            score = score_sample(sample["text"], sample["entities"], preds)
+            eval_preds = preds
+            if adapter == "gliner":
+                from privacy.detectors import GLiNERDetector
+                eval_preds = [p for p in preds if p.get("score", 1.0) >= GLiNERDetector.GLINER_DEFAULT_THRESHOLD]
+            score = score_sample(sample["text"], sample["entities"], eval_preds)
             is_pii_free = not sample["entities"]
             if is_pii_free:
                 pii_free_total += 1
@@ -772,6 +922,15 @@ def main() -> int:
             "fp_types": fp_types,
         })
         raw_results[name] = {"status": "ok", "predictions": per_sample, "summary": rows[-1]}
+
+        # If GLiNER, run full offline threshold sweep
+        if adapter == "gliner":
+            thresholds = [float(x.strip()) for x in args.sweep_thresholds.split(",") if x.strip()]
+            sweep_rows, hard_cases = evaluate_gliner_threshold_sweep(samples, predictions, thresholds)
+            raw_results[name]["threshold_sweep"] = sweep_rows
+            raw_results[name]["hard_cases"] = hard_cases
+            _print_gliner_sweep_tables(sweep_rows, hard_cases, thresholds)
+
         gc.collect()
 
     print("\n" + "=" * 100)
@@ -787,18 +946,42 @@ def main() -> int:
               f"{row['leaked_chars']:>5} {row['overredacted_chars']:>5} "
               f"{row['latency_avg_ms']:>8.1f} {row['latency_p95_ms']:>7.1f} {row['load_s']:>8.1f}")
     print("=" * 100)
-    print("Notes:")
-    print("  - RSS is process high-water (ru_maxrss), cumulative across models within this run.")
-    if not cuda_ok:
-        print("  - CUDA VRAM: Not Executed (no CUDA device); Tesla P4 numbers require fnOS hardware.")
-    for row in rows:
-        if row.get("notes"):
-            print(f"  - {row['name']}: {row['notes']}")
 
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(raw_results, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"Raw results written: {args.json_out}")
     return 0
+
+
+def _print_gliner_sweep_tables(sweep_rows: list, hard_cases: dict, thresholds: list) -> None:
+    print("\n" + "=" * 116)
+    print("  GLiNER Offline Threshold Sweep (Deterministic Labels: 33 types, Single-pass Inference)")
+    print("=" * 116)
+    print(f"{'Thresh':<8} | {'Precision':>10} | {'Recall':>8} | {'F1':>8} | {'TypeAcc':>8} | {'PII-free FPR':>12} | {'P->USER':>8} | {'USER->P':>8} | {'Crit FN':>8}")
+    print("-" * 116)
+    for r in sweep_rows:
+        print(f"{r['threshold']:<8.2f} | {r['precision']*100:>9.1f}% | {r['recall']*100:>7.1f}% | {r['f1']*100:>7.1f}% | {r['type_acc']*100:>7.1f}% | "
+              f"{r['pii_free_flagged']}/{r['pii_free_total']} ({r['pii_free_fpr']*100:>4.1f}%) | {r['person_to_username']:>8} | {r['username_to_person']:>8} | {r['critical_fn']:>8}")
+    print("-" * 116)
+
+    print("\n" + "=" * 116)
+    print("  Hard Cases Detailed Predictions Across Thresholds")
+    print("=" * 116)
+    case_names = {
+        "case_001": "Case 1: 张三今天来了，稍后张三又打电话过来。 (Gold: 2x CN_NAME)",
+        "case_002": "Case 2: 张三，用户名是李四。 (Gold: 张三 CN_NAME, 李四 USERNAME)",
+        "case_003": "Case 3: 用户名是张三。 (Gold: 张三 USERNAME)",
+        "case_004": "Case 4: 张三是用户名。 (Gold: 张三 USERNAME)",
+    }
+    for cid, title in case_names.items():
+        print(f"\n[{cid}] {title}")
+        for entry in hard_cases.get(cid, []):
+            t = entry["threshold"]
+            preds = entry["preds"]
+            pred_strs = [f"{etype}('{ptext}', {score:.3f})" for etype, ptext, score in preds]
+            print(f"  t={t:.2f} -> {', '.join(pred_strs) if pred_strs else 'None'}")
+    print("=" * 116 + "\n")
+
 
 
 if __name__ == "__main__":
