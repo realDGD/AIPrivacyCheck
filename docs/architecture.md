@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.10)
+# 架构说明 (v0.6.11)
 
 ## 设计目标
 
@@ -50,6 +50,16 @@
 - **独立检测器控制与 Slots 契约解耦**：将原单一的“模型增强检测”开关解耦为四层独立控制：内置规则（Built-in Rules，常开）、中文语义提取（Chinese IE，常开基线）、GLiNER 通用 PII（`glinerToggle`，默认开启，localStorage 持久化）、MemPrivacy 深度语义隐私（`memprivacyToggle`，默认关闭，首次开启弹出资源消耗确认，localStorage 持久化）。服务端 `active_slots` 强制包含 `built_in` 与 `chinese_ie`；兼容遗留请求 `use_model=True`（仅激活 GLiNER，MemPrivacy 需显式通过 `slots` 声明 opt-in）。
 - **规则引擎日期跨度与结构化密码修复**：修复 `CN_BIRTH_DATE` 日期截断缺陷（如 `1992年11月18日` 不再被贪婪截断为 `1992年1`）；新增结构化密码规则（`PASSWORD` 实体类型，优先级 121 胜过用户名，支持换行及中英阿德法西日韩泰多语言前缀），并配合 `_is_valid_password_value` 严格拦截代码标识符（`passwordManager`）、环境变量（`${DB_PASSWORD}`）与占位符，保持 0/388 严格负样本 FPR 零误报。
 - **长文本验收与多行 OTP 防误报门禁**：建立 `tests/fixtures/long_context_manual_acceptance.txt` 涵盖 20 大测试场景，全量采用通用合成凭据（`SYNTH_...`）；在 GLiNER 中新增换行符拦截与 12..19 位纯数字门禁，杜绝多行 OTP 恢复代码块被错误识别为 `CREDIT_CARD`，并明确将 `Project Aurora` 记录为已知通用 NER 候选误报基准。
+
+19g. **uv 托管 Python 基础运行时与两级环境修复架构 (v0.6.11)**：
+- **彻底脱离 fnOS 系统 Python 依赖**：彻底解决 fnOS 主机精简 Python 缺失 `_lzma`, `_bz2`, `_ssl`, `_sqlite3` 等底层 C 扩展导致的 ML 运行环境兼容故障。采用 uv 托管全功能标准 CPython 3.12.9 作为隔离运行时的底层解释器，隔离存放于 `${DATA_DIR}/python/installations`，uv 缓存收口至 `${DATA_DIR}/cache/uv`。
+- **17 项 Python 原生基础能力契约 (Python Capability Contract)**：定义并强制检验 17 项原生模块：`lzma`, `_lzma`, `bz2`, `_bz2`, `ssl`, `_ssl`, `sqlite3`, `_sqlite3`, `ctypes`, `_ctypes`, `zlib`, `hashlib`, `json`, `multiprocessing`, `subprocess`, `venv`, `ensurepip`。能力探针在隔离子进程中执行，不侵入主控制面。
+- **两级修复架构（Two-Tier Repair vs Transactional Rebuild）**：
+  - Level 1 增量依赖补齐：底层 Python 原生能力完整时，仅增量安装缺失的模型专属依赖包（如 `addict`），秒级完成，不重建 venv。
+  - Level 2 事务性环境升级重建：底层能力缺失（如缺少 `_lzma`）或需要升级时，自动或手动触发 `rebuild_runtime`。预检磁盘剩余空间（CPU >= 2GB，CUDA >= 4.5GB）；在 `venv.rebuild-<timestamp>` 中全量构建 uv 托管环境与所有已安装模型专属依赖集合；在临时环境中验证 17 项能力并执行真实模型冒烟测试；通过后优雅停止旧 profile worker，原子切换目录并清理旧环境与临时目录；失败时安全回滚原环境，绝不造成服务不可用。
+- **模型权重绝不重下与绝不篡改契约**：无论 Level 1 还是 Level 2，严禁调用 ModelScope 下载逻辑，绝不修改、删除或重命名 `${DATA_DIR}/models/*` 中的任何模型权重文件，升级过程 100% 零带宽消耗、零模型重载。
+- **Runtime Manifest Schema v3 与无损接管（Adoption）**：Manifest 升级至 `schema_version: 3`，记录 `python_runtime_source` (`managed` / `legacy-system-python`), `python_runtime_version`, `capabilities` 等。对于历史上已存在且各项能力健康的旧环境，探测时无损接管升级为 v3，不触发重建。
+- **状态模型与控制面板体验强化**：检测器状态与前端控制面板细化展示缺失底层能力提示，提供「重建/升级运行环境」直观操作。
 
 ## 系统架构拓扑
 

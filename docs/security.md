@@ -1,4 +1,4 @@
-# 安全说明 (v0.6.10)
+# 安全说明 (v0.6.11)
 
 ## 不保存的数据
 
@@ -48,9 +48,14 @@
 - **高危实体（Critical Entities）解耦与定义边界**：明确核心法定与凭据高危实体（`CRITICAL_ENTITY_TYPES`）由 18 类明确定义组成：`CN_ID_CARD`, `GOVERNMENT_ID`, `US_SSN`, `CN_BANK_CARD`, `CREDIT_CARD`, `CN_PHONE_NUMBER`, `PHONE`, `private_phone`, `EMAIL`, `private_email`, `SECRET`, `secret`, `PASSWORD`, `API_TOKEN`, `PRIVATE_KEY`, `DATABASE_URI`, `PASSPORT`, `CN_PASSPORT`，评测时严格与通用脱敏实体（`redactable_fn`）解耦。
 - **历史升级模型运行时修复安全门 (v0.6.10)**：`POST /api/model/runtime/repair` 强制校验管理员权限（`_is_admin()`），仅在沙盒 venv 目录执行 `uv pip install` 补装缺失依赖并执行只读冒烟测试，严禁重下模型、删除模型或重装 PyTorch，避免网络滥用与文件系统破坏。
 - **结构化密码检测与严格负样本防护 (v0.6.10)**：实现 `_is_valid_password_value` 验证器，严格排除代码变量（`passwordManager`）、函数调用（`getPassword()`）、环境变量占位符（`${DB_PASSWORD}`）、隐藏占位符（`******`、`[已隐藏]`）以及中英自然语言描述，保持 0/388 严格负样本误报率；`PASSWORD` 实体赋予优先级 121，高于 `USERNAME`（83），彻底消除密码提取被截断为用户名的安全缺陷。
+- **uv 托管 Python 基础运行时与沙盒安全门禁 (v0.6.11)**：
+  - **私有存储安全隔离**：uv 安装的底层 CPython 解释器隔离部署于 `${DATA_DIR}/python/installations`，uv 缓存收口至 `${DATA_DIR}/cache/uv`，全量脱离系统 `/usr`、`/lib` 等特权敏感目录，严格限制在应用专属权限边界（package 用户）内运行。
+  - **预检磁盘安全防护与拒绝服务防御**：`rebuild_runtime` 前置执行 `check_disk_space_for_rebuild`，强制要求 CPU 模式至少 2.0 GB、CUDA 模式至少 4.5 GB 可用磁盘空间，空间不足时快速失败，杜绝磁盘写满引发的宿主机或 NAS 系统级拒绝服务（DoS）。
+  - **跨进程排他互斥锁防竞态**：基于 `fcntl.flock` 的 `runtime_operation_lock` 对目标 profile 加锁，拦截并发重建与并发修复冲突，保证隔离环境操作具备严格的 ACID 属性。
+  - **事务性环境切换与零模型篡改安全**：在独立 staging 目录（`venv.rebuild-<timestamp>`）中构建并经多模型真实冒烟测试核验后原子替换；重构全过程禁止调用 ModelScope 网络下载，严格保持 `${DATA_DIR}/models/*` 权重文件哈希不变，免受网络劫持与供应链文件污染。
 - **资源耗尽保护**：单次处理正文限制为 2 MB，文本字符上限为 500,000 字符；模型推理采用进程级互斥锁保证串行，防止显存或内存击穿。
 
-## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.10)
+## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.11)
 
 ### 静态代码与测试凭据卫生策略
 

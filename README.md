@@ -2,10 +2,16 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.10`（fnOS Native 原生应用）
+当前版本：`0.6.11`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **uv 托管 Python 基础运行时与两级环境修复架构 (v0.6.11)**：
+  - **彻底脱离 fnOS 系统 Python 依赖**：使用 uv 托管全功能标准 CPython 3.12.9 作为隔离计算环境的底层解释器（安装存放于 `${DATA_DIR}/python/installations`，uv 缓存收口至 `${DATA_DIR}/cache/uv`），彻底解决宿主机系统 Python 缺少 `_lzma`, `_bz2`, `_ssl`, `_sqlite3` 等底层 C 扩展导致的运行环境兼容故障。
+  - **17 项底层能力契约与健康探测**：定义并严格检验 17 项原生标准库模块能力（`_lzma`, `_bz2`, `_ssl`, `_sqlite3`, `ctypes`, `zlib`, `hashlib`, `json`, `multiprocessing`, `subprocess`, `venv`, `ensurepip` 等），能力探针在隔离子进程中执行，控制面零侵入。
+  - **两级修复架构与事务性重建**：支持 Level 1 增量模型依赖修复（秒级补齐，不重建 venv）与 Level 2 事务性环境重建（预检磁盘剩余空间 CPU >= 2GB / CUDA >= 4.5GB、临时目录 `venv.rebuild-<timestamp>` 构建、多模型专属依赖聚合、真实冒烟测试核验、原子切换目录并清理旧环境，失败安全回滚原环境）。
+  - **零模型重载与零权重篡改契约**：环境修复与重建全程严禁触发模型重新下载，严格保持 `${DATA_DIR}/models/*` 模型权重文件不变，升级过程 100% 零网络带宽消耗、零模型重载。
+  - **Schema v3 运行时清单与旧环境无损接管**：旧环境经核验能力完整后自动无损接管升级为 `schema_version: 3` 清单，无需重建。前端控制面板提供「重建/升级运行环境」直观操作与底层能力缺失预警。
 - **Runtime 迁移、独立检测器控制与长文本正确性加固 (v0.6.10)**：
   - **历史版本运行时依赖迁移与一键修复**：解决历史版本已安装的 PyTorch 运行时（`torch-cpu`/`torch-cuda`）在升级后缺失新增模型特定依赖契约（如 SiameseUIE 历史 venv 缺少 `addict`）的兼容性问题。通过 `probe_model_runtime_dependencies` 轻量探测缺失包，并在前端暴露 `[修复运行环境]` 按钮（API: `POST /api/model/runtime/repair`），仅对目标 venv 增量补装 pip 依赖并执行冒烟测试，严禁重新下载模型权重或删除模型。
   - **独立检测器控制与 Slots 契约解耦**：彻底拆分单一模型开关为分层控制：内置规则（Built-in Rules，常开）、中文语义提取（Chinese IE，常开基线）、GLiNER 通用 PII（`glinerToggle`，默认开启，localStorage 持久化）、MemPrivacy 深度语义隐私（`memprivacyToggle`，默认关闭，首次开启弹出资源消耗确认，localStorage 持久化）。服务端 `active_slots` 强制包含 `built_in` 与 `chinese_ie`，兼容遗留 `use_model=True` 请求（仅激活 GLiNER）。
@@ -177,7 +183,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.10_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.11_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 
