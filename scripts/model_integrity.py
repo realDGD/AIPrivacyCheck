@@ -12,7 +12,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+CANONICAL_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ModelIntegrityError(Exception):
@@ -80,13 +84,19 @@ def validate_manifest_schema(
         if not isinstance(rel_path, str) or not rel_path.strip():
             return False, f"manifest entry missing or empty 'path': {entry!r}", {}
 
-        # Path traversal hardening
+        # Path traversal and format hardening
         cleaned_path = rel_path.replace("\\", "/").strip()
+        if WINDOWS_DRIVE_RE.match(rel_path) or WINDOWS_DRIVE_RE.match(cleaned_path):
+            return False, f"manifest path traversal forbidden (Windows drive path): '{rel_path}'", {}
+
+        if rel_path.startswith(("\\\\", "//")) or cleaned_path.startswith("//"):
+            return False, f"manifest path traversal forbidden (UNC path): '{rel_path}'", {}
+
         if cleaned_path.startswith("/") or Path(cleaned_path).is_absolute():
             return False, f"manifest path traversal forbidden (absolute path): '{rel_path}'", {}
 
         norm = os.path.normpath(cleaned_path)
-        if norm == ".." or norm.startswith(".." + os.sep) or norm.startswith("../") or "/../" in cleaned_path:
+        if norm == ".." or norm.startswith(".." + os.sep) or norm.startswith("../") or "/../" in cleaned_path or norm.startswith(".."):
             return False, f"manifest path traversal forbidden ('..'): '{rel_path}'", {}
 
         if target_resolved is not None:
@@ -101,10 +111,10 @@ def validate_manifest_schema(
         if type(sz) is not int or sz < 0:
             return False, f"manifest entry for '{rel_path}' invalid 'size': expected non-negative int, got {sz!r}", {}
 
-        # SHA-256 validation: exactly 64 hex characters
+        # SHA-256 validation: canonical lowercase 64 hex characters
         sha = entry.get("sha256")
-        if not isinstance(sha, str) or len(sha) != 64 or not all(c in "0123456789abcdefABCDEF" for c in sha):
-            return False, f"manifest entry for '{rel_path}' invalid 'sha256': expected 64 hex chars, got {sha!r}", {}
+        if not isinstance(sha, str) or not CANONICAL_SHA256_RE.match(sha):
+            return False, f"manifest entry for '{rel_path}' invalid 'sha256': expected canonical lowercase 64-char hex, got {sha!r}", {}
 
         manifest_files_map[norm] = entry
 

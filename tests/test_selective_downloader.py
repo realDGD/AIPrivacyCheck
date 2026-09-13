@@ -345,6 +345,70 @@ class SelectiveDownloaderTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("invalid 'size'", msg)
 
+    def test_manifest_windows_drive_path_rejected(self):
+        """P3: Manifest containing Windows drive paths (C:foo, D:\\bar) must be rejected."""
+        target = self.tmp_dir / "gliner-pii-edge-windrive"
+        target.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "files": [
+                {"path": "C:\\windows\\system32\\calc.exe", "size": 10, "sha256": "0" * 64},
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        ok, msg, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok)
+        self.assertIn("Windows drive path", msg)
+
+        # Also test forward-slash drive path
+        manifest2 = {
+            "files": [
+                {"path": "D:/model/weights.bin", "size": 10, "sha256": "0" * 64},
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest2), encoding="utf-8")
+        ok2, msg2, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok2)
+        self.assertIn("Windows drive path", msg2)
+
+    def test_manifest_unc_path_rejected(self):
+        """P3: Manifest containing UNC network paths (\\\\share\\file, //share/file) must be rejected."""
+        target = self.tmp_dir / "gliner-pii-edge-unc"
+        target.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "files": [
+                {"path": "\\\\remote-host\\share\\weights.bin", "size": 10, "sha256": "0" * 64},
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        ok, msg, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok)
+        self.assertIn("UNC path", msg)
+
+        manifest2 = {
+            "files": [
+                {"path": "//remote-host/share/weights.bin", "size": 10, "sha256": "0" * 64},
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest2), encoding="utf-8")
+        ok2, msg2, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok2)
+        self.assertIn("UNC path", msg2)
+
+    def test_manifest_uppercase_sha_rejected(self):
+        """P3: Manifest sha256 must strictly follow canonical lowercase ^[0-9a-f]{64}$."""
+        target = self.tmp_dir / "gliner-pii-edge-uppersha"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "model.bin").write_bytes(b"content")
+        manifest = {
+            "files": [
+                {"path": "model.bin", "size": 7, "sha256": "A" * 64},
+            ]
+        }
+        (target / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        ok, msg, _, _ = verify_existing_model_integrity(target)
+        self.assertFalse(ok)
+        self.assertIn("canonical lowercase", msg)
+
 
 if __name__ == "__main__":
     unittest.main()
