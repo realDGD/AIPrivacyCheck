@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent Raw Prediction Cache for AI Privacy Check Benchmarks (v0.6.6).
+"""Persistent Raw Prediction Cache for AI Privacy Check Benchmarks (v0.6.7).
 
 Enables offline re-scoring without re-running expensive model inference:
 - Cache key binds: corpus SHA256, model_id, model revision, model file hash,
@@ -47,18 +47,75 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+RUNTIME_CRITICAL_KEYS = (
+    "python_version",
+    "platform",
+    "machine",
+    "torch_version",
+    "transformers_version",
+    "modelscope_version",
+    "gliner_version",
+)
+
+
 def compute_model_files_hash(model_dir: Path) -> str:
-    """Computes deterministic compound SHA-256 over model files (name + size + mtime)."""
+    """Computes deterministic compound SHA-256 over model files content.
+
+    1. Preferred: if download-manifest.json exists with per-file SHA256,
+       model_fingerprint = SHA256(sorted(path + size + sha256)).
+    2. Fallback: computes true streaming SHA-256 over all non-temporary model files.
+       Never relies on mtime.
+    """
+    manifest_path = model_dir / "download-manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            files_entry = manifest.get("files")
+            items = []
+            if isinstance(files_entry, list):
+                for item in files_entry:
+                    if isinstance(item, dict) and "path" in item and "size" in item and "sha256" in item:
+                        items.append(f"{item['path']}:{item['size']}:{item['sha256']}")
+            elif isinstance(files_entry, dict):
+                for p, item in files_entry.items():
+                    if isinstance(item, dict) and "size" in item and "sha256" in item:
+                        items.append(f"{p}:{item['size']}:{item['sha256']}")
+            if items:
+                h = hashlib.sha256()
+                for line in sorted(items):
+                    h.update(line.encode("utf-8"))
+                return h.hexdigest()
+        except Exception:
+            pass
+
+    # Fallback: compute actual content SHA-256 for all model files
     h = hashlib.sha256()
     for root, _, files in os.walk(model_dir):
         for fname in sorted(files):
-            if fname.startswith(".") or fname.endswith(".tmp"):
+            if fname.startswith(".") or fname.endswith(".tmp") or fname.endswith(".tmp_download") or fname == "download-manifest.json":
                 continue
             fpath = Path(root) / fname
             rel = fpath.relative_to(model_dir).as_posix()
             stat = fpath.stat()
-            h.update(f"{rel}:{stat.st_size}".encode("utf-8"))
+            file_sha = sha256_file(fpath)
+            h.update(f"{rel}:{stat.st_size}:{file_sha}".encode("utf-8"))
     return h.hexdigest()
+
+
+def compute_cache_signature(key_data: Dict[str, Any]) -> str:
+    """Computes a deterministic 16-hex-character signature representing the execution context:
+    model content fingerprint, runtime fingerprint, and inference config (threshold, labels, device).
+    """
+    sig_components = {
+        "model_files_hash": key_data.get("model_files_hash", ""),
+        "inference_config": key_data.get("inference_config", {}),
+        "runtime": {
+            k: key_data.get("runtime", {}).get(k)
+            for k in sorted(RUNTIME_CRITICAL_KEYS)
+        },
+    }
+    dumped = json.dumps(sig_components, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(dumped.encode("utf-8")).hexdigest()[:16]
 
 
 def get_runtime_environment_metadata() -> Dict[str, Any]:
@@ -106,43 +163,73 @@ class BenchmarkPredictionCache:
             "inference_config": inference_config,
             "runtime": runtime,
         }
+        key_data["cache_signature"] = compute_cache_signature(key_data)
         return key_data
 
-    def get_cache_dir(self, corpus_sha256: str, model_id: str, revision: str) -> Path:
+    def get_cache_dir(
+        self,
+        corpus_sha256: str,
+        model_id: str,
+        revision: str,
+        cache_signature: Optional[str] = None,
+    ) -> Path:
         short_hash = corpus_sha256[:16]
         safe_model = model_id.replace("/", "_").replace("\\", "_")
         safe_rev = revision.replace("/", "_").replace("\\", "_")
-        return self.cache_root / short_hash / safe_model / safe_rev
+        base = self.cache_root / short_hash / safe_model / safe_rev
+        if cache_signature:
+            return base / cache_signature[:16]
+        return base
 
     def has_valid_cache(self, key_data: Dict[str, Any]) -> Tuple[bool, Optional[Path]]:
         corpus_sha = key_data["corpus_sha256"]
         model_id = key_data["model_id"]
         revision = key_data["revision"]
-        cdir = self.get_cache_dir(corpus_sha, model_id, revision)
+        sig = key_data.get("cache_signature") or compute_cache_signature(key_data)
 
-        cfg_file = cdir / "inference_config.json"
-        preds_file = cdir / "predictions.jsonl"
+        # Check signature-specific directory first, then fallback to base directory
+        candidate_dirs = [
+            self.get_cache_dir(corpus_sha, model_id, revision, sig),
+            self.get_cache_dir(corpus_sha, model_id, revision),
+        ]
 
-        if not (cfg_file.is_file() and preds_file.is_file()):
-            return False, None
+        for cdir in candidate_dirs:
+            cfg_file = cdir / "inference_config.json"
+            preds_file = cdir / "predictions.jsonl"
 
-        try:
-            cached_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
-            # Compare key components:
-            if cached_cfg.get("corpus_sha256") != corpus_sha:
-                return False, None
-            if cached_cfg.get("model_id") != model_id:
-                return False, None
-            if cached_cfg.get("revision") != revision:
-                return False, None
-            if cached_cfg.get("model_files_hash") != key_data["model_files_hash"]:
-                return False, None
-            # Check inference config match (e.g. label order, min threshold)
-            if cached_cfg.get("inference_config") != key_data["inference_config"]:
-                return False, None
-            return True, cdir
-        except Exception:
-            return False, None
+            if not (cfg_file.is_file() and preds_file.is_file()):
+                continue
+
+            try:
+                cached_cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+                # Compare key components:
+                if cached_cfg.get("corpus_sha256") != corpus_sha:
+                    continue
+                if cached_cfg.get("model_id") != model_id:
+                    continue
+                if cached_cfg.get("revision") != revision:
+                    continue
+                if cached_cfg.get("model_files_hash") != key_data["model_files_hash"]:
+                    continue
+                # Check inference config match (e.g. label order, min threshold)
+                if cached_cfg.get("inference_config") != key_data["inference_config"]:
+                    continue
+                # Check runtime fingerprint match
+                cached_rt = cached_cfg.get("runtime", {})
+                curr_rt = key_data.get("runtime", {})
+                runtime_mismatch = False
+                for rkey in RUNTIME_CRITICAL_KEYS:
+                    if cached_rt.get(rkey) != curr_rt.get(rkey):
+                        runtime_mismatch = True
+                        break
+                if runtime_mismatch:
+                    continue
+
+                return True, cdir
+            except Exception:
+                continue
+
+        return False, None
 
     def save(
         self,
@@ -160,6 +247,7 @@ class BenchmarkPredictionCache:
             key_data["corpus_sha256"],
             key_data["model_id"],
             key_data["revision"],
+            key_data.get("cache_signature"),
         )
         cdir.mkdir(parents=True, exist_ok=True)
 
@@ -185,6 +273,17 @@ class BenchmarkPredictionCache:
         cfg_file = cache_dir / "inference_config.json"
         preds_file = cache_dir / "predictions.jsonl"
         metrics_file = cache_dir / "metrics.json"
+
+        # If passed parent directory (e.g. .../master), search for signature subdirectories
+        if not (cfg_file.is_file() and preds_file.is_file()):
+            if cache_dir.is_dir():
+                for sub in sorted(cache_dir.iterdir()):
+                    if sub.is_dir() and (sub / "inference_config.json").is_file() and (sub / "predictions.jsonl").is_file():
+                        cfg_file = sub / "inference_config.json"
+                        preds_file = sub / "predictions.jsonl"
+                        metrics_file = sub / "metrics.json"
+                        cache_dir = sub
+                        break
 
         if not (cfg_file.is_file() and preds_file.is_file()):
             raise FileNotFoundError(f"Missing cache files in {cache_dir}")
