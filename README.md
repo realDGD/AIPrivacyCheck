@@ -2,10 +2,18 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.13`（fnOS Native 原生应用）
+当前版本：`0.6.14`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **TLS 与网络兼容性最终收敛 (v0.6.14)**：
+  - **分层渐进式 TLS 信任策略**：针对真实 fnOS 上不同环境可能出现的 CA 根证书差异，建立三级递进式 TLS 信任机制：默认以 uv 内置 Mozilla 根证书运行（Mode A `uv-native`）；遭遇证书链校验异常（如 `UnknownIssuer`）时自动注入 `UV_SYSTEM_CERTS=true` 启用 fnOS 系统根证书（Mode B `system-certs`）；若仍校验失败且检测到本地有效 PEM 根证书，则注入 `SSL_CERT_FILE` 进行显式引导（Mode C `explicit-ca`）。全程坚持 Fail-Closed 底线，严禁任何 `--allow-insecure-host` 或禁用证书参数。
+  - **SJTUG PyTorch 专用轮子镜像与官方源自动降级**：确立上海交通大学 SJTUG PyTorch Wheels 镜像优先策略（`https://mirror.sjtu.edu.cn/pytorch-wheels/cu124/` 与 `cpu/`），实测具备 `torch-2.6.0` 对应架构轮子；镜像不可用时自动无缝降级回退至 PyTorch 官方下载源。
+  - **PyTorch 与通用 PyPI 依赖索引严格隔离**：安装 PyTorch 时通过 `--index <torch_index> --default-index <pypi_index> --index-strategy first-index` 锁定 PyTorch 轮子由专用源提供、通用依赖包由 PyPI 提供，彻底避免依赖混淆与安装冲突。
+  - **网络超时预算治理与快速失败回退**：对镜像源设定 25s 请求超时与 10s 连接超时，对官方源设定 60s 请求超时与 15s 连接超时，消除因第三方镜像响应悬挂导致的长期阻塞。
+  - **完备错误分类与完整性 Fail-Closed**：构建标准分类器准确区分 TLS、网络超时、DNS、HTTP 状态、包损坏及本地 IO 错误；校验和异常或磁盘写满立即阻断，绝对禁止换源重试。
+  - **遥测元数据沉淀**：在 `runtime-manifest.json` 与 `installed.json` 中沉淀 `download_sources` 与 `tls_modes` 遥测字段。
+  - **Runtime Foundation v3 进入 CANDIDATE FROZEN**。
 - **运行时网络与供应链安全收敛 (v0.6.13)**：
   - **全量注入 UV_SYSTEM_CERTS 修复 TLS UnknownIssuer**：彻底修复真实 fnOS 宿主机环境因 musl uv 默认未加载系统 CA 根证书导致 PyPI / uv 报 `invalid peer certificate: UnknownIssuer` 的故障。在 `build_uv_env` 全局统一注入 `UV_SYSTEM_CERTS=true`。
   - **Cernet/MirrorZ 教育网镜像优先与官方源自动降级**：针对受管 Python 3.12.9、PyPI 依赖包与 PyTorch 2.6.0 轮子三条独立供应链，确立 Cernet 镜像优先策略，并在发生网络错误或超时时自动无缝降级回退到官方源。
@@ -198,7 +206,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.13_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.14_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 
