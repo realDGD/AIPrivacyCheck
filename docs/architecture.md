@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.9)
+# 架构说明 (v0.6.10)
 
 ## 设计目标
 
@@ -43,6 +43,13 @@
 - **CRITICAL_ENTITY_TYPES 规范收敛与文档对齐**：明确代码中定义的 18 类核心高危实体单一事实来源（`CN_ID_CARD`, `GOVERNMENT_ID`, `US_SSN`, `CN_BANK_CARD`, `CREDIT_CARD`, `CN_PHONE_NUMBER`, `PHONE`, `private_phone`, `EMAIL`, `private_email`, `SECRET`, `secret`, `PASSWORD`, `API_TOKEN`, `PRIVATE_KEY`, `DATABASE_URI`, `PASSPORT`, `CN_PASSPORT`），严格解耦法定高危与普通脱敏实体。
 - **全库静态凭据零容忍（Zero Provider-Perfect Literals）**：移除针对提供商特征静态凭据的任何豁免，全仓库工作区内提供商形态（如 `AKIA...`, `github_pat_...`, `LTAI...`, `ghp_...`）静态字面量彻底清零（0 个）；所有测试夹具均转换为标准通用合成前缀（`SYNTH_...`）。
 - **双重最终冻结确认**：Built-in v2 规则与阈值冻结（0/388 严格负样本 FPR，100/100 幂等性，0 占位符命中），Benchmark 评测基础设施（下载器、完整性核验、缓存契约、评分器）全指标达标并正式进入 STABLE / FROZEN 最终冻结状态。
+
+19f. **历史版本升级运行时迁移、独立检测器控制与长文本正确性加固 (v0.6.10)**：
+- **历史模型专属依赖迁移与轻量探针**：彻底解决 v0.6.3 及更早版本已安装的 PyTorch 运行时（`torch-cpu`/`torch-cuda`）在升级到新版本后因缺少新增模型特定依赖（如 SiameseUIE 历史 venv 缺少 `addict`）而报 `No module named 'addict'` 的故障。实现轻量只读探针 `probe_model_runtime_dependencies`，在不触发重量级导包或模型加载的前提下快速检测缺失包，并在运行时状态失效时自动清空探针缓存。
+- **Detector Readiness 两级就绪状态模型与一键修复**：检测器状态全面细化并暴露 `installed`、`base_runtime_ready`、`model_dependencies_ready`、`missing_dependencies`、`ready` 与 `repairable` 字段。提供 `POST /api/model/runtime/repair` 管理端点与前端 `[修复运行环境]` 一键修复操作：对目标 venv 增量补装缺失的 pip 依赖并执行真实冒烟测试，严禁重下模型权重、删除模型或重装 PyTorch。
+- **独立检测器控制与 Slots 契约解耦**：将原单一的“模型增强检测”开关解耦为四层独立控制：内置规则（Built-in Rules，常开）、中文语义提取（Chinese IE，常开基线）、GLiNER 通用 PII（`glinerToggle`，默认开启，localStorage 持久化）、MemPrivacy 深度语义隐私（`memprivacyToggle`，默认关闭，首次开启弹出资源消耗确认，localStorage 持久化）。服务端 `active_slots` 强制包含 `built_in` 与 `chinese_ie`；兼容遗留请求 `use_model=True`（仅激活 GLiNER，MemPrivacy 需显式通过 `slots` 声明 opt-in）。
+- **规则引擎日期跨度与结构化密码修复**：修复 `CN_BIRTH_DATE` 日期截断缺陷（如 `1992年11月18日` 不再被贪婪截断为 `1992年1`）；新增结构化密码规则（`PASSWORD` 实体类型，优先级 121 胜过用户名，支持换行及中英阿德法西日韩泰多语言前缀），并配合 `_is_valid_password_value` 严格拦截代码标识符（`passwordManager`）、环境变量（`${DB_PASSWORD}`）与占位符，保持 0/388 严格负样本 FPR 零误报。
+- **长文本验收与多行 OTP 防误报门禁**：建立 `tests/fixtures/long_context_manual_acceptance.txt` 涵盖 20 大测试场景，全量采用通用合成凭据（`SYNTH_...`）；在 GLiNER 中新增换行符拦截与 12..19 位纯数字门禁，杜绝多行 OTP 恢复代码块被错误识别为 `CREDIT_CARD`，并明确将 `Project Aurora` 记录为已知通用 NER 候选误报基准。
 
 ## 系统架构拓扑
 

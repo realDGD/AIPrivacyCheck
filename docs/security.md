@@ -1,4 +1,4 @@
-# 安全说明 (v0.6.9)
+# 安全说明 (v0.6.10)
 
 ## 不保存的数据
 
@@ -44,11 +44,13 @@
 - **模型精简按需下载与传输安全 (v0.6.6 - v0.6.9)**：严禁无限制全量拉取 ModelScope 社区仓库快照，仅由 `selective_downloader` 静态白名单枚举并单文件流式校验下载 PyTorch 必需文件，杜绝不可信仓库引入非必需可执行资产；自动过滤 ONNX 冗余文件与文档，减少 60%+ 网络流量暴露；v0.6.9 引入 `force_download=True`，彻底解决同尺寸损坏文件无法自动重新下载的缺陷，并在上游 mutable revision 变更时记录告警。
 - **模型内容真实性指纹与缓存安全屏障 (v0.6.8 - v0.6.9)**：Prediction Cache 深度绑定 `scripts/model_integrity.py`，对模型磁盘文件进行 SHA-256 内容校验；损坏或篡改直接抛出 `ModelIntegrityError` 拒识伪造；父级目录多签名歧义强制抛出 `AmbiguousCacheError`；落盘与加载严格校验 `cache-manifest.json` 与 `predictions_sha256`（`CacheCorruptedError` / `LegacyUnverifiedCacheError`）。
 - **精简下载器清单 Schema 与跨平台防路径穿越防御 (v0.6.8 - v0.6.9)**：强制要求 `download-manifest.json` 包含规范小写 64 位十六进制 SHA-256（`^[0-9a-f]{64}$`）和非负文件大小，严格过滤 Windows 盘符路径（`^[A-Za-z]:`）、UNC 网络路径（`\\server\share`, `//server/share`）、绝对路径与 `../` 路径穿越注入。
-- **全仓库零提供商形态凭据卫生加固 (v0.6.9)**：全库静态凭据扫描门禁达成 0 违规，严禁存在任何提供商形态（`AKIA...`, `github_pat_...`, `LTAI...`, `ghp_...`）的静态字面量（即使包含 SAMPLE/EXAMPLE 或全 0 熵值亦被严格拦截），全量替换为通用 `SYNTH_...` 格式。
+- **全仓库零提供商形态凭据卫生加固 (v0.6.9 - v0.6.10)**：全库静态凭据扫描门禁达成 0 违规，严禁存在任何提供商形态（`AKIA...`, `github_pat_...`, `LTAI...`, `ghp_...`）的静态字面量（即使包含 SAMPLE/EXAMPLE 或全 0 熵值亦被严格拦截），全量替换为通用 `SYNTH_...` 格式。新增 `tests/fixtures/long_context_manual_acceptance.txt` 严格遵循该契约。
 - **高危实体（Critical Entities）解耦与定义边界**：明确核心法定与凭据高危实体（`CRITICAL_ENTITY_TYPES`）由 18 类明确定义组成：`CN_ID_CARD`, `GOVERNMENT_ID`, `US_SSN`, `CN_BANK_CARD`, `CREDIT_CARD`, `CN_PHONE_NUMBER`, `PHONE`, `private_phone`, `EMAIL`, `private_email`, `SECRET`, `secret`, `PASSWORD`, `API_TOKEN`, `PRIVATE_KEY`, `DATABASE_URI`, `PASSPORT`, `CN_PASSPORT`，评测时严格与通用脱敏实体（`redactable_fn`）解耦。
+- **历史升级模型运行时修复安全门 (v0.6.10)**：`POST /api/model/runtime/repair` 强制校验管理员权限（`_is_admin()`），仅在沙盒 venv 目录执行 `uv pip install` 补装缺失依赖并执行只读冒烟测试，严禁重下模型、删除模型或重装 PyTorch，避免网络滥用与文件系统破坏。
+- **结构化密码检测与严格负样本防护 (v0.6.10)**：实现 `_is_valid_password_value` 验证器，严格排除代码变量（`passwordManager`）、函数调用（`getPassword()`）、环境变量占位符（`${DB_PASSWORD}`）、隐藏占位符（`******`、`[已隐藏]`）以及中英自然语言描述，保持 0/388 严格负样本误报率；`PASSWORD` 实体赋予优先级 121，高于 `USERNAME`（83），彻底消除密码提取被截断为用户名的安全缺陷。
 - **资源耗尽保护**：单次处理正文限制为 2 MB，文本字符上限为 500,000 字符；模型推理采用进程级互斥锁保证串行，防止显存或内存击穿。
 
-## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.9)
+## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.10)
 
 ### 静态代码与测试凭据卫生策略
 

@@ -2,10 +2,15 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.9`（fnOS Native 原生应用）
+当前版本：`0.6.10`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **Runtime 迁移、独立检测器控制与长文本正确性加固 (v0.6.10)**：
+  - **历史版本运行时依赖迁移与一键修复**：解决历史版本已安装的 PyTorch 运行时（`torch-cpu`/`torch-cuda`）在升级后缺失新增模型特定依赖契约（如 SiameseUIE 历史 venv 缺少 `addict`）的兼容性问题。通过 `probe_model_runtime_dependencies` 轻量探测缺失包，并在前端暴露 `[修复运行环境]` 按钮（API: `POST /api/model/runtime/repair`），仅对目标 venv 增量补装 pip 依赖并执行冒烟测试，严禁重新下载模型权重或删除模型。
+  - **独立检测器控制与 Slots 契约解耦**：彻底拆分单一模型开关为分层控制：内置规则（Built-in Rules，常开）、中文语义提取（Chinese IE，常开基线）、GLiNER 通用 PII（`glinerToggle`，默认开启，localStorage 持久化）、MemPrivacy 深度语义隐私（`memprivacyToggle`，默认关闭，首次开启弹出资源消耗确认，localStorage 持久化）。服务端 `active_slots` 强制包含 `built_in` 与 `chinese_ie`，兼容遗留 `use_model=True` 请求（仅激活 GLiNER）。
+  - **规则引擎日期跨度与结构化密码修复**：修复 `CN_BIRTH_DATE` 贪婪截断导致只保留部分日期的缺陷（`1992年11月18日` 不再截断为 `1992年1`）；新增结构化密码规则（`PASSWORD` 实体类型，优先级 121 高于用户名，支持换行及多语言前缀），配合 `_is_valid_password_value` 拦截变量与占位符，保持 0/388 严格负样本 FPR 零误报。
+  - **长文本验收与多行 OTP 防误报门禁**：建立 `tests/fixtures/long_context_manual_acceptance.txt` 涵盖 20 大测试场景，严格执行全库零提供商形态凭据规范（`SYNTH_...`）；GLiNER 增加多行换行与 12..19 位长度门禁，杜绝多行 OTP 恢复代码块误报为 `CREDIT_CARD`，并记录 `Project Aurora` 为已知候选通用实体。
 - **Benchmark 基础设施与信任边界最终加固 (v0.6.9)**：
   - **Selective Downloader 同尺寸损坏文件强制修复**：修复当本地已存在同尺寸损坏文件时绕过网络重新下载的缺陷；`download_single_file` 引入 `force_download=True` 参数，原子流式下载至 `.tmp_download` 校验哈希并原子替换，并在 ModelScope 可变 revision 内容变更时记录告警与 `upstream_content_changed` 标记。
   - **Prediction Cache Manifest 强制完整性契约**：`cache-manifest.json` 成为缓存有效性法定要件；`has_valid_cache()` 强制要求 manifest 存在并比对 `predictions_sha256` 与预测条目数；`load()` 默认对无清单的遗留缓存抛出 `LegacyUnverifiedCacheError`，提供 `--allow-legacy-unverified-cache` 命令行安全兼容选项。
