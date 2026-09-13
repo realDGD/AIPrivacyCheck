@@ -20,7 +20,9 @@ import sys
 sys.path.insert(0, str(sys_path))
 
 from benchmark_cache import (
+    AmbiguousCacheError,
     BenchmarkPredictionCache,
+    CacheCorruptedError,
     ModelIntegrityError,
     SecurityError,
     compute_model_files_hash,
@@ -331,6 +333,55 @@ class BenchmarkPredictionCacheTests(unittest.TestCase):
         wfile.write_bytes(b"altered_weights_content_54321")
         h3 = compute_model_files_hash(mdir)
         self.assertNotEqual(h1, h3, "Content change must alter streaming fingerprint")
+
+    def test_parent_cache_dir_with_multiple_signatures_is_ambiguous(self):
+        """Section 18: Loading from parent directory with >1 signature must raise AmbiguousCacheError."""
+        config1 = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        config2 = {"minimum_threshold": 0.30, "label_order": ["organization"]}
+        key1 = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config1)
+        key2 = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config2)
+
+        dir1 = self.cache.save(key1, [{"id": "case_1", "entities": [{"text": "v1"}]}])
+        dir2 = self.cache.save(key2, [{"id": "case_1", "entities": [{"text": "v2"}]}])
+
+        parent_dir = dir1.parent
+        self.assertEqual(parent_dir, dir2.parent)
+
+        # Loading from parent_dir must fail because there are 2 signatures
+        with self.assertRaises(AmbiguousCacheError) as ctx:
+            self.cache.load(parent_dir)
+        self.assertIn("multiple signature directories found", str(ctx.exception))
+
+        # Explicitly loading from either signature directory must succeed
+        cfg1, preds1, _ = self.cache.load(dir1)
+        self.assertEqual(cfg1["inference_config"]["label_order"], ["person"])
+        cfg2, preds2, _ = self.cache.load(dir2)
+        self.assertEqual(cfg2["inference_config"]["label_order"], ["organization"])
+
+    def test_prediction_cache_content_tamper_rejected(self):
+        """Section 19: Tampering with predictions.jsonl triggers CacheCorruptedError."""
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", self.model_dir, config)
+        preds = [
+            {"id": "case_1", "entities": [{"text": "Alice", "type": "CN_NAME"}]},
+            {"id": "case_2", "entities": [{"text": "Bob", "type": "CN_NAME"}]},
+        ]
+        cdir = self.cache.save(key, preds)
+
+        # Load valid cache
+        _, loaded, _ = self.cache.load(cdir)
+        self.assertEqual(len(loaded), 2)
+
+        # Tamper with predictions.jsonl content
+        preds_file = cdir / "predictions.jsonl"
+        lines = preds_file.read_text(encoding="utf-8").splitlines()
+        # Alter entity in first line
+        altered = lines[0].replace("Alice", "Mallory")
+        preds_file.write_text(altered + "\n" + lines[1] + "\n", encoding="utf-8")
+
+        with self.assertRaises(CacheCorruptedError) as ctx:
+            self.cache.load(cdir)
+        self.assertIn("checksum mismatch", str(ctx.exception))
 
 
 if __name__ == "__main__":

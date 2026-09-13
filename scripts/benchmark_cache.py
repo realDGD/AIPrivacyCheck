@@ -220,16 +220,32 @@ class BenchmarkPredictionCache:
         )
         cdir.mkdir(parents=True, exist_ok=True)
 
-        cfg_file = cdir / "inference_config.json"
-        cfg_file.write_text(json.dumps(key_data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        rt_file = cdir / "runtime.json"
-        rt_file.write_text(json.dumps(key_data.get("runtime", {}), ensure_ascii=False, indent=2), encoding="utf-8")
-
+        # Write predictions file first
         preds_file = cdir / "predictions.jsonl"
         with open(preds_file, "w", encoding="utf-8") as f:
             for pred in predictions:
                 f.write(json.dumps(pred, ensure_ascii=False) + "\n")
+
+        preds_sha = sha256_file(preds_file)
+
+        # Write cache-manifest.json recording prediction checksum and count
+        cache_manifest = {
+            "predictions_sha256": preds_sha,
+            "prediction_count": len(predictions),
+            "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        (cdir / "cache-manifest.json").write_text(json.dumps(cache_manifest, indent=2), encoding="utf-8")
+
+        # Save inference config with predictions metadata
+        saved_key_data = dict(key_data)
+        saved_key_data["predictions_sha256"] = preds_sha
+        saved_key_data["prediction_count"] = len(predictions)
+
+        cfg_file = cdir / "inference_config.json"
+        cfg_file.write_text(json.dumps(saved_key_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        rt_file = cdir / "runtime.json"
+        rt_file.write_text(json.dumps(key_data.get("runtime", {}), ensure_ascii=False, indent=2), encoding="utf-8")
 
         if metrics is not None:
             metrics_file = cdir / "metrics.json"
@@ -241,21 +257,50 @@ class BenchmarkPredictionCache:
         cache_dir = Path(cache_dir).resolve()
         cfg_file = cache_dir / "inference_config.json"
         preds_file = cache_dir / "predictions.jsonl"
-        metrics_file = cache_dir / "metrics.json"
+        target_dir = cache_dir
 
         # If passed parent directory (e.g. .../master), search for signature subdirectories
         if not (cfg_file.is_file() and preds_file.is_file()):
             if cache_dir.is_dir():
-                for sub in sorted(cache_dir.iterdir()):
-                    if sub.is_dir() and (sub / "inference_config.json").is_file() and (sub / "predictions.jsonl").is_file():
-                        cfg_file = sub / "inference_config.json"
-                        preds_file = sub / "predictions.jsonl"
-                        metrics_file = sub / "metrics.json"
-                        cache_dir = sub
-                        break
+                sig_dirs = [
+                    sub for sub in sorted(cache_dir.iterdir())
+                    if sub.is_dir() and (sub / "inference_config.json").is_file() and (sub / "predictions.jsonl").is_file()
+                ]
+                if len(sig_dirs) == 1:
+                    target_dir = sig_dirs[0]
+                    cfg_file = target_dir / "inference_config.json"
+                    preds_file = target_dir / "predictions.jsonl"
+                elif len(sig_dirs) > 1:
+                    available = [s.name for s in sig_dirs]
+                    raise AmbiguousCacheError(
+                        f"Ambiguous cache directory '{cache_dir}': multiple signature directories found {available}. "
+                        "Please specify the exact signature subdirectory."
+                    )
+                else:
+                    raise FileNotFoundError(f"Missing cache files in {cache_dir}")
+            else:
+                raise FileNotFoundError(f"Missing cache files in {cache_dir}")
 
         if not (cfg_file.is_file() and preds_file.is_file()):
-            raise FileNotFoundError(f"Missing cache files in {cache_dir}")
+            raise FileNotFoundError(f"Missing cache files in {target_dir}")
+
+        # Check predictions file integrity against cache-manifest.json if present
+        cmanifest_file = target_dir / "cache-manifest.json"
+        if cmanifest_file.is_file():
+            try:
+                cmanifest = json.loads(cmanifest_file.read_text(encoding="utf-8"))
+                expected_sha = cmanifest.get("predictions_sha256")
+                expected_count = cmanifest.get("prediction_count")
+                actual_sha = sha256_file(preds_file)
+                if expected_sha and actual_sha != expected_sha:
+                    raise CacheCorruptedError(
+                        f"Prediction cache integrity verification failed in '{target_dir}': "
+                        f"predictions.jsonl checksum mismatch (got {actual_sha}, expected {expected_sha})"
+                    )
+            except (json.JSONDecodeError, CacheCorruptedError) as exc:
+                if isinstance(exc, CacheCorruptedError):
+                    raise
+                raise CacheCorruptedError(f"Corrupted cache-manifest.json in '{target_dir}': {exc}")
 
         cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
         predictions = [
@@ -263,6 +308,15 @@ class BenchmarkPredictionCache:
             for line in preds_file.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+
+        if cmanifest_file.is_file() and expected_count is not None:
+            if len(predictions) != expected_count:
+                raise CacheCorruptedError(
+                    f"Prediction cache integrity verification failed in '{target_dir}': "
+                    f"prediction count mismatch (got {len(predictions)}, expected {expected_count})"
+                )
+
+        metrics_file = target_dir / "metrics.json"
         metrics = json.loads(metrics_file.read_text(encoding="utf-8")) if metrics_file.is_file() else None
         return cfg, predictions, metrics
 
@@ -270,3 +324,12 @@ class BenchmarkPredictionCache:
 class SecurityError(Exception):
     pass
 
+
+class AmbiguousCacheError(ValueError):
+    """Raised when a parent cache directory contains multiple ambiguous cache signatures."""
+    pass
+
+
+class CacheCorruptedError(Exception):
+    """Raised when predictions file content does not match recorded checksum or count."""
+    pass
