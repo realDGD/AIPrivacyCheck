@@ -36,6 +36,14 @@
 - **全仓库凭据卫生**：全库所有文本格式（`.py`, `.json`, `.jsonl`, `.md`, `.sh` 等）静态凭据扫描达成 0 违规，高熵虚构凭据全量替换为零熵惰性模式。
 - **双重冻结状态**：Built-in v2 规则与阈值冻结（0/388 严格负样本 FPR），Benchmark 基础设施正式进入 STABLE / FROZEN 最终冻结状态。
 
+19e. **Benchmark 基础设施与信任边界最终加固 (v0.6.9)**：
+- **Selective Downloader 同尺寸损坏文件强制修复**：修复当本地已存在同尺寸损坏文件时绕过网络重新下载的缺陷；`download_single_file` 引入 `force_download=True` 参数，原子流式下载至 `.tmp_download` 并校验哈希后原子替换，并在 ModelScope 可变 revision 内容变更时记录告警与 `upstream_content_changed` 标记。
+- **Prediction Cache Manifest 强制完整性契约**：`cache-manifest.json` 成为缓存命中法定要件；`has_valid_cache()` 强制要求 manifest 存在并比对 `predictions_sha256` 与预测条目数；`load()` 默认对无清单的遗留缓存抛出 `LegacyUnverifiedCacheError`，提供 `--allow-legacy-unverified-cache` 命令行安全兼容选项。
+- **Manifest Schema 跨平台路径穿越与大写哈希拦截**：Manifest 校验严格拦截 Windows 盘符路径（`^[A-Za-z]:`）、UNC 网络路径（`\\server\share`, `//server/share`）、绝对路径及各类 `..` 目录穿越；强制约束 `sha256` 必须为规范小写 64 位十六进制（`^[0-9a-f]{64}$`），严格拒绝大写十六进制。
+- **CRITICAL_ENTITY_TYPES 规范收敛与文档对齐**：明确代码中定义的 18 类核心高危实体单一事实来源（`CN_ID_CARD`, `GOVERNMENT_ID`, `US_SSN`, `CN_BANK_CARD`, `CREDIT_CARD`, `CN_PHONE_NUMBER`, `PHONE`, `private_phone`, `EMAIL`, `private_email`, `SECRET`, `secret`, `PASSWORD`, `API_TOKEN`, `PRIVATE_KEY`, `DATABASE_URI`, `PASSPORT`, `CN_PASSPORT`），严格解耦法定高危与普通脱敏实体。
+- **全库静态凭据零容忍（Zero Provider-Perfect Literals）**：移除针对提供商特征静态凭据的任何豁免，全仓库工作区内提供商形态（如 `AKIA...`, `github_pat_...`, `LTAI...`, `ghp_...`）静态字面量彻底清零（0 个）；所有测试夹具均转换为标准通用合成前缀（`SYNTH_...`）。
+- **双重最终冻结确认**：Built-in v2 规则与阈值冻结（0/388 严格负样本 FPR，100/100 幂等性，0 占位符命中），Benchmark 评测基础设施（下载器、完整性核验、缓存契约、评分器）全指标达标并正式进入 STABLE / FROZEN 最终冻结状态。
+
 ## 系统架构拓扑
 
 ```text

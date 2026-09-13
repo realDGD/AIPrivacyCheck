@@ -41,19 +41,20 @@
 - **预加载模型远程代码安全门 (v0.6.5)**：新增 `privacy/model_security.py`，在任意 worker 加载模型前净化 configuration.json 中的 `allow_remote`/`plugins` 声明；v0.6.3 及更早版本安装的存量模型升级后首次使用即被自动净化。GLiNER / MemPrivacy / SiameseUIE 的 load 与 detect 路径、冒烟测试与安装期净化共用同一实现，杜绝旁路。
 - **Base Runtime Contract 兼容性迁移 (v0.6.5)**：对"已验证即跳过"的历史 runtime 增加基础依赖契约核查；发现 transformers 5.x 等违约包时仅增量修复该包（>=4.51,<5），不重装 torch、不重建 venv；缺 torch 的损坏环境拒绝增量修复。
 - **基准语料与凭证卫生 (v0.6.5)**：100 文档冻结语料中的全部凭证均为合成值（明显样例结构或运行时拼接），不包含任何真实秘密；vault-engine 评测仅在隔离目录中以库方式运行，禁用云端 provider。
-- **模型精简按需下载与传输安全 (v0.6.6)**：严禁无限制全量拉取 ModelScope 社区仓库快照，仅由 `selective_downloader` 静态白名单枚举并单文件流式校验下载 PyTorch 必需文件，杜绝不可信仓库引入非必需可执行资产；自动过滤 ONNX 冗余文件与文档，减少 60%+ 网络流量暴露。
-- **模型内容真实性指纹与缓存安全屏障 (v0.6.8)**：Prediction Cache 深度绑定 `scripts/model_integrity.py`，对模型磁盘文件进行 SHA-256 内容校验；损坏或篡改直接抛出 `ModelIntegrityError` 拒识伪造；父级目录多签名歧义强制抛出 `AmbiguousCacheError`；落盘与加载严格校验 `cache-manifest.json` 与 `predictions_sha256`（`CacheCorruptedError`）。
-- **精简下载器清单 Schema 与防路径穿越防御 (v0.6.8)**：强制要求 `download-manifest.json` 包含 64 位小写 hex SHA-256 和非负文件大小，严格过滤绝对路径与 `../` 路径穿越注入。
-- **全仓库零熵凭据卫生加固 (v0.6.8)**：全库静态凭据扫描门禁达成 0 违规，高熵虚构凭据全量替换为零熵惰性模式，防止外部 Secret Scanning 触发。
+- **模型精简按需下载与传输安全 (v0.6.6 - v0.6.9)**：严禁无限制全量拉取 ModelScope 社区仓库快照，仅由 `selective_downloader` 静态白名单枚举并单文件流式校验下载 PyTorch 必需文件，杜绝不可信仓库引入非必需可执行资产；自动过滤 ONNX 冗余文件与文档，减少 60%+ 网络流量暴露；v0.6.9 引入 `force_download=True`，彻底解决同尺寸损坏文件无法自动重新下载的缺陷，并在上游 mutable revision 变更时记录告警。
+- **模型内容真实性指纹与缓存安全屏障 (v0.6.8 - v0.6.9)**：Prediction Cache 深度绑定 `scripts/model_integrity.py`，对模型磁盘文件进行 SHA-256 内容校验；损坏或篡改直接抛出 `ModelIntegrityError` 拒识伪造；父级目录多签名歧义强制抛出 `AmbiguousCacheError`；落盘与加载严格校验 `cache-manifest.json` 与 `predictions_sha256`（`CacheCorruptedError` / `LegacyUnverifiedCacheError`）。
+- **精简下载器清单 Schema 与跨平台防路径穿越防御 (v0.6.8 - v0.6.9)**：强制要求 `download-manifest.json` 包含规范小写 64 位十六进制 SHA-256（`^[0-9a-f]{64}$`）和非负文件大小，严格过滤 Windows 盘符路径（`^[A-Za-z]:`）、UNC 网络路径（`\\server\share`, `//server/share`）、绝对路径与 `../` 路径穿越注入。
+- **全仓库零提供商形态凭据卫生加固 (v0.6.9)**：全库静态凭据扫描门禁达成 0 违规，严禁存在任何提供商形态（`AKIA...`, `github_pat_...`, `LTAI...`, `ghp_...`）的静态字面量（即使包含 SAMPLE/EXAMPLE 或全 0 熵值亦被严格拦截），全量替换为通用 `SYNTH_...` 格式。
+- **高危实体（Critical Entities）解耦与定义边界**：明确核心法定与凭据高危实体（`CRITICAL_ENTITY_TYPES`）由 18 类明确定义组成：`CN_ID_CARD`, `GOVERNMENT_ID`, `US_SSN`, `CN_BANK_CARD`, `CREDIT_CARD`, `CN_PHONE_NUMBER`, `PHONE`, `private_phone`, `EMAIL`, `private_email`, `SECRET`, `secret`, `PASSWORD`, `API_TOKEN`, `PRIVATE_KEY`, `DATABASE_URI`, `PASSPORT`, `CN_PASSPORT`，评测时严格与通用脱敏实体（`redactable_fn`）解耦。
 - **资源耗尽保护**：单次处理正文限制为 2 MB，文本字符上限为 500,000 字符；模型推理采用进程级互斥锁保证串行，防止显存或内存击穿。
 
-## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.8)
+## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.9)
 
 ### 静态代码与测试凭据卫生策略
 
-- **纯合成凭据契约**：本仓库静态源码、配置文件与评测测试集严禁包含任何真实生产凭据。所有测试用凭据均为纯合成样例（synthetic test credentials），从未与任何实际云厂商服务账户绑定。
+- **纯合成凭据契约与零容忍策略**：本仓库静态源码、配置文件与评测测试集严禁包含任何真实生产凭据，同时严禁包含任何第三方服务商特定形态（Provider-perfect shape）的静态字面量（即便为全 0、`SAMPLE` 或 `EXAMPLE` 亦一律禁止）。
 - **防止扫描误报的模式碎片化 (Fragment Assembly)**：为防止 GitHub Secret Scanning 合作伙伴引擎将完整格式的合成测试向量误报为活跃凭据，测试套件中所有符合真实服务商格式的测试向量（如 Alibaba Cloud AccessKey ID/Secret、Google API Key、GitHub PAT、Slack Token）均采用运行时动态拼接（例如 `"ghp_" + "..."`、`"AIza" + "..."`）或通用合成命名（例如 `SYNTH_ACCESS_KEY_089_SAMPLE`），确保 Git blob 中不存储完整的活跃凭据形态。
-- **仓库级静态凭据门禁**：通过 `tests/test_secret_hygiene.py` 实施持续静态检查，杜绝完整第三方格式凭据回归进入静态源码或测试夹具。
+- **仓库级静态凭据门禁**：通过 `tests/test_secret_hygiene.py` 实施持续静态检查，对全库文本文件执行正则扫描，杜绝第三方格式凭据回归进入静态源码或测试夹具。
 
 ### 历史 GitHub Secret Scanning 告警处置建议
 
