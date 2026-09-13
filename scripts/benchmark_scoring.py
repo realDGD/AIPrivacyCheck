@@ -200,11 +200,21 @@ class LayeredSampleScore:
     false_positive_types: list = field(default_factory=list)
     matched_pairs: list = field(default_factory=list)  # (gold_idx, pred_idx)
 
+    @property
+    def redaction_eligibility_coverage(self) -> float:
+        """Proportion of should_redact=true gold entities covered by matched detections."""
+        return self.redact_covered / self.redact_gold if self.redact_gold else 1.0
+
+    @property
+    def redaction_acc(self) -> float:
+        """Deprecated alias; use redaction_eligibility_coverage."""
+        return self.redaction_eligibility_coverage
+
 
 def score_sample_layered(text: str, gold_entities: list, predictions: list) -> LayeredSampleScore:
     """Detection layer: what entities exist. Redaction layer: which of the
-    correctly-scoped entities should be masked. PII-free FPR stays a
-    document-level metric (documents with zero detection golds only)."""
+    correctly-scoped entities should be masked (Redaction Eligibility Coverage).
+    PII-free FPR stays a document-level metric (documents with zero detection golds only)."""
     score = LayeredSampleScore()
     matched_preds = set()
 
@@ -269,25 +279,31 @@ def score_semantic(text: str, gold_semantic: list, predictions: list) -> dict:
     """Semantic layer: span-overlap matching (semantic models emit looser spans
     and PL-style type labels, so strict exact-span scoring does not apply).
     Gold scope: semantic_privacy entries; sensitive=false golds are explicit
-    negatives - a sensitive prediction overlapping them counts as over-reach."""
+    negatives - a sensitive prediction overlapping them counts as overreach (FP only,
+    never TP)."""
     tp = fp = fn = 0
     overreach = 0
     gold_hit = [False] * len(gold_semantic)
     for pred in predictions:
-        hit = False
-        for i, g in enumerate(gold_semantic):
-            if pred["start"] < g["end"] and g["start"] < pred["end"]:
-                if not g["sensitive"]:
-                    overreach += 1
-                    hit = True
-                    break
-                if not gold_hit[i]:
-                    gold_hit[i] = True
-                hit = True
-                break
-        if hit:
+        p_start, p_end = pred["start"], pred["end"]
+        pos_hits = [
+            i for i, g in enumerate(gold_semantic)
+            if g.get("sensitive", True) and p_start < g["end"] and g["start"] < p_end
+        ]
+        neg_hits = [
+            i for i, g in enumerate(gold_semantic)
+            if not g.get("sensitive", True) and p_start < g["end"] and g["start"] < p_end
+        ]
+        if pos_hits:
             tp += 1
+            for i in pos_hits:
+                gold_hit[i] = True
+            if neg_hits:
+                overreach += 1
+        elif neg_hits:
+            overreach += 1
+            fp += 1
         else:
             fp += 1
-    fn = sum(1 for i, g in enumerate(gold_semantic) if g["sensitive"] and not gold_hit[i])
+    fn = sum(1 for i, g in enumerate(gold_semantic) if g.get("sensitive", True) and not gold_hit[i])
     return {"tp": tp, "fp": fp, "fn": fn, "overreach": overreach}
