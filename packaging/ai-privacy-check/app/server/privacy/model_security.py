@@ -6,12 +6,11 @@ worker loads the model, and rejects when the directory cannot be made safe.
 
 The gate runs at worker-load time (not only at install time) so weights
 imported or downloaded by older app versions (v0.6.3 and earlier) are
-neutralized on first use after upgrade. Workers never pass
-`trust_remote_code=True`; ModelScope only imports code from a model
-directory when `allow_remote` (or plugin) declarations survive, so removing
-those two keys makes every catalog model load through built-in
-pipeline/model classes exclusively. Loose `.py` files inside a model
-directory are inert through this path and are not executable by us.
+neutralized on first use after upgrade. The production worker does not
+opt into trust_remote_code and blocks/sanitizes the currently supported
+ModelScope remote-code configuration paths (e.g. `allow_remote` and `plugins`
+declarations in configuration.json, which would otherwise trigger pip install
+of requirements.txt or execution of repository Python modules).
 """
 
 import json

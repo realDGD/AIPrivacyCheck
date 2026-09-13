@@ -144,6 +144,7 @@ class GLiNERDetector(Detector):
         "ipv6": ("IPV6_ADDRESS", "IPv6 Address"),
         "mac address": ("MAC_ADDRESS", "MAC Address"),
     }
+    GLINER_LABELS: Tuple[str, ...] = tuple(GLINER_LABEL_MAP.keys())
 
     def __init__(self, data_dir: Path, active_model_id: str = "gliner-pii-edge") -> None:
         self.data_dir = data_dir
@@ -315,7 +316,7 @@ class GLiNERDetector(Detector):
             _, infer_timeout = worker_client.get_timeout_for_model(self.active_model_id, device=dev)
             with worker_client.cuda_execution_session(device=dev, timeout=float(infer_timeout)):
                 worker = worker_client.get_worker(self.active_model_id, profile, device=dev)
-                labels = list(set(self.GLINER_LABEL_MAP.keys()))
+                labels = list(self.GLINER_LABELS)
                 res = worker.query({
                     "action": "detect",
                     "model_path": str(model_dir),
@@ -864,3 +865,6 @@ class MemPrivacyDetector(Detector):
                     logger.warning(f"释放 MemPrivacy CUDA worker 显存异常: {exc}")
 
         return entities, warnings
+
+
+GLINER_LABELS = GLiNERDetector.GLINER_LABELS
