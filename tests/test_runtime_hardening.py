@@ -2578,24 +2578,15 @@ class ConcurrencyAndLifecycleHardeningV064Tests(unittest.TestCase):
         self.assertLessEqual(choose_memprivacy_generation_budget("x" * 10000), 512)
 
     def test_version_consistency(self):
-        """14. Version numbers across server.py, manifest, benchmark, lifecycle are consistent at 0.6.4."""
-        server_py = SERVER_DIR / "server.py"
-        content = server_py.read_text(encoding="utf-8")
-        self.assertIn('"AIPrivacyCheck/0.6.4"', content)
-        self.assertIn('"version": "0.6.4"', content)
-
-        manifest = PROJECT_DIR / "packaging" / "ai-privacy-check" / "manifest"
-        m_content = manifest.read_text(encoding="utf-8")
-        self.assertIn("version               = 0.6.4", m_content)
-        self.assertIn("0.6.4:", m_content)
-
-        bench_py = PROJECT_DIR / "scripts" / "benchmark.py"
-        b_content = bench_py.read_text(encoding="utf-8")
-        self.assertIn("v0.6.4", b_content)
-
-        life_sh = PROJECT_DIR / "scripts" / "test_native_lifecycle.sh"
-        l_content = life_sh.read_text(encoding="utf-8")
-        self.assertIn('"0.6.4"', l_content)
+        """14. Version numbers across server.py, manifest, benchmark, lifecycle are consistent at 0.6.5."""
+        expected = "0.6.5"
+        self.assertIn(f'"AIPrivacyCheck/{expected}"', (SERVER_DIR / "server.py").read_text(encoding="utf-8"))
+        self.assertIn(f'"version": "{expected}"', (SERVER_DIR / "server.py").read_text(encoding="utf-8"))
+        m_content = (PROJECT_DIR / "packaging" / "ai-privacy-check" / "manifest").read_text(encoding="utf-8")
+        self.assertIn(f"version               = {expected}", m_content)
+        self.assertIn(f"{expected}:", m_content)
+        self.assertIn(f"v{expected}", (PROJECT_DIR / "scripts" / "benchmark.py").read_text(encoding="utf-8"))
+        self.assertIn(f'"{expected}"', (PROJECT_DIR / "scripts" / "test_native_lifecycle.sh").read_text(encoding="utf-8"))
 
 
 class IntegrationSmokeTests(unittest.TestCase):

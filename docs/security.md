@@ -1,4 +1,4 @@
-# 安全说明 (v0.6.4)
+# 安全说明 (v0.6.5)
 
 ## 不保存的数据
 
@@ -38,6 +38,9 @@
 - **并发 Worker 隔离与整请求预算拒绝服务防御 (v0.6.4)**：引入 Worker 永久退役机制（`WorkerRetiredError` 与 `retire()` 契约），彻底杜绝并发下已被停用的 Worker 进程被重新激活为孤儿进程盗用 GPU 显存；引入跨模型 `cuda_execution_session` 全局协调锁，在物理 GPU 层面排他互斥，杜绝并发导致 GLiNER 与 MemPrivacy 同时在 GPU 上运行引发 CUDA OOM；建立整请求语义时间预算体系（CUDA 240s / CPU 480s）与 Deadline 截止控制，锁等待超时快速返回繁忙状态，单块超时安全保留已完成分块与实体并输出 X/Y 进度告警，彻底避免长文本跨块累加导致十数小时的同步挂起拒绝服务。
 - **模型目录远程代码执行防御 (v0.6.4)**：新版 ModelScope 会对携带 `allow_remote`/`plugins` 声明的模型 configuration.json 执行目录内任意 `.py` 代码并 pip 安装模型自带 requirements.txt（官方 iic 权重即携带 `allow_remote: true`）。本应用在模型下载与本地导入的暂存阶段对 configuration.json 实施净化（移除 `allow_remote`/`plugins` 字段，幂等且对已存在权重同样生效），推理 worker 坚决不传 `trust_remote_code`，所有目录模型仅经 ModelScope 内建 pipeline/model 类加载；共享运行时的 transformers 固定为 `>=4.51,<5` 兼容区间，杜绝依赖解析期被第三方声明拖入不可信版本。
 - **模型专属依赖契约与供应链最小化 (v0.6.4)**：`ensure_model_runtime_dependencies` 仅安装 Catalog 中经实证声明的模型专属依赖（当前仅 SiameseUIE 需要 `addict`/`datasets`/`scipy`/`Pillow`/`simplejson`/`sortedcontainers`），通过目标 venv 解释器 `importlib` 探测实现幂等快速跳过，杜绝"遇错全量 pip freeze"式供应链扩散。
+- **预加载模型远程代码安全门 (v0.6.5)**：新增 `privacy/model_security.py`，在任意 worker 加载模型前净化 configuration.json 中的 `allow_remote`/`plugins` 声明；v0.6.3 及更早版本安装的存量模型升级后首次使用即被自动净化。GLiNER / MemPrivacy / SiameseUIE 的 load 与 detect 路径、冒烟测试与安装期净化共用同一实现，杜绝旁路。
+- **Base Runtime Contract 兼容性迁移 (v0.6.5)**：对"已验证即跳过"的历史 runtime 增加基础依赖契约核查；发现 transformers 5.x 等违约包时仅增量修复该包（>=4.51,<5），不重装 torch、不重建 venv；缺 torch 的损坏环境拒绝增量修复。
+- **基准语料与凭证卫生 (v0.6.5)**：100 文档冻结语料中的全部凭证均为合成值（明显样例结构或运行时拼接），不包含任何真实秘密；vault-engine 评测仅在隔离目录中以库方式运行，禁用云端 provider。
 - **资源耗尽保护**：单次处理正文限制为 2 MB，文本字符上限为 500,000 字符；模型推理采用进程级互斥锁保证串行，防止显存或内存击穿。
 
 ## 已知限制与使用建议

@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.4)
+# 架构说明 (v0.6.5)
 
 ## 设计目标
 
@@ -21,6 +21,8 @@
 17. **MemPrivacy 语义隐私推理加固与显存/超时治理 (v0.6.3)**：在多模型级联执行中，由于 MemPrivacy 1.7B 参数量与生成显存占用较大（~3.6GB 模型权重 + KV Cache），在受限显卡（如 Tesla P4 8GB）上与 GLiNER（~3.0GB）顺序常驻必然触发 CUDA OOM。系统实施 exclusive CUDA 独占调度，在 MemPrivacy CUDA 推理前主动驱逐其他常驻 CUDA Worker（完全保留 CPU worker），并在推理完成后立即在 `finally` 中停止 MemPrivacy 释放 GPU 显存。当 Worker 捕获底层致命 CUDA OOM 时，立即物理终止 worker 进程释放显存，向主控返回结构化 OOM 信号并优雅降级为温和 warning，绝不崩溃主流程；将推理超时与运行设备深度绑定，CPU 模式下放宽 MemPrivacy 推理超时至 360 秒；约束模型单次生成 token 预算至 <=512 tokens；对 >3500 字符长文本实施 3000 字符分块与 200 字符自然句边界重叠切分，并进行跨块实体去重与全局精确坐标安全对齐；模型目录明确规范 1.7B 与 4B 推荐硬件规格，并在前端提供 CPU 慢速模式温和 inline 提示。
 18. **MemPrivacy / CUDA 并发安全与整请求语义预算加固 (v0.6.4)**：在多模型高并发与受限 GPU 显存环境中，针对并发请求可能导致的 Worker 进程复活与显存竞争，引入 `RuntimeWorkerProcess` 永久退役机制（`WorkerRetiredError` 与 `retire()` 契约），确保被驱逐或停用的 Worker 物理终止且绝不被并发请求重新拉起成为无法管控的孤儿常驻进程；引入跨模型 `WorkerClient.cuda_execution_session` 上下文协调锁，在物理 GPU 层面实施全会话排他调度，杜绝 MemPrivacy 推理期间并发拉起 GLiNER 导致 CUDA OOM；建立整请求语义时间预算体系（CUDA 240s / CPU 480s）与 Deadline 截止期控制，锁等待超时快速返回繁忙状态，单块超时安全保留并输出已完成实体及 X/Y 进度告警；对超长生成截断统一去重告警；精确区分 CPU 宿主机内存耗尽与 GPU 显存不足；消除子进程退出等待期间的全局锁争用。
 19. **模型运行时依赖契约与安装链净化 (v0.6.4)**：在 Model Catalog 的 `ModelDescriptor` 上引入 `runtime_dependencies` 声明字段，安装流程由 `install_isolated_runtime` → `ensure_model_runtime_dependencies` → 下载/导入 → 完整性校验 → 真实冒烟推理构成完整链路；共享 torch-cpu/torch-cuda 运行时保持不动，模型专属缺失依赖（如 SiameseUIE 的 `addict`/`datasets`/`scipy`/`Pillow`/`simplejson`/`sortedcontainers`，经 ModelScope 1.40 元数据与真实 pipeline 加载实证）通过目标 venv 解释器 `importlib` 探测后增量补装，已满足即快速跳过，绝不重装 PyTorch。共享运行时 transformers 固定 `>=4.51,<5`（Qwen3 下限 / ModelScope legacy `transformers.onnx` 上限）。安装与导入阶段对模型 configuration.json 净化 `allow_remote`/`plugins` 字段，worker 不传 `trust_remote_code`，仅经 ModelScope 内建类加载，杜绝模型目录远程代码执行；并适配 ModelScope 新版 SiameseUIE 输出结构（按 schema 分组嵌套列表 + `offset` 半开区间），修复加载成功但实体恒为空的缺陷。
+
+19a. **Base Runtime Contract、预加载安全门与分层基准 (v0.6.5)**：运行时"已验证即跳过"路径追加基础依赖契约核查与增量迁移（transformers>=4.51,<5，绝不重装 torch）；`privacy/model_security.py` 在任意 worker 加载前净化模型 configuration.json 的远程代码声明；GLiNER 阈值收敛至 `GLiNERDetector.GLINER_DEFAULT_THRESHOLD` 单一定义并依据 100 文档分层语料再调优至 0.50；`tests/fixtures/privacy_benchmark_v2_100.jsonl` 提供 Detection / Should-Redact / 语义三层分离的冻结评测语料，公共联系人（10086、8.8.8.8、test@example.com 等）按"检测正确、不应脱敏"计分。
 
 ## 系统架构拓扑
 

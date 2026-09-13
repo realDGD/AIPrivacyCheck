@@ -2,10 +2,20 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.4`（fnOS Native 原生应用）
+当前版本：`0.6.5`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **Base Runtime Contract 与预加载安全门 (v0.6.5)**：
+  - **Base Runtime Contract**：运行时"已验证即跳过"路径新增基础依赖契约核查（modelscope / torch / transformers>=4.51,<5 / accelerate / gliner / numpy / packaging / tqdm）。历史遗留 runtime（如 transformers 5.16.1）即使 torch Probe 通过也会被识别，并仅对违约包做增量修复（pip install "transformers>=4.51,<5"），绝不重装 torch、不重建 venv；缺 torch 的损坏环境拒绝增量修复并提示重建。
+  - **预加载模型远程代码安全门**：新增 `privacy/model_security.py`，在任何 worker 加载模型前对 configuration.json 净化 `allow_remote`/`plugins` 声明；GLiNER / MemPrivacy / SiameseUIE 的 load+detect、冒烟测试与安装期净化共用同一实现。v0.6.3 及更早版本安装的存量模型在升级后首次使用时即被自动净化。
+  - **GLiNER 阈值单一来源与再调优**：`GLiNERDetector.GLINER_DEFAULT_THRESHOLD` 成为唯一阈值定义（生产与基准共享）；在 100 文档分层语料上重扫 0.35-0.65，Detection F1 于 0.50 达峰（P 55.2 / R 30.9 / F1 39.6），PII-free FPR 与 USERNAME↔PERSON 混淆与 0.55 持平，生产阈值据此调整为 0.50。
+- **Benchmark v2 分层评测体系 (v0.6.5)**：
+  - **100 文档冻结语料**（`tests/fixtures/privacy_benchmark_v2_100.jsonl`，确定性生成器 + 固定 seed）：55 中文 / 35 英文 / 10 结构化混合（JSON/YAML/SQL/Python/Shell/URI/日志/邮件/配置/Markdown）；14 篇超过 3000 字符；≥10 篇准标识符组合（quasi-identifier）；≥15 条语义案例（含"去过医院但未说明原因"类显式负样本）；≥10 条合成凭证/代码案例（不含任何真实秘密）；≥10 条 Unicode 压力案例（Emoji/ZWJ/SIP CJK/组合变音/阿拉伯语 RTL）。
+  - **Detection 与 Should Redact 完全分层**：每个实体独立标注 `should_redact` 与 `context_class`；公共联系人（10086 / 8.8.8.8 / test@example.com / 公开办公地址）按"正确检测、不应脱敏"计分，绝不再误记为检测 FP；PII-free FPR 仅统计零检测 gold 文档。
+  - **语义层独立评分**：`semantic_privacy` 层按跨度覆盖单独计分，模型不因 taxonomy 范围（如不含糖尿病/离婚/负债）而被记为 PII F1 失败。
+  - **vault-engine 隔离基准 harness**（`scripts/benchmark_vault_engine.py`）：以库方式接入固定 commit 的 vault-engine，进程内本地模型 provider（无 Ollama、无云端端点、无 pip 安装），内置 Vault 往返一致性（要求 100%）、稳定 token 与碰撞检查、20 篇最难文档稳定性重测。
+- **MemPrivacy / CUDA 并发安全与整请求语义预算加固 (v0.6.4)**：
 - **模型运行时依赖契约与 SiameseUIE 安装链修复 (v0.6.4)**：
   - **模型专属运行时依赖契约（Model-specific Runtime Dependency Contract）**：在 Model Catalog 的 `ModelDescriptor` 上新增 `runtime_dependencies` 声明字段，并新增 `ensure_model_runtime_dependencies` 安装阶段：先复现真实 fnOS 故障（共享 torch-cuda 运行时 Probe 通过但 SiameseUIE Pipeline 报 `No module named 'addict'`），经实证确认 ModelScope 1.40 将 `addict`/`datasets`/`scipy`/`Pillow`/`simplejson`/`sortedcontainers` 全部移入 extras 而非核心依赖后，按模型声明、增量补装缺失依赖（`importlib` 探测已满足项即快速跳过，绝不重装 PyTorch 或重建 venv）。现有已安装运行时升级后同样自动补齐。
   - **共享运行时 transformers 兼容区间钉扎**：基础运行时固定 `transformers>=4.51,<5` —— 下限来自 MemPrivacy/Qwen3 权重（`Qwen3ForCausalLM` 需要 >=4.51），上限来自 ModelScope 旧式 NLP pipeline 依赖的 `transformers.onnx` 模块（transformers 5.x 已移除）。
