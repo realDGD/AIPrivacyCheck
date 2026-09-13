@@ -68,13 +68,21 @@ from privacy.runtime_sources import (
     UV_SYSTEM_CERTS,
     CERNET_PYPI_INDEX,
     OFFICIAL_PYPI_INDEX,
-    CERNET_TORCH_INDEX_CPU,
+    SJTUG_TORCH_INDEX_CPU,
     OFFICIAL_TORCH_INDEX_CPU,
-    CERNET_TORCH_INDEX_CUDA,
+    SJTUG_TORCH_INDEX_CUDA,
     OFFICIAL_TORCH_INDEX_CUDA,
+    CERNET_TORCH_INDEX_CPU,
+    CERNET_TORCH_INDEX_CUDA,
     CERNET_PYTHON_INSTALL_MIRROR,
+    TLS_MODE_UV_NATIVE,
+    TLS_MODE_SYSTEM_CERTS,
+    TLS_MODE_EXPLICIT_CA,
+    build_attempt_env,
+    classify_uv_failure,
     is_tls_error,
     is_integrity_or_corruption_error,
+    is_local_io_error,
     is_retryable_network_error,
     format_user_friendly_network_error,
     get_pypi_index_url,
@@ -782,13 +790,30 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
             self.assertFalse(st["runtime_rebuild_required"])
             self.assertTrue(st["base_packages_ready"])
 
-    def test_uv_env_enables_system_certs(self):
-        """UV_SYSTEM_CERTS=true is universally injected into all uv execution environments."""
+    def test_uv_env_default_native_and_layered_tls(self):
+        """build_uv_env defaults to uv-native (no UV_SYSTEM_CERTS), while build_attempt_env sets layered TLS."""
         env = build_uv_env(self.data_dir)
-        self.assertEqual(env.get("UV_SYSTEM_CERTS"), "true")
-        self.assertEqual(env.get("UV_SYSTEM_CERTS"), UV_SYSTEM_CERTS)
+        self.assertNotIn("UV_SYSTEM_CERTS", env)
         self.assertTrue(str(self.data_dir) in env.get("UV_PYTHON_INSTALL_DIR", ""))
         self.assertTrue(str(self.data_dir) in env.get("UV_CACHE_DIR", ""))
+
+        # Layered TLS Mode A: uv-native
+        env_native = build_attempt_env(env, TLS_MODE_UV_NATIVE, is_mirror=True)
+        self.assertNotIn("UV_SYSTEM_CERTS", env_native)
+        self.assertEqual(env_native.get("UV_HTTP_TIMEOUT"), "25")
+        self.assertEqual(env_native.get("UV_HTTP_RETRIES"), "1")
+
+        # Layered TLS Mode B: system-certs
+        env_system = build_attempt_env(env, TLS_MODE_SYSTEM_CERTS, is_mirror=False)
+        self.assertEqual(env_system.get("UV_SYSTEM_CERTS"), "true")
+        self.assertEqual(env_system.get("UV_HTTP_TIMEOUT"), "60")
+        self.assertEqual(env_system.get("UV_HTTP_RETRIES"), "2")
+
+        # Layered TLS Mode C: explicit-ca with fake cert file
+        fake_ca = self.data_dir / "fake_ca.crt"
+        fake_ca.write_text("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+        env_explicit = build_attempt_env(env, TLS_MODE_EXPLICIT_CA, is_mirror=True, explicit_ca_bundle=str(fake_ca))
+        self.assertEqual(env_explicit.get("SSL_CERT_FILE"), str(fake_ca))
 
     def test_cernet_pypi_primary(self):
         """Primary PyPI package installations query Cernet mirror endpoint."""
@@ -808,19 +833,21 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
             packages=["modelscope", "numpy"],
             env=env,
         )
-        self.assertEqual(source, "cernet-mirror")
+        self.assertEqual(source, "cernet")
+        self.assertEqual(source.source, "cernet")
+        self.assertEqual(source.tls_mode, "uv-native")
         self.assertEqual(len(recorded_cmds), 1)
         self.assertIn("-i", recorded_cmds[0])
         idx = recorded_cmds[0].index("-i")
         self.assertEqual(recorded_cmds[0][idx + 1], CERNET_PYPI_INDEX)
 
-    def test_official_pypi_fallback(self):
-        """When Cernet mirror fails with retryable network error, system falls back to official PyPI."""
+    def test_official_pypi_fallback_on_network_error(self):
+        """When Cernet mirror fails with timeout or disconnect, system falls back to official PyPI."""
         recorded_cmds = []
         def fake_runner(cmd, **kwargs):
             recorded_cmds.append(list(cmd))
             if CERNET_PYPI_INDEX in cmd:
-                return 1, "", "error: invalid peer certificate: UnknownIssuer\n"
+                return 1, "", "error: timed out after 25000ms\n"
             return 0, "Successfully installed from official\n", ""
 
         interp = self.data_dir / "python"
@@ -838,6 +865,154 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
         self.assertEqual(len(recorded_cmds), 2)
         self.assertIn(CERNET_PYPI_INDEX, recorded_cmds[0])
         self.assertIn(OFFICIAL_PYPI_INDEX, recorded_cmds[1])
+
+    def test_tls_mode_layered_retry_success(self):
+        """When native TLS fails with UnknownIssuer, system retries with system-certs and succeeds."""
+        recorded_attempts = []
+        def fake_runner(cmd, env=None, **kwargs):
+            recorded_attempts.append(dict(env or {}))
+            if not env or not env.get("UV_SYSTEM_CERTS"):
+                return 1, "", "error: invalid peer certificate: UnknownIssuer\n"
+            return 0, "Successfully installed using system certs\n", ""
+
+        interp = self.data_dir / "python"
+        venv = self.data_dir / "venv"
+        env = build_uv_env(self.data_dir)
+        source = run_install_pypi_with_fallback(
+            runner=fake_runner,
+            uv_bin="/bin/uv",
+            interp=interp,
+            venv_dir=venv,
+            packages=["gliner"],
+            env=env,
+        )
+        self.assertEqual(source, "cernet")
+        self.assertEqual(source.tls_mode, "system-certs")
+        self.assertEqual(len(recorded_attempts), 2)
+        self.assertNotIn("UV_SYSTEM_CERTS", recorded_attempts[0])
+        self.assertEqual(recorded_attempts[1].get("UV_SYSTEM_CERTS"), "true")
+
+    def test_sjtug_torch_primary_and_index_separation(self):
+        """PyTorch installation queries SJTUG mirror with index separation."""
+        recorded_cmds = []
+        def fake_runner(cmd, **kwargs):
+            recorded_cmds.append(list(cmd))
+            return 0, "Successfully installed torch\n", ""
+
+        interp = self.data_dir / "python"
+        venv = self.data_dir / "venv"
+        env = build_uv_env(self.data_dir)
+        source = run_install_torch_with_fallback(
+            runner=fake_runner,
+            uv_bin="/bin/uv",
+            interp=interp,
+            venv_dir=venv,
+            profile=PROFILE_TORCH_CPU,
+            env=env,
+        )
+        self.assertEqual(source, "sjtug")
+        self.assertEqual(source.source, "sjtug")
+        self.assertEqual(source.tls_mode, "uv-native")
+        self.assertEqual(len(recorded_cmds), 1)
+        cmd = recorded_cmds[0]
+        self.assertIn("--index", cmd)
+        self.assertIn("--default-index", cmd)
+        self.assertIn("--index-strategy", cmd)
+        idx_strategy = cmd.index("--index-strategy")
+        self.assertEqual(cmd[idx_strategy + 1], "first-index")
+        idx_torch = cmd.index("--index")
+        self.assertEqual(cmd[idx_torch + 1], SJTUG_TORCH_INDEX_CPU)
+        idx_default = cmd.index("--default-index")
+        self.assertEqual(cmd[idx_default + 1], CERNET_PYPI_INDEX)
+
+    def test_sjtug_torch_fallback_to_official(self):
+        """When SJTUG mirror fails with 404 or connection error, falls back to official PyTorch."""
+        recorded_cmds = []
+        def fake_runner(cmd, **kwargs):
+            recorded_cmds.append(list(cmd))
+            if SJTUG_TORCH_INDEX_CPU in cmd:
+                return 1, "", "error: 404 Not Found\n"
+            return 0, "Successfully installed torch from official\n", ""
+
+        interp = self.data_dir / "python"
+        venv = self.data_dir / "venv"
+        env = build_uv_env(self.data_dir)
+        source = run_install_torch_with_fallback(
+            runner=fake_runner,
+            uv_bin="/bin/uv",
+            interp=interp,
+            venv_dir=venv,
+            profile=PROFILE_TORCH_CPU,
+            env=env,
+        )
+        self.assertEqual(source, "official")
+        self.assertEqual(len(recorded_cmds), 2)
+        self.assertIn(SJTUG_TORCH_INDEX_CPU, recorded_cmds[0])
+        self.assertIn(OFFICIAL_TORCH_INDEX_CPU, recorded_cmds[1])
+
+    def test_local_io_failure_fails_closed(self):
+        """Local disk full or permission error must FAIL CLOSED immediately without fallback."""
+        raw_err = "error: failed to write to disk: No space left on device (os error 28)"
+        self.assertTrue(is_local_io_error(raw_err))
+        self.assertFalse(is_retryable_network_error(raw_err))
+
+        recorded_cmds = []
+        def fake_runner(cmd, **kwargs):
+            recorded_cmds.append(list(cmd))
+            return 1, "", raw_err
+
+        interp = self.data_dir / "python"
+        venv = self.data_dir / "venv"
+        env = build_uv_env(self.data_dir)
+        with self.assertRaises(RuntimeError) as ctx:
+            run_install_pypi_with_fallback(
+                runner=fake_runner,
+                uv_bin="/bin/uv",
+                interp=interp,
+                venv_dir=venv,
+                packages=["any-pkg"],
+                env=env,
+            )
+        self.assertIn("不可换源重试", str(ctx.exception))
+        self.assertEqual(len(recorded_cmds), 1)
+
+    def test_manifest_schema_v3_records_tls_modes(self):
+        """Manifest schema v3 and probe_profile record tls_modes and download_sources."""
+        rt_mgr = RuntimeManager(self.data_dir)
+        profile_dir = rt_mgr.profile_dir(PROFILE_TORCH_CPU)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        manifest_file = profile_dir / "runtime-manifest.json"
+        manifest_file.write_text(json.dumps({
+            "schema_version": 3,
+            "profile": PROFILE_TORCH_CPU,
+            "download_sources": {
+                "managed_python": "existing-local",
+                "pypi": "cernet",
+                "torch": "sjtug",
+            },
+            "tls_modes": {
+                "pypi": "uv-native",
+                "torch": "system-certs",
+            },
+        }), encoding="utf-8")
+
+        mock_interp = profile_dir / "venv" / "bin" / "python3"
+        mock_interp.parent.mkdir(parents=True, exist_ok=True)
+        mock_interp.write_text("#!/bin/sh\n", encoding="utf-8")
+        mock_interp.chmod(0o755)
+
+        def fake_runner(cmd, **kwargs):
+            return 0, json.dumps({
+                "python_runtime_ready": True,
+                "framework_version": "2.6.0",
+                "packages": {"torch": "2.6.0", "transformers": "4.51.0", "gliner": "0.2.14"},
+            }), ""
+
+        rt_mgr._runner = fake_runner
+        probe = rt_mgr.probe_profile(PROFILE_TORCH_CPU, force_refresh=True)
+        self.assertEqual(probe.get("download_sources", {}).get("torch"), "sjtug")
+        self.assertEqual(probe.get("tls_modes", {}).get("torch"), "system-certs")
+        self.assertEqual(probe.get("tls_modes", {}).get("pypi"), "uv-native")
 
     def test_tls_unknown_issuer_is_retryable(self):
         """TLS UnknownIssuer error is classified as retryable network error and formatted with actionable advice."""
