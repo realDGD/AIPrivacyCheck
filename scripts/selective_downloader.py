@@ -123,14 +123,20 @@ def download_single_file(
     target_path: Path,
     expected_size: int,
     expected_sha256: Optional[str] = None,
+    force_download: bool = False,
 ) -> Tuple[bool, int, str]:
-    """Downloads a single file from ModelScope with integrity check."""
+    """Downloads a single file from ModelScope with integrity check.
+
+    When force_download=True, existing target_path content is never reused.
+    When force_download=False, existing file is reused ONLY if expected_sha256
+    is provided and matches actual file SHA-256.
+    """
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Check if existing file is already verified
-    if target_path.is_file() and target_path.stat().st_size == expected_size:
+    if not force_download and target_path.is_file() and target_path.stat().st_size == expected_size:
         actual_sha = sha256_file(target_path)
-        if expected_sha256 is None or actual_sha == expected_sha256:
+        if expected_sha256 is not None and actual_sha == expected_sha256:
             print(f"  [REUSE] {remote_path} ({expected_size:,} bytes, verified)")
             return True, expected_size, actual_sha
 
@@ -281,6 +287,7 @@ def ensure_selective_model(
 
     downloaded_files_record = []
     total_downloaded = 0
+    upstream_content_changed = False
 
     for f in required:
         dest = target_dir / f.path
@@ -290,7 +297,16 @@ def ensure_selective_model(
             downloaded_files_record.append(rec)
             continue
 
-        ok, sz, digest = download_single_file(repo_id, revision, f.path, dest, f.size)
+        # File is missing or corrupted: unconditionally force download to bypass corrupted local reuse
+        ok, sz, digest = download_single_file(
+            repo_id,
+            revision,
+            f.path,
+            dest,
+            f.size,
+            expected_sha256=None,
+            force_download=True,
+        )
         rec = {
             "path": f.path,
             "size": sz,
@@ -299,12 +315,23 @@ def ensure_selective_model(
         downloaded_files_record.append(rec)
         total_downloaded += sz
 
+        # Check if upstream content changed compared to existing manifest
+        if f.path in existing_records:
+            prev_sha = existing_records[f.path].get("sha256")
+            if prev_sha and prev_sha.lower() != digest.lower():
+                upstream_content_changed = True
+                print(
+                    f"  [WARNING] The mutable ModelScope revision returned content for '{f.path}' "
+                    f"different from the previous locally recorded fingerprint ({prev_sha} -> {digest})"
+                )
+
     manifest_data = {
         "repo_id": repo_id,
         "revision": revision,
         "requested_revision": revision,
         "resolved_revision": None,  # Upstream immutable revision not available through current endpoint
         "revision_provenance_note": "Upstream immutable revision not available through the current endpoint.",
+        "upstream_content_changed": upstream_content_changed,
         "integrity_policy": "local_content_integrity_fingerprint",
         "files": downloaded_files_record,
         "total_download_bytes": total_downloaded,

@@ -155,27 +155,96 @@ class SelectiveDownloaderTests(unittest.TestCase):
         self.assertIn("gliner_config.json", msg)
         self.assertIsNone(manifest)
 
-    @patch("selective_downloader.query_modelscope_repo_files")
-    @patch("selective_downloader.download_single_file")
-    def test_one_file_corrupted_download_missing_true_repairs(
-        self, mock_download, mock_query
-    ):
+    def test_same_size_corrupted_file_is_force_redownloaded(self):
+        """P1 Regression Test: A same-size corrupted file must be force redownloaded over network,
+        not re-blessed by local size matching."""
         target, orig_manifest = self._create_mock_installed_model("gliner-pii-edge")
-        # Corrupt one file
-        (target / "gliner_config.json").write_bytes(b"corrupted")
+        target_file = target / "gliner_config.json"
+        orig_bytes = target_file.read_bytes()
+        orig_size = len(orig_bytes)
+        orig_sha = hashlib.sha256(orig_bytes).hexdigest()
+
+        # Step 4: Tamper target_file with same-size corrupted bytes B
+        corrupted_bytes = b"Z" * orig_size
+        target_file.write_bytes(corrupted_bytes)
+        corrupted_sha = hashlib.sha256(corrupted_bytes).hexdigest()
+        self.assertNotEqual(orig_sha, corrupted_sha)
+
+        # Step 5: verify_existing_model_integrity detects corruption
+        is_valid, msg, _, corrupted_list = verify_existing_model_integrity(target)
+        self.assertFalse(is_valid)
+        self.assertIn("gliner_config.json", corrupted_list)
+
+        # Step 6-7: Repair with mocked network response returning repaired bytes C
+        repaired_bytes = b"R" * orig_size
+        repaired_sha = hashlib.sha256(repaired_bytes).hexdigest()
 
         spec = DOWNLOADABLE_MODEL_CATALOG["gliner-pii-edge"]
-        mock_query.return_value = [
-            RemoteFileInfo(fname, 100, "blob") for fname in spec["required_files"]
+        mock_remote_files = [
+            RemoteFileInfo(fname, len((target / fname).read_bytes()) if fname != "gliner_config.json" else orig_size, "blob")
+            for fname in spec["required_files"]
         ]
-        mock_download.return_value = (True, 100, "dummy_hash")
 
-        ok, msg, manifest = ensure_selective_model("gliner-pii-edge", self.tmp_dir, download_missing=True)
-        self.assertTrue(ok)
-        # Should only download the corrupted file, NOT all files
-        self.assertEqual(mock_download.call_count, 1)
-        args = mock_download.call_args[0]
-        self.assertEqual(args[2], "gliner_config.json")
+        with patch("selective_downloader.query_modelscope_repo_files", return_value=mock_remote_files):
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                mock_resp = MagicMock()
+                mock_resp.read.side_effect = [repaired_bytes, b""]
+                mock_resp.__enter__.return_value = mock_resp
+                mock_resp.__exit__.return_value = None
+                mock_urlopen.return_value = mock_resp
+
+                ok, status_msg, new_manifest = ensure_selective_model(
+                    "gliner-pii-edge", self.tmp_dir, download_missing=True
+                )
+                self.assertTrue(ok)
+                self.assertTrue(mock_urlopen.called)
+
+        # Step 9-10: Verify disk file now contains repaired bytes, not corrupted bytes B
+        disk_bytes = target_file.read_bytes()
+        self.assertEqual(disk_bytes, repaired_bytes)
+        self.assertNotEqual(disk_bytes, corrupted_bytes)
+
+        # Step 11: Manifest SHA matches disk SHA
+        manifest_records = {item["path"]: item for item in new_manifest["files"]}
+        self.assertEqual(manifest_records["gliner_config.json"]["sha256"], repaired_sha)
+        self.assertTrue(new_manifest.get("upstream_content_changed"))
+
+        # Step 12: verify_existing_model_integrity is now True
+        is_now_valid, valid_msg, _, _ = verify_existing_model_integrity(target)
+        self.assertTrue(is_now_valid, valid_msg)
+
+    def test_same_size_corrupted_file_cannot_be_reblessed_without_download(self):
+        """P1 Guard: download_single_file with force_download=True must reject local reuse."""
+        target_path = self.tmp_dir / "weights.bin"
+        corrupt_content = b"X" * 1024
+        target_path.write_bytes(corrupt_content)
+
+        # If network fails, force_download=True must NOT return the corrupt file
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = IOError("Network offline")
+            with self.assertRaises(IOError):
+                download_single_file(
+                    repo_id="test/repo",
+                    revision="master",
+                    remote_path="weights.bin",
+                    target_path=target_path,
+                    expected_size=1024,
+                    expected_sha256=None,
+                    force_download=True,
+                )
+        # Even if force_download=False, expected_sha256=None must NOT reuse unverified local file
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = IOError("Network offline")
+            with self.assertRaises(IOError):
+                download_single_file(
+                    repo_id="test/repo",
+                    revision="master",
+                    remote_path="weights.bin",
+                    target_path=target_path,
+                    expected_size=1024,
+                    expected_sha256=None,
+                    force_download=False,
+                )
 
     def test_tmp_download_cleaned_up_on_failure(self):
         target_path = self.tmp_dir / "models" / "fake_file.bin"
