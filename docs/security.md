@@ -1,4 +1,4 @@
-# 安全说明 (v0.6.7)
+# 安全说明 (v0.6.8)
 
 ## 不保存的数据
 
@@ -42,9 +42,12 @@
 - **Base Runtime Contract 兼容性迁移 (v0.6.5)**：对"已验证即跳过"的历史 runtime 增加基础依赖契约核查；发现 transformers 5.x 等违约包时仅增量修复该包（>=4.51,<5），不重装 torch、不重建 venv；缺 torch 的损坏环境拒绝增量修复。
 - **基准语料与凭证卫生 (v0.6.5)**：100 文档冻结语料中的全部凭证均为合成值（明显样例结构或运行时拼接），不包含任何真实秘密；vault-engine 评测仅在隔离目录中以库方式运行，禁用云端 provider。
 - **模型精简按需下载与传输安全 (v0.6.6)**：严禁无限制全量拉取 ModelScope 社区仓库快照，仅由 `selective_downloader` 静态白名单枚举并单文件流式校验下载 PyTorch 必需文件，杜绝不可信仓库引入非必需可执行资产；自动过滤 ONNX 冗余文件与文档，减少 60%+ 网络流量暴露。
+- **模型内容真实性指纹与缓存安全屏障 (v0.6.8)**：Prediction Cache 深度绑定 `scripts/model_integrity.py`，对模型磁盘文件进行 SHA-256 内容校验；损坏或篡改直接抛出 `ModelIntegrityError` 拒识伪造；父级目录多签名歧义强制抛出 `AmbiguousCacheError`；落盘与加载严格校验 `cache-manifest.json` 与 `predictions_sha256`（`CacheCorruptedError`）。
+- **精简下载器清单 Schema 与防路径穿越防御 (v0.6.8)**：强制要求 `download-manifest.json` 包含 64 位小写 hex SHA-256 和非负文件大小，严格过滤绝对路径与 `../` 路径穿越注入。
+- **全仓库零熵凭据卫生加固 (v0.6.8)**：全库静态凭据扫描门禁达成 0 违规，高熵虚构凭据全量替换为零熵惰性模式，防止外部 Secret Scanning 触发。
 - **资源耗尽保护**：单次处理正文限制为 2 MB，文本字符上限为 500,000 字符；模型推理采用进程级互斥锁保证串行，防止显存或内存击穿。
 
-## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.7)
+## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.8)
 
 ### 静态代码与测试凭据卫生策略
 

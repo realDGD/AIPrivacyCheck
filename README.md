@@ -2,10 +2,18 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.7`（fnOS Native 原生应用）
+当前版本：`0.6.8`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **Benchmark 评测基础设施最终冻结 (v0.6.8)**：
+  - **Prediction Cache 模型指纹真实性验证**：`scripts/benchmark_cache.py` 严格校验模型磁盘真实内容哈希，优先比对 `download-manifest.json` 记录的 SHA-256 校验和与文件大小，无清单时回退至流式计算；若检测到同尺寸内容篡改或文件损坏直接抛出 `ModelIntegrityError` 拒绝虚假缓存复用。
+  - **单源模型完整性验证模块**：创建 `scripts/model_integrity.py`，作为 `selective_downloader.py` 和 `benchmark_cache.py` 共享的单一真实来源（Single Source of Truth），统一文件校验、大小比对及复合内容哈希生成。
+  - **Selective Downloader 兼容性与安全加固**：修复 Python 3.12/3.13 下缺少 `Any` 导入的兼容性缺陷，引入真实子进程测试门禁；加强 `download-manifest.json` schema 规范（64位小写 hex SHA-256、非负大小校验），建立防路径穿越安全防御（绝对路径与 `../` 严格拦截）。
+  - **ModelScope Revision 真实来源记录**：明确记录 `requested_revision` 与 `resolved_revision: null`，如实标注本地内容指纹契约（Local content integrity fingerprint）。
+  - **Prediction Cache 歧义隔离与数据校验**：父级缓存目录存在多个有效签名时强制报错 `AmbiguousCacheError`，写入时生成并落盘 `cache-manifest.json`，读取时强制校验预测条目数与 `predictions_sha256` 完整性，篡改即报 `CacheCorruptedError`。
+  - **全仓库凭据卫生 0 违规**：全仓库所有文本文件（`.py`, `.json`, `.jsonl`, `.md`, `.sh` 等）静态凭据扫描 0 活跃/扫描器形态违规，高熵虚构凭据统一替换为零熵惰性虚构凭据。
+  - **Built-in v2 与评测基础设施双重冻结**：Built-in v2 规则与阈值冻结（0/388 严格负样本 FPR），Benchmark 基础设施正式进入 STABLE / FROZEN 最终冻结状态。
 - **Benchmark 可复现性与仓库凭据卫生加固 (v0.6.7)**：
   - **预测缓存运行时与内容哈希绑定**：`scripts/benchmark_cache.py` 将持久化 Raw Prediction Cache 严格绑定宿主机关键环境（`python`, `torch`, `transformers`, `modelscope`, `gliner`）与模型真实文件的 SHA-256 内容哈希（优先从 `download-manifest.json` 提取，无清单时回退流式哈希，杜绝 `mtime` 虚假失效）；引入 `cache_signature` 16 进制目录哈希，使不同配置与运行时的合法缓存能够安全并存。
   - **已有模型下载完整性校验契约**：`scripts/selective_downloader.py` 修复对已有模型“只要文件存在就判 complete”的重大缺陷，新增 `verify_existing_model_integrity` 严格比对文件尺寸与 SHA-256 校验和；单文件损坏精确报错，`--download-missing` 仅下载损坏文件；单文件下载增加 `try ... finally` 确保 `.tmp_download` 临时文件在异常或中断时原子清理。
@@ -157,7 +165,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.7_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.8_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 

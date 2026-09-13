@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.7)
+# 架构说明 (v0.6.8)
 
 ## 设计目标
 
@@ -27,6 +27,14 @@
 19b. **Benchmark v2 评分修复、预测缓存与模型精简按需下载 (v0.6.6)**：修复语义评分器在显式负样本黄金实体上的计分逻辑（重叠召回时仅增加 overreach 与 fp，tp 严格保持不变）；将原 redaction_acc 准确更名为 redaction_eligibility_coverage（redCov），精确度量敏感实体的召回覆盖；GLiNER 标签顺序定义为确定性不可变元组 GLINER_LABELS；建立 `benchmark-cache/` 持久化预测缓存，实现单次模型推理、毫秒级离线阈值扫频；建立 `selective_downloader`，严禁全量拉取 ModelScope 快照，按需下载必需权重与配置，节省 60%+ 带宽；统一 Built-in v2 负样本评测口径为 407 条，Strict-negative FPR 严格为 0 / 388 (0.0%)。
 
 19c. **Benchmark 可复现性加固与仓库凭据卫生治理 (v0.6.7)**：预测缓存（Raw Prediction Cache）深度绑定宿主机完整运行时关键版本（python、torch、transformers、modelscope、gliner）及模型真实内容 SHA-256 哈希，引入 `cache_signature` 子目录实现不同参数与运行时的并发无损共存；精简下载器（Selective Downloader）建立本地模型完整性验证契约 `verify_existing_model_integrity`，依据 `download-manifest.json` 校验文件大小与哈希，拒绝仅靠 `is_file()` 判定的虚假文件，支持单文件精准增量修复并在下载失败时原子清理 `.tmp_download` 临时文件；Benchmark 评测中严格解耦 `redactable_fn`（所有未命中脱敏实体）与 `critical_fn`（仅限高危法定标识符与凭据）；净化代码库中所有可能触发 GitHub Secret Scanning 的合成凭据字面量，测试套件全面实施运行时字符串动态拼接，建立静态安全门禁 `test_secret_hygiene`；保持 Built-in v2 规则与阈值冻结，零负样本误报回归。
+
+19d. **Benchmark 基础设施最终冻结 (v0.6.8)**：
+- **模型真实内容哈希与单源完整性契约**：建立 `scripts/model_integrity.py` 共享模块，统一 `selective_downloader.py` 与 `benchmark_cache.py` 的模型完整性核验逻辑；基于 `download-manifest.json` 校验磁盘物理文件真实尺寸与 SHA-256，无清单时回退流式分块计算；若内容损坏或同尺寸篡改则触发 `ModelIntegrityError` 严格拒绝缓存命中，杜绝任何“文件存在即信任”的漏洞。
+- **Selective Downloader 规范化与安全强化**：修复缺失 `Any` 导致的 Python 3.12/3.13 兼容性异常，建立真实子进程导包门禁；`download-manifest.json` 强化严格 Schema（规范 64 位小写 hex SHA-256、非负大小），增加对绝对路径和 `../` 相对路径穿越的严格拦截，提升供应链安全防御。
+- **ModelScope Revision 来源记录**：明确区分 `requested_revision` 与 `resolved_revision`（当前 API 端点返回 null 并如实标注）；采用精准术语“Local content integrity fingerprint”。
+- **Prediction Cache 歧义拦截与预测数据完整性保障**：父级缓存目录存在多个有效签名时强制抛出 `AmbiguousCacheError` 拒绝静默选择；写入时生成 `cache-manifest.json`，读取时强制校验预测条数与 `predictions_sha256`，篡改即报 `CacheCorruptedError`。
+- **全仓库凭据卫生**：全库所有文本格式（`.py`, `.json`, `.jsonl`, `.md`, `.sh` 等）静态凭据扫描达成 0 违规，高熵虚构凭据全量替换为零熵惰性模式。
+- **双重冻结状态**：Built-in v2 规则与阈值冻结（0/388 严格负样本 FPR），Benchmark 基础设施正式进入 STABLE / FROZEN 最终冻结状态。
 
 ## 系统架构拓扑
 
