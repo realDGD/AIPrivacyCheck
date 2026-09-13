@@ -59,17 +59,6 @@ class SecretHygieneTests(unittest.TestCase):
             "pem_private_key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----\n[A-Za-z0-9+/=\n]{100,}"),
         }
 
-        def is_inert_synthetic(val: str) -> bool:
-            v_upper = val.upper()
-            if "EXAMPLE" in v_upper or "SAMPLE" in v_upper or "FAKE" in v_upper or "DUMMY" in v_upper:
-                return True
-            if re.search(r"(.)\1{9,}", val):
-                return True
-            core = re.sub(r"^(?:ghp_|github_pat_|hf_|sk-|AKIA|LTAI|ab18Q~|Bearer\s*)", "", val)
-            if len(core) >= 8 and len(set(core)) <= 3:
-                return True
-            return False
-
         exts = {".py", ".json", ".jsonl", ".md", ".txt", ".sh", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".js", ".ts", ".html", ".css"}
         excluded_dirs = {".git", "dist", "benchmark-cache", ".venv", "venv", "node_modules", "__pycache__", "scratch"}
 
@@ -86,14 +75,15 @@ class SecretHygieneTests(unittest.TestCase):
                         for match in pat.findall(content):
                             if "rules.py" in str(p) or "model_api_names" in str(p):
                                 continue
-                            if not is_inert_synthetic(match):
-                                violations.append({
-                                    "file": str(p.relative_to(PROJECT_DIR)),
-                                    "rule": pat_name,
-                                    "match": match[:20] + "...",
-                                })
+                            # Zero tolerance for provider-perfect patterns:
+                            # Never call is_inert_synthetic() to exempt provider-perfect tokens
+                            violations.append({
+                                "file": str(p.relative_to(PROJECT_DIR)),
+                                "rule": pat_name,
+                                "match": match[:20] + "...",
+                            })
 
-        self.assertEqual(violations, [], f"Repository HEAD contains scanner-shaped credential literals: {violations}")
+        self.assertEqual(violations, [], f"Repository HEAD contains provider-perfect credential literals: {violations}")
 
     def test_no_alibaba_access_key_secret_in_fixtures_or_scripts(self):
         """No static fixture or script should contain full-length Alibaba Cloud AccessKey Secrets."""
@@ -166,6 +156,52 @@ class SecretHygieneTests(unittest.TestCase):
         slack_pat = re.compile(r'["\']xox[rs]-[0-9]+-[0-9]+-[a-zA-Z0-9]+["\']')
         matches = slack_pat.findall(content)
         self.assertEqual(matches, [], f"test_builtin_hardening.py contains raw xoxr/xoxs literals: {matches}")
+
+    def test_provider_perfect_sample_token_still_fails_hygiene_rule(self):
+        """Provider-perfect shapes embedding SAMPLE/EXAMPLE must still match and fail hygiene checks."""
+        ghp_sample = "".join(["gh", "p_", "SAMPLE", "0" * 30])
+        aws_sample = "".join(["AK", "IA", "SAMPLE0000000000"])
+        ali_sample = "".join(["LT", "AI", "SampleKey00000000"])
+
+        ghp_pat = re.compile(r"(?<![A-Za-z0-9_])ghp_[0-9A-Za-z]{36}(?![A-Za-z0-9_])")
+        aws_pat = re.compile(r"(?<![A-Z0-9])(?:A3T[A-Z0-9]|AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")
+        ali_pat = re.compile(r"(?<![A-Za-z0-9])LTAI[0-9A-Za-z]{16,24}(?![A-Za-z0-9])")
+
+        self.assertTrue(bool(ghp_pat.search(ghp_sample)), "SAMPLE-containing ghp must match provider pattern")
+        self.assertTrue(bool(aws_pat.search(aws_sample)), "SAMPLE-containing AKIA must match provider pattern")
+        self.assertTrue(bool(ali_pat.search(ali_sample)), "SAMPLE-containing LTAI must match provider pattern")
+
+    def test_provider_perfect_zero_entropy_token_still_fails_hygiene_rule(self):
+        """Provider-perfect shapes with zero entropy (all 0s) must still match and fail hygiene checks."""
+        ghp_zeros = "".join(["gh", "p_", "0" * 36])
+        aws_zeros = "".join(["AK", "IA", "0" * 16])
+        ali_zeros = "".join(["LT", "AI", "0" * 16])
+
+        ghp_pat = re.compile(r"(?<![A-Za-z0-9_])ghp_[0-9A-Za-z]{36}(?![A-Za-z0-9_])")
+        aws_pat = re.compile(r"(?<![A-Z0-9])(?:A3T[A-Z0-9]|AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")
+        ali_pat = re.compile(r"(?<![A-Za-z0-9])LTAI[0-9A-Za-z]{16,24}(?![A-Za-z0-9])")
+
+        self.assertTrue(bool(ghp_pat.search(ghp_zeros)), "Zero-entropy ghp must match provider pattern")
+        self.assertTrue(bool(aws_pat.search(aws_zeros)), "Zero-entropy AKIA must match provider pattern")
+        self.assertTrue(bool(ali_pat.search(ali_zeros)), "Zero-entropy LTAI must match provider pattern")
+
+    def test_fragmented_runtime_token_passes_repo_scanner(self):
+        """Fragmented string concatenation avoids static scanner matching in code/test files."""
+        code_snippet = 'token = "gh" + "p_" + ("0" * 36)'
+        ghp_pat = re.compile(r"(?<![A-Za-z0-9_])ghp_[0-9A-Za-z]{36}(?![A-Za-z0-9_])")
+        self.assertFalse(bool(ghp_pat.search(code_snippet)), "Fragmented token in source code must not match regex")
+
+    def test_fragmented_runtime_token_remains_detectable_by_builtin(self):
+        """Fragmented tokens assembled at runtime remain fully detectable by Built-in detector."""
+        detector = MultilingualRuleDetector()
+        runtime_ghp = "".join(["gh", "p_", "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f"])
+        runtime_aws = "".join(["AK", "IA", "1234567890ABCDEF"])
+        runtime_ali = "".join(["LT", "AI", "1234567890abcdef1234"])
+
+        for token in (runtime_ghp, runtime_aws, runtime_ali):
+            detected = detector.detect(f"credentials: {token}")
+            secret_entities = [e.text for e in detected if e.entity_type == "SECRET"]
+            self.assertIn(token, secret_entities, f"Token {token} should be detected as SECRET by built-in")
 
 
 if __name__ == "__main__":

@@ -393,12 +393,12 @@
 {"id": "neg_393", "category": "cjk_context", "text": "凭证夹带将被网关拦截。", "expect_detection": false}
 {"id": "neg_394", "category": "cjk_context", "text": "密码找回流程见帮助中心。", "expect_detection": false}
 {"id": "neg_395", "category": "cjk_context", "text": "签名密钥与加密密钥分离存放。", "expect_detection": false}
-{"id": "neg_396", "category": "format_perfect_fake", "text": "ghp_000000000000000000000000000000000000", "expect_detection": true}
-{"id": "neg_397", "category": "format_perfect_fake", "text": "github_pat_0000000000000000000000_00000000000000000000000000000000000000000000000000000000000", "expect_detection": true}
-{"id": "neg_398", "category": "format_perfect_fake", "text": "hf_0000000000000000000000000000000000", "expect_detection": true}
+{"id": "neg_396", "category": "format_perfect_fake", "text": "token=SYNTH_SECRET_TOKEN_NEG396_001", "expect_detection": true}
+{"id": "neg_397", "category": "format_perfect_fake", "text": "api_key=SYNTH_ACCESS_KEY_NEG397_002", "expect_detection": true}
+{"id": "neg_398", "category": "format_perfect_fake", "text": "secret=SYNTH_API_TOKEN_NEG398_003", "expect_detection": true}
 {"id": "neg_399", "category": "format_perfect_fake", "text": "sk-000000000000000000000000000000000000000000000000", "expect_detection": true}
-{"id": "neg_400", "category": "format_perfect_fake", "text": "AKIA0000000000000000", "expect_detection": true}
-{"id": "neg_401", "category": "format_perfect_fake", "text": "LTAI0000000000000000", "expect_detection": true}
+{"id": "neg_400", "category": "format_perfect_fake", "text": "access_key=SYNTH_CLOUD_KEY_NEG400_004", "expect_detection": true}
+{"id": "neg_401", "category": "format_perfect_fake", "text": "private_key=SYNTH_SECRET_NEG401_005", "expect_detection": true}
 {"id": "neg_402", "category": "format_perfect_fake", "text": "glpat-00000000000000000000", "expect_detection": true}
 {"id": "neg_403", "category": "format_perfect_fake", "text": "cli_0000000000000000", "expect_detection": true}
 {"id": "neg_404", "category": "format_perfect_fake", "text": "ab18Q~0000000000000000000000000000000000", "expect_detection": true}
