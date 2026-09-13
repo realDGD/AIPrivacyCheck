@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.12)
+# 架构说明 (v0.6.13)
 
 ## 设计目标
 
@@ -68,6 +68,18 @@
 - **PyTorch 2.6.0 精准锁定与真实版本落盘**：明确锁定 PyTorch 2.6.0，同时在 `runtime-manifest.json` 与状态 API 中如实记录探测所得真实依赖版本。
 - **历史旧环境双重健康准入与无损接管**：仅当历史隔离环境同时通过 17 项 Python 原生能力契约与 Base ML Contract 时方执行无损升级接管，否则安全触发隔离重建。
 - **零模型重载与零权重篡改契约**：修复与重建全流程零网络下载（0 bytes from ModelScope）、零模型权重修改。
+
+19i. **运行时网络与供应链安全收敛 (v0.6.13)**：
+- **系统 CA 根证书强制注入 (UV_SYSTEM_CERTS=true)**：解决真实 fnOS 宿主机环境下由于 musl 静态构建 uv 未能加载系统 CA 根证书导致的 `invalid peer certificate: UnknownIssuer` 故障。在 `build_uv_env` 全局统一注入 `UV_SYSTEM_CERTS=true`，确保所有 uv 命令与子进程继承系统证书信任链。
+- **Cernet/MirrorZ 优先策略与官方源回退降级**：
+  - 受管 Python 3.12.9：优先从 `https://mirrors.cernet.edu.cn/python-build-standalone` 下载，网络异常时安全回退至官方 `https://github.com/astral-sh/python-build-standalone`。
+  - PyPI 依赖包：优先通过 `https://mirrors.cernet.edu.cn/pypi/web/simple` 安装，网络失败时回退至官方 `https://pypi.org/simple`。
+  - PyTorch 2.6.0 轮子：优先从 `https://mirrors.cernet.edu.cn/pytorch/whl/{cu124|cpu}` 安装，网络失败时回退至官方 `https://download.pytorch.org/whl/{cu124|cpu}`。
+- **严格 TLS Fail-Closed 策略**：全链路坚决杜绝 `--allow-insecure-host`、`--trusted-host` 或禁用证书校验；遭遇 TLS/网络异常时输出清晰排查指引并安全失败。
+- **完整性异常绝对 Fail-Closed**：哈希校验失败或文件损坏属于供应链完整性异常，绝对禁止重试或源降级回退，立即安全终止。
+- **受管 Python 3.12.9 零重复下载**：当底层解释器已存在且通过 17 项原生能力契约时，直接复用已有解释器，0 字节重复下载（返回 `existing-local` 遥测状态）。
+- **元数据写入与原子切换一致性**：`runtime-manifest.json` 与 `installed.json` 先落盘为 `.tmp`，待最终探针完全验证通过后通过 `os.replace` 原子生效；若最终探针失败或切换异常，完整恢复原有元数据。
+- **THIRD_PARTY_NOTICES.md 双重打包与运行时 SHA 缓存**：FPK 根目录与应用根目录均打包第三方许可证说明；内置 uv 增加运行时 SHA-256 完整性检验与进程内缓存。
 
 ## 系统架构拓扑
 

@@ -2,10 +2,18 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.12`（fnOS Native 原生应用）
+当前版本：`0.6.13`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **运行时网络与供应链安全收敛 (v0.6.13)**：
+  - **全量注入 UV_SYSTEM_CERTS 修复 TLS UnknownIssuer**：彻底修复真实 fnOS 宿主机环境因 musl uv 默认未加载系统 CA 根证书导致 PyPI / uv 报 `invalid peer certificate: UnknownIssuer` 的故障。在 `build_uv_env` 全局统一注入 `UV_SYSTEM_CERTS=true`。
+  - **Cernet/MirrorZ 教育网镜像优先与官方源自动降级**：针对受管 Python 3.12.9、PyPI 依赖包与 PyTorch 2.6.0 轮子三条独立供应链，确立 Cernet 镜像优先策略，并在发生网络错误或超时时自动无缝降级回退到官方源。
+  - **严格 TLS Fail-Closed 策略**：严禁使用 `--allow-insecure-host`、`--trusted-host` 或禁用证书校验；遭遇 TLS/网络异常时输出清晰友好的中文排查指引。
+  - **完整性异常绝对 Fail-Closed**：哈希校验失败或文件损坏属于供应链完整性异常，绝对禁止重试或源降级回退，立即安全终止。
+  - **受管 Python 3.12.9 零重复下载**：当底层受管 Python 3.12.9 已存在且通过 17 项原生能力契约时，直接复用已有解释器，0 字节重复下载（返回 `existing-local` 遥测状态）。
+  - **元数据写入与原子切换一致性**：`runtime-manifest.json` 与 `installed.json` 先落盘为 `.tmp`，待最终探针完全验证通过后通过 `os.replace` 原子生效；若最终探针失败或切换异常，完整恢复原有元数据。
+  - **THIRD_PARTY_NOTICES.md 双重打包与运行时 SHA 缓存**：FPK 根目录与应用根目录均打包第三方许可证说明；内置 uv 增加运行时 SHA-256 完整性检验与进程内缓存。
 - **托管 Python 基础运行时收敛与内置 uv 供应链闭环 (v0.6.12)**：
   - **内置官方 Astral musl uv 独立供应链**：彻底修复真实 fnOS 宿主机 PATH 无 `uv` 工具阻塞隔离环境创建与依赖修复的 P1 故障。FPK 安装包开箱内置官方 Astral 静态链接 musl ELF 二进制（`app/bin/linux-x86_64/uv` 与 `app/bin/linux-aarch64/uv`），经 SHA-256 强校验，实现 100% 离线、零网络、零宿主机 root 权限、零系统 PATH 依赖。
   - **四阶段事务性原子切换与严格回滚保护**：运行时重建遵循 `old -> backup PASS, staging -> final FAIL`, `manifest write FAIL`, `final probe FAIL`, `rollback itself fails` 四重故障防御。在最终探针与清单完全验证通过前，旧环境备份绝对不被删除；若回滚本身遭遇异常，永久保留 `venv.old.<timestamp>`，绝不灭失用户环境。
@@ -190,7 +198,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.12_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.13_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 

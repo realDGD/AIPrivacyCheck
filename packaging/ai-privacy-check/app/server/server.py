@@ -267,7 +267,7 @@ INSTALLER = ModelLifecycleController(DATA_DIR)
 
 
 class AppHandler(BaseHTTPRequestHandler):
-    server_version = "AIPrivacyCheck/0.6.12"
+    server_version = "AIPrivacyCheck/0.6.13"
 
     def log_message(self, fmt: str, *args) -> None:
         safe_path = urlsplit(self.path).path
@@ -348,7 +348,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "version": "0.6.12",
+                    "version": "0.6.13",
                     "base_path": BASE_PATH,
                     "capabilities": PRIVACY.capabilities(),
                 },
