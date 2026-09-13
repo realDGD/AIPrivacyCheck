@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent Raw Prediction Cache for AI Privacy Check Benchmarks (v0.6.7).
+"""Persistent Raw Prediction Cache for AI Privacy Check Benchmarks (v0.6.8).
 
 Enables offline re-scoring without re-running expensive model inference:
 - Cache key binds: corpus SHA256, model_id, model revision, model file hash,
@@ -10,10 +10,12 @@ Enables offline re-scoring without re-running expensive model inference:
       <corpus_hash>/
         <model_id>/
           <revision>/
-            inference_config.json
-            runtime.json
-            predictions.jsonl
-            metrics.json
+            <signature>/
+              inference_config.json
+              runtime.json
+              predictions.jsonl
+              cache-manifest.json
+              metrics.json
 - GLiNER inference runs ONCE at minimum threshold (e.g. 0.30); subsequent
   threshold sweeps (0.35..0.65) execute strictly offline in pure scoring layer.
 - Security: Caches ONLY synthetic benchmark corpus outputs; production user
@@ -21,6 +23,7 @@ Enables offline re-scoring without re-running expensive model inference:
 """
 
 from dataclasses import asdict, dataclass
+import datetime
 import hashlib
 import json
 import os
@@ -28,6 +31,13 @@ from pathlib import Path
 import platform
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+
+from model_integrity import (
+    ModelIntegrityError,
+    compute_model_files_hash,
+    sha256_file,
+)
+
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_ROOT = PROJECT_DIR / "benchmark-cache"
@@ -39,14 +49,6 @@ ALLOWED_CORPUS_FILENAMES = {
 }
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 RUNTIME_CRITICAL_KEYS = (
     "python_version",
     "platform",
@@ -56,50 +58,6 @@ RUNTIME_CRITICAL_KEYS = (
     "modelscope_version",
     "gliner_version",
 )
-
-
-def compute_model_files_hash(model_dir: Path) -> str:
-    """Computes deterministic compound SHA-256 over model files content.
-
-    1. Preferred: if download-manifest.json exists with per-file SHA256,
-       model_fingerprint = SHA256(sorted(path + size + sha256)).
-    2. Fallback: computes true streaming SHA-256 over all non-temporary model files.
-       Never relies on mtime.
-    """
-    manifest_path = model_dir / "download-manifest.json"
-    if manifest_path.is_file():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            files_entry = manifest.get("files")
-            items = []
-            if isinstance(files_entry, list):
-                for item in files_entry:
-                    if isinstance(item, dict) and "path" in item and "size" in item and "sha256" in item:
-                        items.append(f"{item['path']}:{item['size']}:{item['sha256']}")
-            elif isinstance(files_entry, dict):
-                for p, item in files_entry.items():
-                    if isinstance(item, dict) and "size" in item and "sha256" in item:
-                        items.append(f"{p}:{item['size']}:{item['sha256']}")
-            if items:
-                h = hashlib.sha256()
-                for line in sorted(items):
-                    h.update(line.encode("utf-8"))
-                return h.hexdigest()
-        except Exception:
-            pass
-
-    # Fallback: compute actual content SHA-256 for all model files
-    h = hashlib.sha256()
-    for root, _, files in os.walk(model_dir):
-        for fname in sorted(files):
-            if fname.startswith(".") or fname.endswith(".tmp") or fname.endswith(".tmp_download") or fname == "download-manifest.json":
-                continue
-            fpath = Path(root) / fname
-            rel = fpath.relative_to(model_dir).as_posix()
-            stat = fpath.stat()
-            file_sha = sha256_file(fpath)
-            h.update(f"{rel}:{stat.st_size}:{file_sha}".encode("utf-8"))
-    return h.hexdigest()
 
 
 def compute_cache_signature(key_data: Dict[str, Any]) -> str:
@@ -148,10 +106,21 @@ class BenchmarkPredictionCache:
         model_dir: Optional[Path],
         inference_config: Dict[str, Any],
         runtime_meta: Optional[Dict[str, Any]] = None,
+        allow_corrupted: bool = False,
     ) -> Dict[str, Any]:
         corpus_path = Path(corpus_path).resolve()
         corpus_sha = sha256_file(corpus_path)
-        model_files_hash = compute_model_files_hash(model_dir) if (model_dir and model_dir.is_dir()) else "no_model_dir"
+        if model_dir and model_dir.is_dir():
+            try:
+                model_files_hash = compute_model_files_hash(model_dir)
+            except ModelIntegrityError:
+                if allow_corrupted:
+                    model_files_hash = "INVALID_CORRUPTED_MODEL"
+                else:
+                    raise
+        else:
+            model_files_hash = "no_model_dir"
+
         runtime = runtime_meta or get_runtime_environment_metadata()
 
         key_data = {
@@ -300,3 +269,4 @@ class BenchmarkPredictionCache:
 
 class SecurityError(Exception):
     pass
+

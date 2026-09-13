@@ -19,7 +19,12 @@ sys_path = PROJECT_DIR / "scripts"
 import sys
 sys.path.insert(0, str(sys_path))
 
-from benchmark_cache import BenchmarkPredictionCache, SecurityError
+from benchmark_cache import (
+    BenchmarkPredictionCache,
+    ModelIntegrityError,
+    SecurityError,
+    compute_model_files_hash,
+)
 
 
 class BenchmarkPredictionCacheTests(unittest.TestCase):
@@ -203,6 +208,129 @@ class BenchmarkPredictionCacheTests(unittest.TestCase):
         self.assertTrue(hit2)
         self.assertEqual(found1, dir1)
         self.assertEqual(found2, dir2)
+
+    def _create_model_with_manifest(self, dir_name: str, files_dict: Dict[str, bytes]) -> Path:
+        mdir = self.tmp_dir / dir_name
+        mdir.mkdir(parents=True, exist_ok=True)
+        records = []
+        import hashlib
+        for fname, data in files_dict.items():
+            fpath = mdir / fname
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_bytes(data)
+            records.append({
+                "path": fname,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+        manifest = {
+            "model_id": "test/model",
+            "revision": "master",
+            "files": records,
+        }
+        (mdir / "download-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        return mdir
+
+    def test_manifest_backed_fingerprint_verifies_actual_content(self):
+        """Test 1: Manifest + files match -> fingerprint stable & cache hits."""
+        mdir = self._create_model_with_manifest("model_valid", {
+            "config.json": b'{"model": "test"}',
+            "weights.bin": b"valid_weights_12345",
+        })
+        fp1 = compute_model_files_hash(mdir)
+        fp2 = compute_model_files_hash(mdir)
+        self.assertEqual(fp1, fp2)
+
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", mdir, config)
+        self.cache.save(key, [{"id": "case_1", "entities": []}])
+        hit, _ = self.cache.has_valid_cache(key)
+        self.assertTrue(hit)
+
+    def test_manifest_model_file_tamper_fails_integrity(self):
+        """Test 2: Manifest unchanged, 1 byte of model file modified -> integrity failure & cache cannot hit."""
+        mdir = self._create_model_with_manifest("model_tamper", {
+            "config.json": b'{"model": "test"}',
+            "weights.bin": b"valid_weights_12345",
+        })
+        config = {"minimum_threshold": 0.30, "label_order": ["person"]}
+        key = self.cache.build_cache_key(self.fixture, "test-model", "master", mdir, config)
+        self.cache.save(key, [{"id": "case_1", "entities": []}])
+
+        # Tamper with 1 byte in weights.bin without updating manifest
+        tampered_weights = bytearray(b"valid_weights_12345")
+        tampered_weights[0] = ord("X")
+        (mdir / "weights.bin").write_bytes(bytes(tampered_weights))
+
+        # Must raise ModelIntegrityError when computing hash
+        with self.assertRaises(ModelIntegrityError):
+            compute_model_files_hash(mdir)
+
+        # Must raise ModelIntegrityError when attempting to build cache key
+        with self.assertRaises(ModelIntegrityError):
+            self.cache.build_cache_key(self.fixture, "test-model", "master", mdir, config)
+
+        # When allow_corrupted=True, returns corrupted key that yields cache miss
+        corrupted_key = self.cache.build_cache_key(self.fixture, "test-model", "master", mdir, config, allow_corrupted=True)
+        hit, _ = self.cache.has_valid_cache(corrupted_key)
+        self.assertFalse(hit, "Tampered model file must never hit cache")
+
+    def test_manifest_same_size_content_corruption_rejected(self):
+        """Test 3: Model file size unchanged, content changed, manifest unchanged -> rejected."""
+        mdir = self._create_model_with_manifest("model_same_sz", {
+            "weights.bin": b"1234567890",
+        })
+        # Overwrite with different bytes of same exact length (10 bytes)
+        (mdir / "weights.bin").write_bytes(b"abcdefghij")
+
+        with self.assertRaises(ModelIntegrityError):
+            compute_model_files_hash(mdir)
+
+    def test_manifest_missing_sha_rejected(self):
+        """Test 4: Manifest entry missing sha256 -> rejected as untrusted manifest."""
+        mdir = self.tmp_dir / "model_no_sha"
+        mdir.mkdir()
+        (mdir / "weights.bin").write_bytes(b"data")
+        manifest = {
+            "files": [{"path": "weights.bin", "size": 4}],  # missing sha256
+        }
+        (mdir / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaises(ModelIntegrityError):
+            compute_model_files_hash(mdir)
+
+    def test_manifest_missing_required_file_rejected(self):
+        """Test 5: Manifest points to a non-existent file -> rejected."""
+        mdir = self.tmp_dir / "model_missing_file"
+        mdir.mkdir()
+        manifest = {
+            "files": [{"path": "non_existent.bin", "size": 100, "sha256": "0" * 64}],
+        }
+        (mdir / "download-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        with self.assertRaises(ModelIntegrityError):
+            compute_model_files_hash(mdir)
+
+    def test_no_manifest_falls_back_to_content_hash(self):
+        """Test 6: No manifest -> fallback to streaming content hash."""
+        import os
+        import time
+        mdir = self.tmp_dir / "model_no_manifest"
+        mdir.mkdir()
+        wfile = mdir / "weights.bin"
+        wfile.write_bytes(b"raw_weights_content_54321")
+
+        h1 = compute_model_files_hash(mdir)
+        # Touch mtime
+        new_time = time.time() - 50000
+        os.utime(wfile, (new_time, new_time))
+        h2 = compute_model_files_hash(mdir)
+        self.assertEqual(h1, h2, "Mtime change must not alter streaming fingerprint")
+
+        # Change content
+        wfile.write_bytes(b"altered_weights_content_54321")
+        h3 = compute_model_files_hash(mdir)
+        self.assertNotEqual(h1, h3, "Content change must alter streaming fingerprint")
 
 
 if __name__ == "__main__":
