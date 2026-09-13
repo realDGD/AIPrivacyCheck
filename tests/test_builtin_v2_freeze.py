@@ -1,4 +1,4 @@
-"""Built-in v2 freeze gate (v0.6.5/v0.6.6).
+"""Built-in v2 freeze gate (v0.6.5/v0.6.6/v0.6.7).
 
 Freezes the deterministic fast path with three permanent gates:
   1. Negative corpus FPR < 1% (407 samples total: 388 strict-negative samples
