@@ -160,13 +160,20 @@ MODEL_CATALOG: Dict[str, ModelDescriptor] = {
         supports_cpu=True,
         supports_cuda=True,
         recommended=False,
-        description="可选的深度语义隐私模型（深度扫描模式，用户主动开启）。Benchmark v2 证实其为唯一具备语义级召回的候选（语义切片跨度覆盖召回 90%，小参数 Qwen 挑战者要么高误报要么漏检），但 3.4GB 权重 + CPU 约 9GB RAM / 数百秒延迟 + 受限显存设备 CUDA OOM 压力 + CC BY-NC-ND 非商业许可，不适合作为 NAS 默认推荐；生产默认检测由内置规则与 NER 承担。支持 CUDA（建议显存 >=6GB）或 CPU 模式（CPU 推理耗时较长且内存占用约 8-10GB，单请求有时间预算限制）。",
+        # Provenance: ModelScope hosts this checkpoint under the MemTensor org
+        # (the download channel this catalog pins). The author's HuggingFace
+        # namespace for the same weights is IAAR-Shanghai/MemPrivacy-1.7B-RL
+        # (per the model card inside the snapshot). The ModelScope metadata
+        # carries NO license field; the license statement (CC BY-NC-ND 4.0,
+        # non-commercial) is only on the HF model card - verified 2026-09-13.
+        description="可选的深度语义隐私模型（深度扫描模式，用户主动开启）。Benchmark v2 证实其为唯一具备语义级召回的候选（语义切片跨度覆盖召回 90%，小参数 Qwen 挑战者要么高误报要么漏检），但 3.4GB 权重 + CPU 约 9GB RAM / 数百秒延迟 + 受限显存设备 CUDA OOM 压力 + CC BY-NC-ND 非商业许可（依据作者 HF 模型卡 IAAR-Shanghai/MemPrivacy-1.7B-RL；ModelScope 元数据未携带 license 字段），不适合作为 NAS 默认推荐；生产默认检测由内置规则与 NER 承担。支持 CUDA（建议显存 >=6GB）或 CPU 模式（CPU 推理耗时较长且内存占用约 8-10GB，单请求有时间预算限制）。",
     ),
     "memprivacy-4b-rl": ModelDescriptor(
         id="memprivacy-4b-rl",
         display_name="MemPrivacy 4B RL",
         slot=SLOT_SEMANTIC_PRIVACY,
         provider="modelscope",
+        # Same provenance as the 1.7B: ModelScope=MemTensor org, HF mirror=IAAR-Shanghai, license only on the HF card (CC BY-NC-ND 4.0).
         repo_id="MemTensor/MemPrivacy-4B-RL",
         revision="master",
         license="CC BY-NC-ND 4.0",
