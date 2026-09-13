@@ -59,8 +59,11 @@ class RuleDetectorTests(unittest.TestCase):
     def test_context_required_for_ambiguous_values(self):
         self.assertNotIn("CN_ACCOUNT", self.types_for("发布版本为 ABCDEF123456，普通编号无需处理。"))
         self.assertIn("CN_ACCOUNT", self.types_for("客户编号：ABCDEF123456"))
-        self.assertNotIn("IP_ADDRESS", self.types_for("版本号 192.168.1.15"))
-        self.assertIn("IP_ADDRESS", self.types_for("服务器地址：192.168.1.15"))
+        # 192.168 is never a version string: bare private-range rule (v0.6.5)
+        self.assertIn("IP_ADDRESS", self.types_for("内网 192.168.1.15 可达"))
+        # 10.x collides with version numbers: stays label-gated
+        self.assertNotIn("IP_ADDRESS", self.types_for("版本号 10.2.3.15"))
+        self.assertIn("IP_ADDRESS", self.types_for("服务器地址：10.2.3.15"))
 
     def test_secrets(self):
         kinds = self.types_for("password=correct-horse-battery-staple\nAuthorization: eyJabcdefgh.abcdefghijk.abcdefghijk")
