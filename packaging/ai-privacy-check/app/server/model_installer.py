@@ -921,8 +921,9 @@ def rebuild_runtime(
 
             # Validate staging interpreter native capabilities
             log_emit("正在验证临时环境 Python 原生能力...")
-            caps_ok, missing_caps = probe_python_capabilities(staging_interp, runner=command_runner)
-            if not caps_ok:
+            caps_report = probe_python_capabilities(staging_interp, runner=command_runner)
+            if not caps_report.get("ok", False):
+                missing_caps = caps_report.get("missing", [])
                 raise RuntimeError(f"临时环境 Python 原生能力缺失: {', '.join(missing_caps)}")
 
             # Smoke test installed models using staging interpreter

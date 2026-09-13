@@ -357,6 +357,31 @@ class RuntimeManager:
                         "base_packages_ready": base_pkgs_ready,
                         "error": err,
                     }
+
+                    if verified and not rebuild_required:
+                        try:
+                            manifest_file = self.manifest_file(profile)
+                            cur_manifest = {}
+                            if manifest_file.is_file():
+                                try:
+                                    cur_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                                except Exception:
+                                    cur_manifest = {}
+                            if cur_manifest.get("schema_version", 1) < 3:
+                                cur_manifest.update({
+                                    "schema_version": 3,
+                                    "profile": profile,
+                                    "python_runtime_source": py_source,
+                                    "python_runtime_version": py_ver,
+                                    "capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                                    "capabilities_verified_at": int(time.time()),
+                                    "adopted_at": int(time.time()),
+                                })
+                                manifest_file.write_text(
+                                    json.dumps(cur_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+                                )
+                        except Exception:
+                            pass
             except Exception as parse_exc:
                 status = {
                     "profile": profile,
