@@ -365,11 +365,11 @@ def _is_valid_password_value(val: str) -> bool:
     if len(val) < 6 or len(val) > 256:
         return False
     # Placeholders, templates, env vars
-    if val.startswith(("${", "{{", "<", "[", "(", '"', "'")):
+    if val.startswith(("${", "{{", "<", "[", "(", '"', "'", "⟦")):
         return False
-    if val.endswith(("}", ">", "]", ")", '"', "'")):
+    if val.endswith(("}", ">", "]", ")", '"', "'", "⟧")):
         return False
-    if any(p in val for p in ["${", "{{", "os.environ", "environ[", "env[", "process.env"]):
+    if any(p in val for p in ["${", "{{", "os.environ", "environ[", "env[", "process.env", "⟦", "⟧"]):
         return False
     # Masked or hidden tokens
     if "*" in val or "•" in val:
@@ -390,12 +390,24 @@ def _is_valid_password_value(val: str) -> bool:
 
 PASSWORD_KEY_PATTERN = (
     r"(?<![A-Za-z0-9_])"
-    r"(?:APP_PASSWORD|DB_PASSWORD|PASSWORD|PASSWD|Temporary\s+Password|temp\s+password|"
-    r"initial\s+password|admin\s+password|root\s+password|login\s+password|master\s+password|"
-    r"临时密码|初始密码|登录密码|用户密码|开机密码|支付密码|管理密码|账户密码|密码|口令|"
-    r"Passwort|Kennwort|temporäres\s+Passwort|mot\s+de\s+passe|mot\s+de\s+passe\s+temporaire|"
-    r"contraseña|contraseña\s+temporal|パスワード|初期パスワード|仮パスワード|비밀번호|임시\s*비밀번호|"
-    r"كلمة\s+المرور\s+التجريبية|كلمة\s+المرور|รหัสผ่าน|รหัสผ่านชั่วคราว)"
+    r"(?:APP_PASSWORD|DB_PASSWORD|ADMIN_PASSWORD|ROOT_PASSWORD|"
+    r"Temporary\s+Password|temp\s+password|initial\s+password|admin\s+password|root\s+password|"
+    r"临时密码|初始密码|开机密码|支付密码|管理密码|账户密码|"
+    r"temporäres\s+Passwort|mot\s+de\s+passe\s+temporaire|contraseña\s+temporal|"
+    r"初期パスワード|仮パスワード|임시\s*비밀번호|"
+    r"كلمة\s+المرور\s+التجريبية|รหัสผ่านชั่วคราว)"
+    r"(?![A-Za-z0-9_])"
+)
+
+PASSWORD_QUOTED_KEY_PATTERN = (
+    r"(?<![A-Za-z0-9_])"
+    r"(?:APP_PASSWORD|DB_PASSWORD|ADMIN_PASSWORD|ROOT_PASSWORD|"
+    r"Temporary\s+Password|temp\s+password|initial\s+password|admin\s+password|root\s+password|"
+    r"临时密码|初始密码|开机密码|支付密码|管理密码|账户密码|"
+    r"password|passwd|密码|口令|"
+    r"temporäres\s+Passwort|mot\s+de\s+passe\s+temporaire|contraseña\s+temporal|"
+    r"初期パスワード|仮パスワード|임시\s*비밀번호|"
+    r"كلمة\s+المرور\s+التجريبية|รหัสผ่านชั่วคราว)"
     r"(?![A-Za-z0-9_])"
 )
 
@@ -409,7 +421,7 @@ CONTEXT_RULES = (
     RegexRule(
         "PASSWORD",
         _compile(
-            PASSWORD_KEY_PATTERN + PASSWORD_DELIM_PATTERN + r"[\"']([^\r\n\"']{6,256})[\"']",
+            PASSWORD_QUOTED_KEY_PATTERN + PASSWORD_DELIM_PATTERN + r"[\"']([^\r\n\"']{6,256})[\"']",
             re.IGNORECASE,
         ),
         0.98,
