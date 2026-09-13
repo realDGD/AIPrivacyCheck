@@ -269,6 +269,8 @@ class ChineseIEDetector:
             missing_python_capabilities = []
             runtime_rebuild_required = False
             base_packages_ready = True
+            missing_base_packages = []
+            base_contract_violations = []
         else:
             python_runtime_ready = bool(rt_probe.get("python_runtime_ready", True))
             python_runtime_source = str(rt_probe.get("python_runtime_source", "none"))
@@ -276,6 +278,8 @@ class ChineseIEDetector:
             missing_python_capabilities = list(rt_probe.get("missing_python_capabilities", []))
             runtime_rebuild_required = bool(rt_probe.get("runtime_rebuild_required", False))
             base_packages_ready = bool(rt_probe.get("base_packages_ready", base_runtime_ready))
+            missing_base_packages = list(rt_probe.get("missing_base_packages", []))
+            base_contract_violations = list(rt_probe.get("base_contract_violations", []))
 
         model_dependencies_ready = True
         missing_dependencies: List[str] = []
@@ -300,7 +304,7 @@ class ChineseIEDetector:
         repairable = (
             installed
             and (
-                (base_runtime_ready and not model_dependencies_ready)
+                (base_runtime_ready and (not model_dependencies_ready or not base_packages_ready))
                 or runtime_rebuild_required
                 or not python_runtime_ready
             )
@@ -322,6 +326,8 @@ class ChineseIEDetector:
             "missing_python_capabilities": missing_python_capabilities,
             "runtime_rebuild_required": runtime_rebuild_required,
             "base_packages_ready": base_packages_ready,
+            "missing_base_packages": missing_base_packages,
+            "base_contract_violations": base_contract_violations,
             "model_dependencies_ready": model_dependencies_ready,
             "missing_dependencies": missing_dependencies,
             "repairable": repairable,

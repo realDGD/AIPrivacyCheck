@@ -1,4 +1,4 @@
-# 架构说明 (v0.6.11)
+# 架构说明 (v0.6.12)
 
 ## 设计目标
 
@@ -60,6 +60,14 @@
 - **模型权重绝不重下与绝不篡改契约**：无论 Level 1 还是 Level 2，严禁调用 ModelScope 下载逻辑，绝不修改、删除或重命名 `${DATA_DIR}/models/*` 中的任何模型权重文件，升级过程 100% 零带宽消耗、零模型重载。
 - **Runtime Manifest Schema v3 与无损接管（Adoption）**：Manifest 升级至 `schema_version: 3`，记录 `python_runtime_source` (`managed` / `legacy-system-python`), `python_runtime_version`, `capabilities` 等。对于历史上已存在且各项能力健康的旧环境，探测时无损接管升级为 v3，不触发重建。
 - **状态模型与控制面板体验强化**：检测器状态与前端控制面板细化展示缺失底层能力提示，提供「重建/升级运行环境」直观操作。
+
+19h. **托管 Python 基础运行时收敛与内置 uv 供应链闭环 (v0.6.12)**：
+- **内置官方 Astral musl uv 独立供应链**：彻底修复真实 fnOS 宿主机 PATH 无 `uv` 工具导致隔离环境创建与环境修复失败的阻塞问题。FPK 安装包内置官方 Astral 静态链接 musl ELF 二进制（`app/bin/linux-x86_64/uv` 与 `app/bin/linux-aarch64/uv`），经 SHA-256 强校验，实现 100% 离线、零网络、零宿主机 root 权限、零系统 PATH 依赖。
+- **四阶段事务性原子切换与严格回滚保护**：运行时重建遵循 `old -> backup PASS, staging -> final FAIL`, `manifest write FAIL`, `final probe FAIL`, `rollback itself fails` 四重故障防御。在最终探针与清单完全验证通过前，旧环境备份绝对不被删除；若回滚本身遭遇异常，永久保留 `venv.old.<timestamp>`，绝不灭失用户环境。
+- **Base ML Contract 8 项基础依赖健康探测与版本门禁**：目标运行环境在投入服务前必须通过 8 项基础 ML 依赖探测（`torch`, `modelscope`, `numpy`, `packaging`, `tqdm`, `transformers`, `accelerate`, `gliner`），并对 `transformers >=4.51,<5` 实施强制拦截约束。
+- **PyTorch 2.6.0 精准锁定与真实版本落盘**：明确锁定 PyTorch 2.6.0，同时在 `runtime-manifest.json` 与状态 API 中如实记录探测所得真实依赖版本。
+- **历史旧环境双重健康准入与无损接管**：仅当历史隔离环境同时通过 17 项 Python 原生能力契约与 Base ML Contract 时方执行无损升级接管，否则安全触发隔离重建。
+- **零模型重载与零权重篡改契约**：修复与重建全流程零网络下载（0 bytes from ModelScope）、零模型权重修改。
 
 ## 系统架构拓扑
 

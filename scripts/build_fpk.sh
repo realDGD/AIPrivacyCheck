@@ -28,6 +28,7 @@ if [ -z "$FNPACK_BIN" ] || [ ! -x "$FNPACK_BIN" ]; then
 fi
 
 "$PROJECT_DIR/scripts/test.sh"
+python3 "$PROJECT_DIR/scripts/verify_bundled_uv.py"
 mkdir -p "$DIST_DIR"
 chmod +x "$PACKAGE_DIR"/cmd/*
 

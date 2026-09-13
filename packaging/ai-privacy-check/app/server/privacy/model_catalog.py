@@ -311,6 +311,7 @@ def resolve_for_model(
         and cuda_status.get("verified")
         and cuda_status.get("cuda_available")
         and cuda_status.get("python_runtime_ready", True)
+        and cuda_status.get("base_packages_ready", True)
         and not cuda_status.get("runtime_rebuild_required", False)
     )
 
@@ -322,6 +323,7 @@ def resolve_for_model(
         and cpu_status.get("installed")
         and cpu_status.get("verified")
         and cpu_status.get("python_runtime_ready", True)
+        and cpu_status.get("base_packages_ready", True)
         and not cpu_status.get("runtime_rebuild_required", False)
     )
 

@@ -16,11 +16,16 @@ import subprocess
 import sys
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
+# Pinned official Astral uv binary distribution for Linux
+UV_VERSION = "0.12.13"
+UV_X86_64_SHA256 = "37a89bb1ffa013a95f81f888ef445fef056eb877ac994b713158cbe185809ac9"
+UV_AARCH64_SHA256 = "9ea448a9d8534ec5143dc1328a7a3e865391f851115e2ca5b266fdd6c8a1790e"
+
 # Single source of truth for pinned managed CPython version
 MANAGED_PYTHON_VERSION = "3.12.9"
 
-# Core native extension and standard library contract required for ML frameworks
-REQUIRED_PYTHON_CAPABILITIES: Tuple[str, ...] = (
+# Core native extension and standard library contract required for ML frameworks (17 items)
+PYTHON_CAPABILITY_CONTRACT: Tuple[str, ...] = (
     "lzma",
     "_lzma",
     "bz2",
@@ -38,6 +43,18 @@ REQUIRED_PYTHON_CAPABILITIES: Tuple[str, ...] = (
     "subprocess",
     "venv",
     "ensurepip",
+)
+REQUIRED_PYTHON_CAPABILITIES: Tuple[str, ...] = PYTHON_CAPABILITY_CONTRACT
+
+PROBE_BASE_PACKAGES: Tuple[str, ...] = (
+    "torch",
+    "modelscope",
+    "numpy",
+    "packaging",
+    "tqdm",
+    "transformers",
+    "accelerate",
+    "gliner",
 )
 
 RUNTIME_MANIFEST_SCHEMA_VERSION = 3
@@ -81,21 +98,231 @@ output = {
 print(json.dumps(output))
 '''
 
+_BASE_CONTRACT_PROBE_SCRIPT = r'''
+import json
+import sys
 
-def find_uv() -> Optional[str]:
-    """Locates the uv executable, prioritizing app-bundled or system path."""
-    uv_bin = shutil.which("uv")
-    if uv_bin:
-        return uv_bin
-    for cand in (
+BASE_PACKAGES = [
+    "torch", "modelscope", "numpy", "packaging",
+    "tqdm", "transformers", "accelerate", "gliner"
+]
+
+packages = {}
+missing = []
+for p in BASE_PACKAGES:
+    try:
+        mod = __import__(p)
+        packages[p] = getattr(mod, "__version__", "unknown")
+    except Exception:
+        missing.append(p)
+
+violations = []
+if "transformers" in packages and packages["transformers"] != "unknown":
+    tf_ver = packages["transformers"]
+    try:
+        from packaging.version import parse as v_parse
+        pv = v_parse(tf_ver)
+        if pv < v_parse("4.51") or pv >= v_parse("5.0"):
+            violations.append(f"transformers=={tf_ver} violates >=4.51,<5")
+    except Exception:
+        parts = [int(x) for x in tf_ver.split(".")[:2] if x.isdigit()]
+        if len(parts) >= 2:
+            if (parts[0], parts[1]) < (4, 51) or parts[0] >= 5:
+                violations.append(f"transformers=={tf_ver} violates >=4.51,<5")
+
+output = {
+    "base_packages_ready": len(missing) == 0 and len(violations) == 0,
+    "missing_base_packages": missing,
+    "base_contract_violations": violations,
+    "packages": packages,
+}
+print(json.dumps(output))
+'''
+
+
+def get_linux_arch_subdir(machine: Optional[str] = None) -> str:
+    """Maps Linux machine architecture identifier to bundled bin subdirectory."""
+    mach = (machine or platform.machine()).lower()
+    if mach in ("x86_64", "amd64"):
+        return "linux-x86_64"
+    elif mach in ("aarch64", "arm64"):
+        return "linux-aarch64"
+    raise ValueError(f"Unsupported machine architecture for bundled uv: {mach}")
+
+
+def verify_bundled_uv(
+    uv_path: Union[str, Path],
+    runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+    expected_version: str = UV_VERSION,
+) -> Tuple[bool, Optional[str]]:
+    """Verifies that the specified uv executable exists, is executable, and matches expected version."""
+    path = Path(uv_path)
+    if not path.is_file():
+        return False, f"bundled uv binary not found: {path}"
+    if not os.access(path, os.X_OK):
+        return False, f"bundled uv binary is not executable: {path}"
+
+    cmd = [str(path), "--version"]
+    if runner is not None:
+        retcode, stdout, stderr = runner(cmd, timeout=10)
+    else:
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+            retcode, stdout, stderr = res.returncode, res.stdout, res.stderr
+        except Exception as exc:
+            return False, f"bundled uv execution check failed: {exc}"
+
+    if retcode != 0:
+        return False, f"bundled uv exited with code {retcode}: {stderr.strip() or stdout.strip()}"
+
+    out_ver = stdout.strip()
+    if expected_version not in out_ver:
+        return False, f"bundled uv version mismatch: expected {expected_version}, got {out_ver}"
+
+    return True, None
+
+
+def find_uv_info(
+    app_dir: Optional[Path] = None,
+    data_dir: Optional[Path] = None,
+    runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+    target_machine: Optional[str] = None,
+    target_platform: Optional[str] = None,
+    strict_bundled_check: bool = True,
+) -> Tuple[Optional[str], str]:
+    """Locates uv executable with strict priority:
+
+    Priority 1: Bundled uv matching current Linux architecture
+    Priority 2: AIPrivacyCheck managed uv directory (${DATA_DIR}/tools/uv/... or ${DATA_DIR}/bin/uv)
+    Priority 3: System PATH uv
+    Priority 4: Legacy known locations
+    """
+    sys_plat = target_platform or sys.platform
+
+    # Priority 1: Bundled uv for Linux
+    if sys_plat.startswith("linux") or target_platform is not None:
+        try:
+            arch_dir = get_linux_arch_subdir(target_machine)
+            bundled_candidates: List[Path] = []
+            if app_dir:
+                bundled_candidates.append(Path(app_dir).resolve() / "bin" / arch_dir / "uv")
+            if data_dir:
+                bundled_candidates.append(Path(data_dir).resolve() / "app" / "bin" / arch_dir / "uv")
+
+            try:
+                # Relative to this file: server/privacy/python_runtime.py -> parents[2] is app
+                module_app_dir = Path(__file__).resolve().parents[2]
+                bundled_candidates.append(module_app_dir / "bin" / arch_dir / "uv")
+            except Exception:
+                pass
+
+            for base in ("/var/apps/ai-privacy-check", "/usr/local/apps/ai-privacy-check"):
+                bundled_candidates.append(Path(base) / "bin" / arch_dir / "uv")
+
+            for cand in bundled_candidates:
+                if cand.is_file():
+                    valid, err = verify_bundled_uv(cand, runner=runner)
+                    if valid:
+                        return str(cand), "bundled"
+                    else:
+                        if strict_bundled_check:
+                            raise RuntimeError(f"Bundled uv binary invalid at {cand}: {err}")
+        except ValueError as val_err:
+            if target_machine is not None or sys_plat.startswith("linux"):
+                raise RuntimeError(f"Unsupported architecture for uv runtime: {val_err}") from val_err
+
+    # Priority 2: AIPrivacyCheck managed uv directory
+    if data_dir:
+        for managed_cand in (
+            Path(data_dir).resolve() / "tools" / "uv" / "uv",
+            Path(data_dir).resolve() / "bin" / "uv",
+        ):
+            if managed_cand.is_file() and os.access(managed_cand, os.X_OK):
+                return str(managed_cand), "managed"
+
+    # Priority 3: System PATH uv
+    sys_uv = shutil.which("uv")
+    if sys_uv:
+        return sys_uv, "system"
+
+    # Priority 4: Legacy known locations
+    for cand_str in (
         "/usr/local/bin/uv",
         "/opt/homebrew/bin/uv",
         os.path.expanduser("~/.cargo/bin/uv"),
         "/var/apps/ai-privacy-check/bin/uv",
     ):
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
-            return cand
-    return None
+        if os.path.isfile(cand_str) and os.access(cand_str, os.X_OK):
+            return cand_str, "legacy"
+
+    return None, "none"
+
+
+def find_uv(
+    app_dir: Optional[Path] = None,
+    data_dir: Optional[Path] = None,
+    runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+) -> Optional[str]:
+    """Locates the uv executable, returning path or None."""
+    path, _ = find_uv_info(app_dir=app_dir, data_dir=data_dir, runner=runner)
+    return path
+
+
+def probe_base_runtime_contract(
+    python_path: Union[Path, str],
+    runner: Optional[Callable[..., Tuple[int, str, str]]] = None,
+    timeout: int = 15,
+) -> Dict[str, Any]:
+    """Probes the target Python environment for Base ML Contract packages and constraints."""
+    py_path = Path(python_path)
+    if not py_path.is_file() or not os.access(py_path, os.X_OK):
+        return {
+            "base_packages_ready": False,
+            "missing_base_packages": list(PROBE_BASE_PACKAGES),
+            "base_contract_violations": [],
+            "packages": {},
+            "error": f"解释器不存在或不可执行: {python_path}",
+        }
+
+    cmd = [str(py_path), "-c", _BASE_CONTRACT_PROBE_SCRIPT]
+    if runner is not None:
+        retcode, stdout, stderr = runner(cmd, timeout=timeout)
+    else:
+        try:
+            res = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            retcode, stdout, stderr = res.returncode, res.stdout, res.stderr
+        except Exception as exc:
+            retcode, stdout, stderr = 1, "", str(exc)
+
+    if retcode != 0:
+        err_msg = stderr.strip() or stdout.strip() or f"Probe failed with exit code {retcode}"
+        return {
+            "base_packages_ready": False,
+            "missing_base_packages": list(PROBE_BASE_PACKAGES),
+            "base_contract_violations": [],
+            "packages": {},
+            "error": f"Base ML Contract 探测异常: {err_msg}",
+        }
+
+    try:
+        data = json.loads(stdout.strip())
+        data["error"] = None
+        return data
+    except Exception as exc:
+        return {
+            "base_packages_ready": False,
+            "missing_base_packages": list(PROBE_BASE_PACKAGES),
+            "base_contract_violations": [],
+            "packages": {},
+            "error": f"解析 Base ML Contract 输出失败: {exc}",
+        }
 
 
 def get_python_installations_dir(data_dir: Path) -> Path:
@@ -221,9 +448,10 @@ def ensure_managed_python(
     emit_fn: Optional[Callable[[str], None]] = None,
 ) -> Path:
     """Ensures pinned uv-managed CPython is installed in private app directory and returns its path."""
-    uv = uv_bin or find_uv()
-    if not uv:
+    uv_path, uv_source = (uv_bin, "custom") if uv_bin else find_uv_info(data_dir=data_dir, runner=runner)
+    if not uv_path:
         raise RuntimeError("未找到 uv 工具，无法管理或部署 Python 运行环境。")
+    uv = uv_path
 
     data_path = Path(data_dir).resolve()
     env = build_uv_env(data_path)
@@ -232,6 +460,15 @@ def ensure_managed_python(
     def log(msg: str) -> None:
         if emit_fn:
             emit_fn(msg)
+
+    uv_source_desc = {
+        "bundled": "内置",
+        "managed": "托管",
+        "system": "系统",
+        "legacy": "系统备用",
+        "custom": "自定义",
+    }.get(uv_source, "可用")
+    log(f"已选择 AIPrivacyCheck {uv_source_desc} uv: {uv}")
 
     # 1. Try to find existing managed Python
     find_cmd = [uv, "python", "find", "--managed-python", MANAGED_PYTHON_VERSION]
@@ -302,4 +539,5 @@ def ensure_managed_python(
         )
 
     log(f"Managed Python 部署验证成功: {resolved} (版本: {probe.get('version')})")
+    log("Python Capability Contract: PASS")
     return resolved

@@ -42,11 +42,16 @@ from privacy.runtime_manager import (
 )
 from privacy.python_runtime import (
     MANAGED_PYTHON_VERSION,
-    RUNTIME_MANIFEST_SCHEMA_VERSION,
+    PROBE_BASE_PACKAGES,
+    PYTHON_CAPABILITY_CONTRACT,
     REQUIRED_PYTHON_CAPABILITIES,
+    RUNTIME_MANIFEST_SCHEMA_VERSION,
+    UV_VERSION,
     build_uv_env,
     ensure_managed_python,
     find_uv,
+    find_uv_info,
+    probe_base_runtime_contract,
     probe_python_capabilities,
 )
 from privacy.runtime_env import build_runtime_env, prepare_runtime_dirs
@@ -55,6 +60,10 @@ from privacy.worker_client import get_worker_client
 _LOCK_STATE = threading.local()
 
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+# Pinned PyTorch version for stable, predictable ML runtime execution
+PINNED_TORCH_VERSION = "2.6.0"
+PINNED_TORCH_REQUIREMENT = f"torch=={PINNED_TORCH_VERSION}"
 
 # Shared torch runtime transformers constraint:
 #   >=4.51 - floor required by Qwen3ForCausalLM (MemPrivacy catalog models and
@@ -866,11 +875,20 @@ def rebuild_runtime(
         log_emit(f"运行时 [{profile}] 准备重建，关联已安装模型: {installed_models or '无'}")
 
         # 3. Ensure uv and managed Python
-        uv_bin = find_uv()
+        uv_bin, uv_source = find_uv_info(data_dir=data_dir, runner=command_runner)
         if not uv_bin:
             err_msg = "未找到 uv 工具，无法构建托管 Python 运行环境"
             log_emit(f"错误: {err_msg}")
             return False, err_msg
+
+        uv_source_desc = {
+            "bundled": "内置",
+            "managed": "托管",
+            "system": "系统",
+            "legacy": "系统备用",
+            "custom": "自定义",
+        }.get(uv_source, "可用")
+        log_emit(f"已选择 AIPrivacyCheck {uv_source_desc} uv: {uv_bin} (版本: {UV_VERSION})")
 
         try:
             managed_python = ensure_managed_python(data_dir, uv_bin=uv_bin, runner=command_runner, emit_fn=log_emit)
@@ -889,7 +907,7 @@ def rebuild_runtime(
         staging_interp = staging_venv / "bin" / "python"
 
         try:
-            log_emit(f"正在创建临时重建运行环境: {staging_venv}...")
+            log_emit(f"正在创建 [{profile}] 重建环境: {staging_venv}...")
             uv_env = build_uv_env(data_dir)
             create_cmd = [uv_bin, "venv", "--python", str(managed_python), str(staging_venv)]
             ret, stdout, stderr = runner(create_cmd, env=uv_env)
@@ -906,17 +924,19 @@ def rebuild_runtime(
             run_install_staging("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
 
             if profile == PROFILE_TORCH_CPU:
-                log_emit(f"正在临时环境中安装 [{profile}] PyTorch CPU 轮子...")
-                run_install_staging("torch", "--index-url", PYTORCH_CPU_INDEX)
+                log_emit(f"正在安装 PyTorch CPU ({PINNED_TORCH_REQUIREMENT})...")
+                run_install_staging(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CPU_INDEX)
+                log_emit("正在恢复 Base Runtime Contract (transformers, accelerate, gliner)...")
                 run_install_staging(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
             elif profile == PROFILE_TORCH_CUDA:
-                log_emit(f"正在临时环境中安装 [{profile}] PyTorch CUDA (cu124) 轮子...")
-                run_install_staging("torch", "--index-url", PYTORCH_CUDA_INDEX)
+                log_emit(f"正在安装 PyTorch CUDA ({PINNED_TORCH_REQUIREMENT})...")
+                run_install_staging(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CUDA_INDEX)
+                log_emit("正在恢复 Base Runtime Contract (transformers, accelerate, gliner)...")
                 run_install_staging(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
 
             if aggregated_deps:
                 deps_list = sorted(aggregated_deps)
-                log_emit(f"正在临时环境中安装关联模型的专属依赖 ({len(deps_list)} 项): {', '.join(deps_list)}...")
+                log_emit(f"正在恢复已安装模型依赖 ({len(deps_list)} 项): {', '.join(deps_list)}...")
                 run_install_staging(*deps_list, "-i", PYPI_MIRROR_URL)
 
             # Validate staging interpreter native capabilities
@@ -925,6 +945,18 @@ def rebuild_runtime(
             if not caps_report.get("ok", False):
                 missing_caps = caps_report.get("missing", [])
                 raise RuntimeError(f"临时环境 Python 原生能力缺失: {', '.join(missing_caps)}")
+            log_emit("Python Capability Contract: PASS")
+
+            # Validate staging Base ML Contract
+            log_emit("正在验证临时环境 Base ML Contract...")
+            base_contract_report = probe_base_runtime_contract(staging_interp, runner=command_runner)
+            if not base_contract_report.get("base_packages_ready", False):
+                missing_base = base_contract_report.get("missing_base_packages", [])
+                violations = base_contract_report.get("base_contract_violations", [])
+                raise RuntimeError(f"临时环境 Base ML Contract 未满足: {', '.join(missing_base + violations)}")
+            staged_packages = dict(base_contract_report.get("packages", {}))
+            actual_torch_version = staged_packages.get("torch", PINNED_TORCH_VERSION)
+            log_emit(f"Base ML Contract: PASS (torch {actual_torch_version})")
 
             # Smoke test installed models using staging interpreter
             client = get_worker_client(data_dir)
@@ -951,44 +983,89 @@ def rebuild_runtime(
                 "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
                 "profile": profile,
                 "created_at": int(time.time()),
+                "uv": {
+                    "version": UV_VERSION,
+                    "source": uv_source,
+                },
+                "python": {
+                    "provider": "uv-managed",
+                    "version": MANAGED_PYTHON_VERSION,
+                    "executable": str(venv_dir / "bin" / "python"),
+                    "managed_python_path": str(managed_python),
+                },
                 "python_runtime_source": "managed",
                 "python_runtime_version": MANAGED_PYTHON_VERSION,
-                "python_interpreter": str(venv_dir / "bin" / "python"),
-                "managed_python_path": str(managed_python),
-                "capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                "packages": staged_packages,
+                "capabilities": list(PYTHON_CAPABILITY_CONTRACT),
                 "capabilities_verified_at": int(time.time()),
-                "framework_version": "2.6.0+cpu" if profile == PROFILE_TORCH_CPU else "2.6.0+cu124",
+                "framework_version": actual_torch_version,
+                "torch_version": actual_torch_version,
                 "cuda_available": profile == PROFILE_TORCH_CUDA,
             }
             (staging_venv / "runtime-manifest.json").write_text(
                 json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
-            # Atomic swap
+            # Transactional atomic swap
             old_backup = profile_dir / f"venv.old.{staging_id}"
-            if venv_dir.exists():
+            old_moved = False
+            new_promoted = False
+
+            try:
+                if venv_dir.exists():
+                    if old_backup.exists():
+                        shutil.rmtree(old_backup, ignore_errors=True)
+                    os.replace(venv_dir, old_backup)
+                    old_moved = True
+
+                os.replace(staging_venv, venv_dir)
+                new_promoted = True
+
+                (profile_dir / "runtime-manifest.json").write_text(
+                    json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                installed_meta = {
+                    "profile": profile,
+                    "installed_at": int(time.time()),
+                    "rebuilt_at": int(time.time()),
+                    "python_runtime_source": "uv-managed",
+                    "python_runtime_version": MANAGED_PYTHON_VERSION,
+                    "torch_version": actual_torch_version,
+                    "transformers_requirement": TRANSFORMERS_REQUIREMENT,
+                    "packages": staged_packages,
+                }
+                (profile_dir / "installed.json").write_text(
+                    json.dumps(installed_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+
+                # Final verification probe on promoted runtime
+                clear_dependency_probe_cache()
+                final_probe = rt_manager.probe_profile(profile, force_refresh=True)
+                if not final_probe.get("verified", False) or final_probe.get("runtime_rebuild_required", False):
+                    raise RuntimeError(
+                        f"最终验证探针未通过: {final_probe.get('error') or 'Promoted runtime not verified'}"
+                    )
+
+                # Only after new venv promoted, manifest written, metadata written, and final probe passed:
                 if old_backup.exists():
                     shutil.rmtree(old_backup, ignore_errors=True)
-                os.replace(venv_dir, old_backup)
-            os.replace(staging_venv, venv_dir)
 
-            (profile_dir / "runtime-manifest.json").write_text(
-                json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            installed_meta = {
-                "profile": profile,
-                "installed_at": int(time.time()),
-                "rebuilt_at": int(time.time()),
-                "python_runtime_source": "managed",
-                "python_runtime_version": MANAGED_PYTHON_VERSION,
-                "transformers_requirement": TRANSFORMERS_REQUIREMENT,
-            }
-            (profile_dir / "installed.json").write_text(
-                json.dumps(installed_meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            except Exception as swap_exc:
+                log_emit(f"运行时切换/验证发生异常: {swap_exc}，启动事务回滚...")
+                rb_err = None
+                try:
+                    if new_promoted and venv_dir.exists():
+                        shutil.rmtree(venv_dir, ignore_errors=True)
+                    if old_moved and old_backup.exists():
+                        os.replace(old_backup, venv_dir)
+                        log_emit(f"旧运行环境已成功恢复回原路径: {venv_dir}")
+                except Exception as rollback_exc:
+                    rb_err = f"CRITICAL RECOVERY ERROR: 运行环境回滚失败 ({rollback_exc})，旧环境备份保留在 {old_backup}"
+                    log_emit(f"严重错误: {rb_err}")
 
-            if old_backup.exists():
-                shutil.rmtree(old_backup, ignore_errors=True)
+                if rb_err:
+                    raise RuntimeError(f"{swap_exc} | {rb_err}") from swap_exc
+                raise swap_exc
 
             for mid in installed_models:
                 write_state(data_dir, "ready", f"环境重建完成，模型已就绪: {get_model_dir(data_dir, mid)}", mid)
@@ -1201,12 +1278,12 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
     run_install("modelscope", "numpy", "packaging", "tqdm", "-i", PYPI_MIRROR_URL)
 
     if profile == PROFILE_TORCH_CPU:
-        emit(f"正在安装 [{profile}] PyTorch CPU 官方轮子...")
-        run_install("torch", "--index-url", PYTORCH_CPU_INDEX)
+        emit(f"正在安装 [{profile}] PyTorch CPU ({PINNED_TORCH_REQUIREMENT})...")
+        run_install(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CPU_INDEX)
         run_install(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
     elif profile == PROFILE_TORCH_CUDA:
-        emit(f"正在安装 [{profile}] PyTorch CUDA (cu124) 官方轮子...")
-        run_install("torch", "--index-url", PYTORCH_CUDA_INDEX)
+        emit(f"正在安装 [{profile}] PyTorch CUDA (cu124) ({PINNED_TORCH_REQUIREMENT})...")
+        run_install(PINNED_TORCH_REQUIREMENT, "--index-url", PYTORCH_CUDA_INDEX)
         run_install(TRANSFORMERS_REQUIREMENT, "accelerate", "gliner", "-i", PYPI_MIRROR_URL)
 
     # Run genuine probe verification via isolated interpreter
@@ -1217,6 +1294,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         emit(f"错误: 运行时 [{profile}] 验证未通过: {err}")
         raise RuntimeError(f"隔离运行时 [{profile}] 验证未通过: {err}")
 
+    probed_torch = probe_result.get("torch_version") or probe_result.get("framework_version")
     manifest_data = {
         "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
         "profile": profile,
@@ -1225,9 +1303,11 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "python_runtime_version": MANAGED_PYTHON_VERSION if managed_python else sys.version.split()[0],
         "python_interpreter": str(interp),
         "managed_python_path": str(managed_python) if managed_python else None,
-        "capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+        "packages": probe_result.get("packages", {}),
+        "capabilities": list(PYTHON_CAPABILITY_CONTRACT),
         "capabilities_verified_at": int(time.time()),
-        "framework_version": probe_result.get("framework_version"),
+        "framework_version": probed_torch,
+        "torch_version": probed_torch,
         "cuda_available": probe_result.get("cuda_available", False),
     }
     (profile_dir / "runtime-manifest.json").write_text(
@@ -1238,6 +1318,8 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "profile": profile,
         "installed_at": int(time.time()),
         "probe": probe_result,
+        "torch_version": probed_torch,
+        "packages": probe_result.get("packages", {}),
         "transformers_requirement": TRANSFORMERS_REQUIREMENT,
     }
     installed_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -2,10 +2,17 @@
 
 面向飞牛 fnOS 的本地文本隐私闸门：先检测并把隐私字段替换为稳定占位符，再将脱敏文本交给外部 AI；AI 回复后，可在当前页面把原值精确放回。
 
-当前版本：`0.6.11`（fnOS Native 原生应用）
+当前版本：`0.6.12`（fnOS Native 原生应用）
 
 ## 已实现功能
 
+- **托管 Python 基础运行时收敛与内置 uv 供应链闭环 (v0.6.12)**：
+  - **内置官方 Astral musl uv 独立供应链**：彻底修复真实 fnOS 宿主机 PATH 无 `uv` 工具阻塞隔离环境创建与依赖修复的 P1 故障。FPK 安装包开箱内置官方 Astral 静态链接 musl ELF 二进制（`app/bin/linux-x86_64/uv` 与 `app/bin/linux-aarch64/uv`），经 SHA-256 强校验，实现 100% 离线、零网络、零宿主机 root 权限、零系统 PATH 依赖。
+  - **四阶段事务性原子切换与严格回滚保护**：运行时重建遵循 `old -> backup PASS, staging -> final FAIL`, `manifest write FAIL`, `final probe FAIL`, `rollback itself fails` 四重故障防御。在最终探针与清单完全验证通过前，旧环境备份绝对不被删除；若回滚本身遭遇异常，永久保留 `venv.old.<timestamp>`，绝不灭失用户环境。
+  - **Base ML Contract 8 项基础依赖健康探测与版本门禁**：目标运行环境在投入服务前必须通过 8 项基础 ML 依赖探测（`torch`, `modelscope`, `numpy`, `packaging`, `tqdm`, `transformers`, `accelerate`, `gliner`），并对 `transformers >=4.51,<5` 实施强制拦截约束。
+  - **PyTorch 2.6.0 精准锁定与真实版本落盘**：明确锁定 PyTorch 2.6.0，同时在 `runtime-manifest.json` 与状态 API 中如实记录探测所得真实依赖版本。
+  - **历史旧环境双重健康准入与无损接管**：仅当历史隔离环境同时通过 17 项 Python 原生能力契约与 Base ML Contract 时方执行无损升级接管，否则安全触发隔离重建。
+  - **零模型重载与零权重篡改契约**：修复与重建全流程零网络下载（0 bytes from ModelScope）、零模型权重修改。
 - **uv 托管 Python 基础运行时与两级环境修复架构 (v0.6.11)**：
   - **彻底脱离 fnOS 系统 Python 依赖**：使用 uv 托管全功能标准 CPython 3.12.9 作为隔离计算环境的底层解释器（安装存放于 `${DATA_DIR}/python/installations`，uv 缓存收口至 `${DATA_DIR}/cache/uv`），彻底解决宿主机系统 Python 缺少 `_lzma`, `_bz2`, `_ssl`, `_sqlite3` 等底层 C 扩展导致的运行环境兼容故障。
   - **17 项底层能力契约与健康探测**：定义并严格检验 17 项原生标准库模块能力（`_lzma`, `_bz2`, `_ssl`, `_sqlite3`, `ctypes`, `zlib`, `hashlib`, `json`, `multiprocessing`, `subprocess`, `venv`, `ensurepip` 等），能力探针在隔离子进程中执行，控制面零侵入。
@@ -183,7 +190,7 @@ uv run python scripts/benchmark.py
 ./scripts/build_fpk.sh
 ```
 
-构建产物位于 `dist/ai-privacy-check_0.6.11_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
+构建产物位于 `dist/ai-privacy-check_0.6.12_all.fpk`。安装包为纯净无架构绑定的原生包（`platform=all`），可安装于 x86_64 和 ARM64 fnOS。
 
 在 fnOS 应用中心选择“手动安装”，上传 `.fpk` 即可。安装时系统会自动关联官方 Python 3.12 运行时。
 

@@ -43,11 +43,18 @@ from privacy.device import DeviceManager, DEVICE_MANAGER
 from privacy.model_catalog import MODEL_CATALOG, get_model_descriptor
 from privacy.python_runtime import (
     MANAGED_PYTHON_VERSION,
+    PROBE_BASE_PACKAGES,
+    PYTHON_CAPABILITY_CONTRACT,
     REQUIRED_PYTHON_CAPABILITIES,
-    probe_python_capabilities,
+    UV_VERSION,
+    build_uv_env,
+    find_uv,
+    find_uv_info,
     get_python_installations_dir,
     get_uv_cache_dir,
-    build_uv_env,
+    probe_base_runtime_contract,
+    probe_python_capabilities,
+    verify_bundled_uv,
 )
 from privacy.runtime_manager import (
     RuntimeManager,
@@ -105,7 +112,7 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
 
         py_bin.write_text(
             '#!/bin/sh\n'
-            'echo \'{"python_runtime_ready": ' + str(is_ok).lower() + ', "python_runtime_source": "legacy", "python_runtime_version": "3.12.9", "missing_python_capabilities": ' + json.dumps(missing) + ', "framework_version": "2.6.0+cpu", "cuda_available": false}\'\n'
+            'echo \'{"ok": ' + str(is_ok).lower() + ', "version": "3.12.9", "base_prefix": "/usr", "capabilities": {}, "missing": ' + json.dumps(missing) + ', "python_runtime_ready": ' + str(is_ok).lower() + ', "python_runtime_source": "legacy", "python_runtime_version": "3.12.9", "missing_python_capabilities": ' + json.dumps(missing) + ', "base_packages_ready": ' + str(is_ok).lower() + ', "missing_base_packages": [], "base_contract_violations": [], "packages": {"torch": "2.6.0", "transformers": "4.51.0", "modelscope": "1.20.0", "gliner": "0.2.0"}, "framework_version": "2.6.0+cpu", "torch_version": "2.6.0+cpu", "cuda_available": false}\'\n'
         )
         py_bin.chmod(0o755)
 
@@ -126,9 +133,10 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
         (rt_dir / "runtime-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return py_bin
 
-    def _create_rebuild_runner(self, recorded_commands: List[List[str]] = None, pip_installs: List[List[str]] = None, fail_pip: bool = False):
+    def _create_rebuild_runner(self, recorded_commands: List[List[str]] = None, pip_installs: List[List[str]] = None, fail_pip: bool = False, cuda_available: bool = False):
         def runner(cmd, **kwargs):
             cmd_list = [str(c) for c in cmd]
+            is_cuda = cuda_available or any("torch-cuda" in c for c in cmd_list)
             if recorded_commands is not None:
                 recorded_commands.append(cmd_list)
             if "pip" in cmd_list and "install" in cmd_list:
@@ -137,19 +145,49 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
                 if fail_pip:
                     return 1, "", "Simulated network failure while downloading wheels"
                 return 0, "", ""
+            if len(cmd_list) >= 3 and cmd_list[1] == "python":
+                if "find" in cmd_list:
+                    py_path = self.data_dir / "python" / "installations" / "cpython-3.12.9-linux-x86_64" / "bin" / "python3"
+                    if py_path.is_file():
+                        return 0, str(py_path), ""
+                    return 1, "", "not found"
+                if "install" in cmd_list:
+                    py_dir = self.data_dir / "python" / "installations" / "cpython-3.12.9-linux-x86_64" / "bin"
+                    py_dir.mkdir(parents=True, exist_ok=True)
+                    py_bin = py_dir / "python3"
+                    py_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                    py_bin.chmod(0o755)
+                    return 0, "", ""
             if len(cmd_list) >= 2 and cmd_list[1] == "venv":
                 staging_path = Path(cmd_list[4])
                 s_bin = staging_path / "bin"
                 s_bin.mkdir(parents=True, exist_ok=True)
                 s_py = s_bin / "python"
+                s_cuda = "true" if (is_cuda or "torch-cuda" in str(staging_path)) else "false"
                 s_py.write_text(
                     '#!/bin/sh\n'
-                    'echo \'{"python_runtime_ready": true, "python_runtime_source": "uv-managed", "python_runtime_version": "3.12.9", "missing_python_capabilities": [], "framework_version": "2.6.0+cpu", "cuda_available": false}\'\n'
+                    f'echo \'{{"ok": true, "version": "3.12.9", "base_prefix": "/app/python/installations/cpython", "capabilities": {{}}, "missing": [], "python_runtime_ready": true, "python_runtime_source": "uv-managed", "python_runtime_version": "3.12.9", "missing_python_capabilities": [], "base_packages_ready": true, "missing_base_packages": [], "base_contract_violations": [], "packages": {{"torch": "2.6.0", "transformers": "4.51.0", "modelscope": "1.20.0", "gliner": "0.2.0"}}, "framework_version": "2.6.0", "torch_version": "2.6.0", "cuda_available": {s_cuda}}}\'\n'
                 )
                 s_py.chmod(0o755)
                 return 0, "", ""
             if "-c" in cmd_list:
                 code = cmd_list[cmd_list.index("-c") + 1]
+                if "BASE_PACKAGES" in code:
+                    return 0, json.dumps({
+                        "base_packages_ready": True,
+                        "missing_base_packages": [],
+                        "base_contract_violations": [],
+                        "packages": {
+                            "torch": "2.6.0",
+                            "transformers": "4.51.0",
+                            "modelscope": "1.20.0",
+                            "gliner": "0.2.0",
+                            "numpy": "1.26.4",
+                            "packaging": "24.2",
+                            "tqdm": "4.66.5",
+                            "accelerate": "0.34.2",
+                        },
+                    }), ""
                 if "CAPABILITIES" in code:
                     caps_dict = {cap: True for cap in REQUIRED_PYTHON_CAPABILITIES}
                     return 0, json.dumps({
@@ -165,9 +203,21 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
                         "python_runtime_source": "uv-managed",
                         "python_runtime_version": "3.12.9",
                         "missing_python_capabilities": [],
-                        "framework_version": "2.6.0+cpu",
-                        "cuda_available": False,
+                        "base_packages_ready": True,
+                        "missing_base_packages": [],
+                        "base_contract_violations": [],
+                        "packages": {
+                            "torch": "2.6.0",
+                            "transformers": "4.51.0",
+                            "modelscope": "1.20.0",
+                            "gliner": "0.2.0",
+                        },
+                        "framework_version": "2.6.0",
+                        "torch_version": "2.6.0",
+                        "cuda_available": is_cuda,
                     }), ""
+                if "DEPENDENCY_PROBE_MARKER" in code or "specs_json" in code or "metadata.version" in code:
+                    return 0, json.dumps({"ok": True, "missing": [], "error": None}), ""
             return 0, "", ""
         return runner
 
@@ -406,6 +456,307 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
         # Venv directory must exist and contain python
         final_py = rt_dir / "venv" / "bin" / "python"
         self.assertTrue(final_py.is_file())
+
+    # ==========================================
+    # v0.6.12 Mid-Swap Rollback & Readiness Tests
+    # ==========================================
+
+    def test_mid_swap_failure_case1_staging_to_final_fails_restores_old_runtime(self):
+        """Case 1: old -> backup PASS, staging -> final FAIL -> old runtime restored."""
+        self._create_mock_installed_model("siamese-uie")
+        old_py = self._create_mock_runtime_venv(profile=PROFILE_TORCH_CPU, schema_version=2)
+        rt_dir = self.data_dir / "runtimes" / PROFILE_TORCH_CPU
+        venv_dir = rt_dir / "venv"
+        marker = venv_dir / "old_runtime_sentinel.txt"
+        marker.write_text("old-runtime-sentinel-12345", encoding="utf-8")
+
+        runner = self._create_rebuild_runner()
+
+        orig_replace = os.replace
+        def broken_replace(src, dst):
+            # Fail when promoting staging venv to venv_dir
+            if "venv.rebuild-" in str(src) and str(dst) == str(venv_dir):
+                raise OSError("Disk write I/O error during promotion")
+            return orig_replace(src, dst)
+
+        with patch("model_installer.find_uv", return_value="/usr/bin/uv"):
+            with patch("model_installer.find_uv_info", return_value=("/usr/bin/uv", "bundled")):
+                with patch("model_installer.ensure_managed_python", return_value=Path("/mock/py")):
+                    with patch("privacy.worker_client.WorkerClient.run_smoke_test", return_value=(True, "ok")):
+                        with patch("os.replace", side_effect=broken_replace):
+                            ok, err = rebuild_runtime(self.data_dir, PROFILE_TORCH_CPU, command_runner=runner)
+
+        self.assertFalse(ok)
+        self.assertIn("Disk write I/O error during promotion", err)
+        # Old runtime must be fully restored!
+        self.assertTrue(venv_dir.is_dir())
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "old-runtime-sentinel-12345")
+
+    def test_mid_swap_failure_case2_manifest_write_fails_removes_broken_and_restores_old(self):
+        """Case 2: promote PASS, manifest write FAIL -> broken new runtime removed, old runtime restored."""
+        self._create_mock_installed_model("siamese-uie")
+        self._create_mock_runtime_venv(profile=PROFILE_TORCH_CPU, schema_version=2)
+        rt_dir = self.data_dir / "runtimes" / PROFILE_TORCH_CPU
+        venv_dir = rt_dir / "venv"
+        marker = venv_dir / "old_runtime_sentinel.txt"
+        marker.write_text("old-runtime-sentinel-54321", encoding="utf-8")
+
+        runner = self._create_rebuild_runner()
+
+        orig_write_text = Path.write_text
+        def broken_write_text(path_obj, *args, **kwargs):
+            if path_obj.name == "runtime-manifest.json":
+                raise IOError("Read-only filesystem error when writing manifest")
+            return orig_write_text(path_obj, *args, **kwargs)
+
+        with patch("model_installer.find_uv", return_value="/usr/bin/uv"):
+            with patch("model_installer.find_uv_info", return_value=("/usr/bin/uv", "bundled")):
+                with patch("model_installer.ensure_managed_python", return_value=Path("/mock/py")):
+                    with patch("privacy.worker_client.WorkerClient.run_smoke_test", return_value=(True, "ok")):
+                        with patch.object(Path, "write_text", broken_write_text):
+                            ok, err = rebuild_runtime(self.data_dir, PROFILE_TORCH_CPU, command_runner=runner)
+
+        self.assertFalse(ok)
+        self.assertIn("Read-only filesystem error", err)
+        # Old runtime restored
+        self.assertTrue(venv_dir.is_dir())
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "old-runtime-sentinel-54321")
+
+    def test_mid_swap_failure_case3_final_probe_fails_removes_broken_and_restores_old(self):
+        """Case 3: promote PASS, final probe FAIL -> broken new runtime removed, old runtime restored."""
+        self._create_mock_installed_model("siamese-uie")
+        self._create_mock_runtime_venv(profile=PROFILE_TORCH_CPU, schema_version=2)
+        rt_dir = self.data_dir / "runtimes" / PROFILE_TORCH_CPU
+        venv_dir = rt_dir / "venv"
+        marker = venv_dir / "old_runtime_sentinel.txt"
+        marker.write_text("old-runtime-sentinel-final-probe", encoding="utf-8")
+
+        runner = self._create_rebuild_runner()
+
+        rt_mgr = get_runtime_manager(self.data_dir)
+        def failing_final_probe(profile, force_refresh=False):
+            return {
+                "profile": profile,
+                "installed": True,
+                "verified": False,
+                "runtime_rebuild_required": True,
+                "error": "Promoted venv crashed on import check",
+            }
+
+        with patch("model_installer.find_uv", return_value="/usr/bin/uv"):
+            with patch("model_installer.find_uv_info", return_value=("/usr/bin/uv", "bundled")):
+                with patch("model_installer.ensure_managed_python", return_value=Path("/mock/py")):
+                    with patch("privacy.worker_client.WorkerClient.run_smoke_test", return_value=(True, "ok")):
+                        with patch.object(rt_mgr, "probe_profile", side_effect=failing_final_probe):
+                            ok, err = rebuild_runtime(self.data_dir, PROFILE_TORCH_CPU, command_runner=runner)
+
+        self.assertFalse(ok)
+        self.assertIn("Promoted venv crashed on import check", err)
+        # Old runtime restored
+        self.assertTrue(venv_dir.is_dir())
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "old-runtime-sentinel-final-probe")
+
+    def test_mid_swap_failure_case4_rollback_itself_fails_preserves_backup_and_reports_critical(self):
+        """Case 4: rollback itself fails -> preserve backup, raise critical recovery error, do NOT delete backup."""
+        self._create_mock_installed_model("siamese-uie")
+        self._create_mock_runtime_venv(profile=PROFILE_TORCH_CPU, schema_version=2)
+        rt_dir = self.data_dir / "runtimes" / PROFILE_TORCH_CPU
+        venv_dir = rt_dir / "venv"
+        marker = venv_dir / "old_runtime_sentinel.txt"
+        marker.write_text("old-runtime-critical-test", encoding="utf-8")
+
+        runner = self._create_rebuild_runner()
+
+        orig_replace = os.replace
+        def failing_rollback_replace(src, dst):
+            if "venv.old." in str(src) and str(dst) == str(venv_dir):
+                raise OSError("Permission denied on rollback rename")
+            return orig_replace(src, dst)
+
+        rt_mgr = get_runtime_manager(self.data_dir)
+        def failing_probe(profile, force_refresh=False):
+            return {"installed": True, "verified": False, "runtime_rebuild_required": True, "error": "Crash"}
+
+        with patch("model_installer.find_uv", return_value="/usr/bin/uv"):
+            with patch("model_installer.find_uv_info", return_value=("/usr/bin/uv", "bundled")):
+                with patch("model_installer.ensure_managed_python", return_value=Path("/mock/py")):
+                    with patch("privacy.worker_client.WorkerClient.run_smoke_test", return_value=(True, "ok")):
+                        with patch.object(rt_mgr, "probe_profile", side_effect=failing_probe):
+                            with patch("os.replace", side_effect=failing_rollback_replace):
+                                ok, err = rebuild_runtime(self.data_dir, PROFILE_TORCH_CPU, command_runner=runner)
+
+        self.assertFalse(ok)
+        self.assertIn("CRITICAL RECOVERY ERROR", err)
+        # Backup MUST be preserved and not deleted!
+        backups = list(rt_dir.glob("venv.old.*"))
+        self.assertTrue(len(backups) >= 1)
+        self.assertTrue((backups[0] / "old_runtime_sentinel.txt").is_file())
+
+    def test_base_ml_contract_transformers_version_violation(self):
+        """Transformers 5.x violates >=4.51,<5 constraint and flags base_packages_ready=False."""
+        def runner(cmd, **kwargs):
+            return 0, json.dumps({
+                "base_packages_ready": False,
+                "missing_base_packages": [],
+                "base_contract_violations": ["transformers==5.16.1 violates >=4.51,<5"],
+                "packages": {
+                    "torch": "2.6.0",
+                    "transformers": "5.16.1",
+                    "modelscope": "1.20.0",
+                    "gliner": "0.2.0",
+                    "numpy": "1.26.4",
+                    "packaging": "24.2",
+                    "tqdm": "4.66.5",
+                    "accelerate": "0.34.2",
+                },
+            }), ""
+
+        mock_py = self.data_dir / "mock_py"
+        mock_py.write_text("#!/bin/sh\n", encoding="utf-8")
+        mock_py.chmod(0o755)
+
+        res = probe_base_runtime_contract(mock_py, runner=runner)
+        self.assertFalse(res["base_packages_ready"])
+        self.assertIn("transformers==5.16.1 violates >=4.51,<5", res["base_contract_violations"])
+
+    def test_base_ml_contract_missing_modelscope(self):
+        """Missing modelscope flags base_packages_ready=False."""
+        def runner(cmd, **kwargs):
+            return 0, json.dumps({
+                "base_packages_ready": False,
+                "missing_base_packages": ["modelscope"],
+                "base_contract_violations": [],
+                "packages": {
+                    "torch": "2.6.0",
+                    "transformers": "4.51.0",
+                    "gliner": "0.2.0",
+                },
+            }), ""
+
+        mock_py = self.data_dir / "mock_py"
+        mock_py.write_text("#!/bin/sh\n", encoding="utf-8")
+        mock_py.chmod(0o755)
+
+        res = probe_base_runtime_contract(mock_py, runner=runner)
+        self.assertFalse(res["base_packages_ready"])
+        self.assertIn("modelscope", res["missing_base_packages"])
+
+    def test_bundled_uv_selected_when_system_path_has_no_uv(self):
+        """Bundled uv is prioritized and selected when system PATH contains no uv."""
+        fake_app_dir = self.data_dir / "fake_app"
+        bin_dir = fake_app_dir / "bin" / "linux-x86_64"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_uv = bin_dir / "uv"
+        fake_uv.write_text("#!/bin/sh\necho uv 0.12.13\n", encoding="utf-8")
+        fake_uv.chmod(0o755)
+
+        def runner(cmd, **kwargs):
+            return 0, f"uv {UV_VERSION} (bundled)\n", ""
+
+        uv_path, uv_source = find_uv_info(
+            app_dir=fake_app_dir,
+            runner=runner,
+            target_machine="x86_64",
+            target_platform="linux",
+        )
+        self.assertEqual(uv_source, "bundled")
+        self.assertEqual(Path(uv_path).resolve(), fake_uv.resolve())
+
+    def test_bundled_uv_corrupt_fails_clearly_and_does_not_mutate_runtime(self):
+        """Corrupt bundled uv raises RuntimeError on find_uv_info and prevents silent fallback."""
+        fake_app_dir = self.data_dir / "fake_app"
+        bin_dir = fake_app_dir / "bin" / "linux-x86_64"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_uv = bin_dir / "uv"
+        fake_uv.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake_uv.chmod(0o755)
+
+        def runner(cmd, **kwargs):
+            return 1, "", "Segmentation fault"
+
+        with self.assertRaises(RuntimeError) as ctx:
+            find_uv_info(
+                app_dir=fake_app_dir,
+                runner=runner,
+                target_machine="x86_64",
+                target_platform="linux",
+                strict_bundled_check=True,
+            )
+        self.assertIn("Bundled uv binary invalid", str(ctx.exception))
+
+    def test_architecture_mismatch_fails_clearly_before_mutation(self):
+        """Unsupported architecture raises RuntimeError before any runtime mutation."""
+        with self.assertRaises(RuntimeError) as ctx:
+            find_uv_info(
+                target_machine="riscv64",
+                target_platform="linux",
+            )
+        self.assertIn("Unsupported architecture", str(ctx.exception))
+
+    def test_real_fnos_scenario_regression(self):
+        """Exact reproduction of fnOS blocker:
+        - System PATH has NO uv
+        - Bundled uv exists in app/bin/linux-x86_64/uv
+        - Legacy torch-cuda has missing _lzma
+        - SiameseUIE and GLiNER are installed
+        - Repair triggers rebuild with bundled uv, restores all dependencies, 0 weight download.
+        """
+        self._create_mock_installed_model("siamese-uie")
+        self._create_mock_installed_model("gliner-pii-edge")
+        uie_weights = self.data_dir / "models" / "siamese-uie" / "pytorch_model.bin"
+        gliner_weights = self.data_dir / "models" / "gliner-pii-edge" / "model.safetensors"
+        uie_hash_before = _file_hash(uie_weights)
+        gliner_hash_before = _file_hash(gliner_weights)
+
+        # Create broken legacy torch-cuda venv missing _lzma
+        self._create_mock_runtime_venv(profile=PROFILE_TORCH_CUDA, schema_version=2, missing_caps=["_lzma"])
+
+        # Create bundled uv binary in app/bin
+        fake_app_dir = self.data_dir / "app"
+        bundled_uv_bin = fake_app_dir / "bin" / "linux-x86_64" / "uv"
+        bundled_uv_bin.parent.mkdir(parents=True, exist_ok=True)
+        bundled_uv_bin.write_text("#!/bin/sh\necho uv 0.12.13\n", encoding="utf-8")
+        bundled_uv_bin.chmod(0o755)
+
+        DEVICE_MANAGER.set_requested_device("cuda")
+
+        executed_commands: List[List[str]] = []
+        runner = self._create_rebuild_runner(recorded_commands=executed_commands)
+
+        with patch("shutil.which", return_value=None):  # System PATH has NO uv!
+            with patch("platform.machine", return_value="x86_64"):
+                with patch("sys.platform", "linux"):
+                    with patch("privacy.python_runtime.verify_bundled_uv", return_value=(True, None)):
+                        with patch.object(DEVICE_MANAGER._hw_probe, "probe_nvidia", return_value={"nvidia_available": True}):
+                            with patch("privacy.worker_client.WorkerClient.run_smoke_test", return_value=(True, "ok")):
+                                # Execute repair
+                                ok, msg = repair_model_runtime(self.data_dir, "siamese-uie", command_runner=runner)
+
+        self.assertTrue(ok)
+        self.assertIn("运行环境修复完成", msg)
+
+        # Check weights are completely untouched
+        self.assertEqual(_file_hash(uie_weights), uie_hash_before)
+        self.assertEqual(_file_hash(gliner_weights), gliner_hash_before)
+
+        # Check manifest schema v3 was created
+        manifest_path = self.data_dir / "runtimes" / PROFILE_TORCH_CUDA / "runtime-manifest.json"
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["profile"], PROFILE_TORCH_CUDA)
+
+        # Detector status must be model_ready = True
+        with patch.object(DEVICE_MANAGER._hw_probe, "probe_nvidia", return_value={"nvidia_available": True}):
+            det = ChineseIEDetector(self.data_dir)
+            st = det.status()
+            self.assertTrue(st["model_ready"])
+            self.assertTrue(st["python_runtime_ready"])
+            self.assertFalse(st["runtime_rebuild_required"])
+            self.assertTrue(st["base_packages_ready"])
 
 
 if __name__ == "__main__":

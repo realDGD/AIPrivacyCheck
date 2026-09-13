@@ -23,8 +23,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .python_runtime import (
     MANAGED_PYTHON_VERSION,
+    PROBE_BASE_PACKAGES,
+    PYTHON_CAPABILITY_CONTRACT,
     REQUIRED_PYTHON_CAPABILITIES,
     RUNTIME_MANIFEST_SCHEMA_VERSION,
+    probe_base_runtime_contract,
     probe_python_capabilities,
 )
 
@@ -153,7 +156,11 @@ class RuntimeManager:
         return self.profile_dir(profile) / "runtime-manifest.json"
 
     def adopt_legacy_runtime(self, profile: str) -> bool:
-        """Adopts an existing healthy legacy virtual environment into schema v3."""
+        """Adopts an existing healthy legacy virtual environment into schema v3.
+
+        Only healthy legacy runtimes passing both Python Capability Contract and
+        Base Runtime Contract are permitted to be adopted.
+        """
         interp = self.interpreter_path(profile)
         if not interp:
             return False
@@ -163,7 +170,11 @@ class RuntimeManager:
         py_cap = probe_python_capabilities(interp, runner=self._runner)
         if not py_cap.get("ok"):
             return False
+        base_probe = probe_base_runtime_contract(interp, runner=self._runner)
+        if not base_probe.get("base_packages_ready"):
+            return False
         try:
+            packages = base_probe.get("packages", {})
             manifest = {
                 "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
                 "profile": profile,
@@ -173,8 +184,11 @@ class RuntimeManager:
                     "executable": str(interp),
                     "capabilities_verified": True,
                 },
-                "base_contract_version": 2,
-                "created_by": "AIPrivacyCheck/0.6.11",
+                "packages": packages,
+                "framework_version": packages.get("torch"),
+                "torch_version": packages.get("torch"),
+                "base_contract_verified": True,
+                "created_by": "AIPrivacyCheck/0.6.12",
                 "created_at": int(time.time()),
             }
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -204,6 +218,7 @@ class RuntimeManager:
                 "verified": False,
                 "cuda_available": False,
                 "framework_version": None,
+                "torch_version": None,
                 "cuda_version": None,
                 "device_name": None,
                 "device_count": 0,
@@ -214,6 +229,9 @@ class RuntimeManager:
                 "missing_python_capabilities": [],
                 "runtime_rebuild_required": False,
                 "base_packages_ready": False,
+                "missing_base_packages": list(PROBE_BASE_PACKAGES),
+                "base_contract_violations": [],
+                "packages": {},
                 "error": "运行时未安装",
             }
             with self._lock:
@@ -222,10 +240,13 @@ class RuntimeManager:
             return status
 
         # Unified single-subprocess probe: verifies stdlib/native Python capabilities first,
-        # then framework (torch/cuda).
+        # then framework (torch/cuda), and checks Base ML Contract package presence/versions.
+        caps_tuple = repr(list(PYTHON_CAPABILITY_CONTRACT))
+        base_pkgs_tuple = repr(list(PROBE_BASE_PACKAGES))
         probe_code = (
             "import json, sys\n"
-            "cap_names = ['lzma', '_lzma', 'bz2', '_bz2', 'ssl', '_ssl', 'sqlite3', '_sqlite3', 'ctypes', '_ctypes', 'zlib', 'hashlib', 'json', 'multiprocessing', 'subprocess', 'venv', 'ensurepip']\n"
+            f"cap_names = {caps_tuple}\n"
+            f"base_pkgs = {base_pkgs_tuple}\n"
             "missing_caps = []\n"
             "for m in cap_names:\n"
             "    try: __import__(m)\n"
@@ -238,8 +259,36 @@ class RuntimeManager:
             "  'python_runtime_source': py_source,\n"
             "  'python_runtime_version': '.'.join(map(str, sys.version_info[:3])),\n"
             "  'missing_python_capabilities': missing_caps,\n"
+            "  'base_packages_ready': False,\n"
+            "  'missing_base_packages': list(base_pkgs),\n"
+            "  'base_contract_violations': [],\n"
+            "  'packages': {},\n"
             "}\n"
             "if py_ok:\n"
+            "    pkgs = {}\n"
+            "    missing_base = []\n"
+            "    for p in base_pkgs:\n"
+            "        try:\n"
+            "            mod = __import__(p)\n"
+            "            pkgs[p] = getattr(mod, '__version__', 'unknown')\n"
+            "        except Exception:\n"
+            "            missing_base.append(p)\n"
+            "    violations = []\n"
+            "    if 'transformers' in pkgs and pkgs['transformers'] != 'unknown':\n"
+            "        tf_v = pkgs['transformers']\n"
+            "        try:\n"
+            "            from packaging.version import parse as v_p\n"
+            "            pv = v_p(tf_v)\n"
+            "            if pv < v_p('4.51') or pv >= v_p('5.0'):\n"
+            "                violations.append(f'transformers=={tf_v} violates >=4.51,<5')\n"
+            "        except Exception:\n"
+            "            parts = [int(x) for x in tf_v.split('.')[:2] if x.isdigit()]\n"
+            "            if len(parts) >= 2 and ((parts[0], parts[1]) < (4, 51) or parts[0] >= 5):\n"
+            "                violations.append(f'transformers=={tf_v} violates >=4.51,<5')\n"
+            "    res['packages'] = pkgs\n"
+            "    res['missing_base_packages'] = missing_base\n"
+            "    res['base_contract_violations'] = violations\n"
+            "    res['base_packages_ready'] = (len(missing_base) == 0 and len(violations) == 0)\n"
             "    try:\n"
             "        import torch\n"
             "        is_cuda = bool(torch.cuda.is_available())\n"
@@ -268,6 +317,7 @@ class RuntimeManager:
                 "verified": False,
                 "cuda_available": False,
                 "framework_version": None,
+                "torch_version": None,
                 "cuda_version": None,
                 "device_name": None,
                 "device_count": 0,
@@ -275,9 +325,12 @@ class RuntimeManager:
                 "python_runtime_ready": False,
                 "python_runtime_source": "unknown",
                 "python_runtime_version": None,
-                "missing_python_capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                "missing_python_capabilities": list(PYTHON_CAPABILITY_CONTRACT),
                 "runtime_rebuild_required": True,
                 "base_packages_ready": False,
+                "missing_base_packages": list(PROBE_BASE_PACKAGES),
+                "base_contract_violations": [],
+                "packages": {},
                 "error": f"运行时验证失败: {err_msg}",
             }
         else:
@@ -287,6 +340,18 @@ class RuntimeManager:
                 py_source = str(data.get("python_runtime_source", "uv-managed"))
                 py_ver = data.get("python_runtime_version")
                 missing_caps = list(data.get("missing_python_capabilities", []))
+                if "base_packages_ready" in data:
+                    base_pkgs_ready = bool(data.get("base_packages_ready", False))
+                    missing_base_pkgs = list(data.get("missing_base_packages", []))
+                    base_contract_violations = list(data.get("base_contract_violations", []))
+                else:
+                    base_pkgs_ready = (data.get("framework_version") is not None)
+                    missing_base_pkgs = []
+                    base_contract_violations = []
+                packages = dict(data.get("packages", {}))
+                fw_version = data.get("framework_version") or packages.get("torch")
+                if fw_version and "torch" not in packages:
+                    packages["torch"] = fw_version
 
                 manifest_path = self.manifest_file(profile)
                 if manifest_path.is_file():
@@ -296,11 +361,11 @@ class RuntimeManager:
                     except Exception:
                         rebuild_required = not py_ready
                 else:
-                    if py_ready:
+                    if py_ready and base_pkgs_ready:
                         self.adopt_legacy_runtime(profile)
                         rebuild_required = False
                     else:
-                        rebuild_required = True
+                        rebuild_required = not py_ready
 
                 if not py_ready:
                     status = {
@@ -312,6 +377,7 @@ class RuntimeManager:
                         "verified": False,
                         "cuda_available": False,
                         "framework_version": None,
+                        "torch_version": None,
                         "cuda_version": None,
                         "device_name": None,
                         "device_count": 0,
@@ -322,18 +388,27 @@ class RuntimeManager:
                         "missing_python_capabilities": missing_caps,
                         "runtime_rebuild_required": True,
                         "base_packages_ready": False,
+                        "missing_base_packages": missing_base_pkgs,
+                        "base_contract_violations": base_contract_violations,
+                        "packages": packages,
                         "error": f"Python 原生能力缺失: {', '.join(missing_caps)}",
                     }
                 else:
                     cuda_avail = bool(data.get("cuda_available", False))
-                    fw_version = data.get("framework_version")
-                    base_pkgs_ready = fw_version is not None
                     if descriptor.device_target == "cuda":
-                        fw_verified = cuda_avail
-                        err = None if cuda_avail else "框架已安装，但未检测到可用 CUDA 驱动与硬件。"
+                        fw_verified = cuda_avail and base_pkgs_ready
+                        if not cuda_avail:
+                            err = "框架已安装，但未检测到可用 CUDA 驱动与硬件。"
+                        elif not base_pkgs_ready:
+                            err = f"基础 ML 契约未满足: {', '.join(missing_base_pkgs + base_contract_violations)}"
+                        else:
+                            err = None
                     else:
                         fw_verified = base_pkgs_ready
-                        err = None if base_pkgs_ready else data.get("torch_error", "PyTorch 基础框架未就绪")
+                        if not base_pkgs_ready:
+                            err = f"基础 ML 契约未满足: {', '.join(missing_base_pkgs + base_contract_violations)}"
+                        else:
+                            err = None
 
                     verified = fw_verified and not rebuild_required
                     status = {
@@ -345,6 +420,7 @@ class RuntimeManager:
                         "verified": verified,
                         "cuda_available": cuda_avail,
                         "framework_version": fw_version,
+                        "torch_version": fw_version,
                         "cuda_version": data.get("cuda_version"),
                         "device_name": data.get("device_name"),
                         "device_count": data.get("device_count", 0),
@@ -355,6 +431,9 @@ class RuntimeManager:
                         "missing_python_capabilities": [],
                         "runtime_rebuild_required": rebuild_required,
                         "base_packages_ready": base_pkgs_ready,
+                        "missing_base_packages": missing_base_pkgs,
+                        "base_contract_violations": base_contract_violations,
+                        "packages": packages,
                         "error": err,
                     }
 
@@ -373,8 +452,11 @@ class RuntimeManager:
                                     "profile": profile,
                                     "python_runtime_source": py_source,
                                     "python_runtime_version": py_ver,
-                                    "capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                                    "capabilities": list(PYTHON_CAPABILITY_CONTRACT),
                                     "capabilities_verified_at": int(time.time()),
+                                    "packages": packages,
+                                    "framework_version": fw_version,
+                                    "torch_version": fw_version,
                                     "adopted_at": int(time.time()),
                                 })
                                 manifest_file.write_text(
@@ -392,6 +474,7 @@ class RuntimeManager:
                     "verified": False,
                     "cuda_available": False,
                     "framework_version": None,
+                    "torch_version": None,
                     "cuda_version": None,
                     "device_name": None,
                     "device_count": 0,
@@ -399,9 +482,12 @@ class RuntimeManager:
                     "python_runtime_ready": False,
                     "python_runtime_source": "unknown",
                     "python_runtime_version": None,
-                    "missing_python_capabilities": list(REQUIRED_PYTHON_CAPABILITIES),
+                    "missing_python_capabilities": list(PYTHON_CAPABILITY_CONTRACT),
                     "runtime_rebuild_required": True,
                     "base_packages_ready": False,
+                    "missing_base_packages": list(PROBE_BASE_PACKAGES),
+                    "base_contract_violations": [],
+                    "packages": {},
                     "error": f"无法解析验证输出: {parse_exc}",
                 }
 
