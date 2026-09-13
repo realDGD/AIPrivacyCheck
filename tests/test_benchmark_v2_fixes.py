@@ -1,4 +1,4 @@
-"""Regression and unit tests for Benchmark v2 scoring and stability fixes (v0.6.7).
+"""Regression and unit tests for Benchmark v2 scoring and stability fixes (v0.6.7/v0.6.8).
 
 Covers:
 1. Semantic negative scoring: sensitive=false golds scored as overreach/FP only, TP unchanged.
