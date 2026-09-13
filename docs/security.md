@@ -1,4 +1,4 @@
-# 安全说明 (v0.6.6)
+# 安全说明 (v0.6.7)
 
 ## 不保存的数据
 
@@ -43,6 +43,58 @@
 - **基准语料与凭证卫生 (v0.6.5)**：100 文档冻结语料中的全部凭证均为合成值（明显样例结构或运行时拼接），不包含任何真实秘密；vault-engine 评测仅在隔离目录中以库方式运行，禁用云端 provider。
 - **模型精简按需下载与传输安全 (v0.6.6)**：严禁无限制全量拉取 ModelScope 社区仓库快照，仅由 `selective_downloader` 静态白名单枚举并单文件流式校验下载 PyTorch 必需文件，杜绝不可信仓库引入非必需可执行资产；自动过滤 ONNX 冗余文件与文档，减少 60%+ 网络流量暴露。
 - **资源耗尽保护**：单次处理正文限制为 2 MB，文本字符上限为 500,000 字符；模型推理采用进程级互斥锁保证串行，防止显存或内存击穿。
+
+## 凭据卫生与 GitHub Secret Scanning 处置指引 (v0.6.7)
+
+### 静态代码与测试凭据卫生策略
+
+- **纯合成凭据契约**：本仓库静态源码、配置文件与评测测试集严禁包含任何真实生产凭据。所有测试用凭据均为纯合成样例（synthetic test credentials），从未与任何实际云厂商服务账户绑定。
+- **防止扫描误报的模式碎片化 (Fragment Assembly)**：为防止 GitHub Secret Scanning 合作伙伴引擎将完整格式的合成测试向量误报为活跃凭据，测试套件中所有符合真实服务商格式的测试向量（如 Alibaba Cloud AccessKey ID/Secret、Google API Key、GitHub PAT、Slack Token）均采用运行时动态拼接（例如 `"ghp_" + "..."`、`"AIza" + "..."`）或通用合成命名（例如 `SYNTH_ACCESS_KEY_089_SAMPLE`），确保 Git blob 中不存储完整的活跃凭据形态。
+- **仓库级静态凭据门禁**：通过 `tests/test_secret_hygiene.py` 实施持续静态检查，杜绝完整第三方格式凭据回归进入静态源码或测试夹具。
+
+### 历史 GitHub Secret Scanning 告警处置建议
+
+针对历史提交曾触发的告警，处置人员请在 GitHub Security -> Secret scanning 界面进行人工审查关闭，无需且禁止执行凭据轮换（因为均为虚构字符串）：
+
+1. **Alibaba Cloud AccessKey ID**（历史提交 `45f865a9`，`tests/test_credential_rules.py`）
+   - **性质**：用于验证 LTAI 前缀及长度校验的纯合成测试向量，无真实阿里云账号关联。
+   - **当前 HEAD 状态**：已重构为运行时字符串拼接（`"LTAI" + "..."`），当前主分支已无完整字面量。
+   - **处置操作**：点击 **Close as** -> 选择 **"Used in tests"**（若无此选项则选 **"False positive"**）。
+   - **处置备注模板**：
+     ```text
+     Synthetic test credential generated solely to validate secret detection.
+     Never issued by or used with a real cloud account.
+     Current HEAD no longer stores the complete credential literal.
+     ```
+
+2. **Google API Key**（历史提交 `622aac94`，`tests/test_builtin_hardening.py`）
+   - **性质**：用于验证 AIza 前缀与 35-38 位规则的纯合成测试向量，无对应 Google Cloud 账户。
+   - **当前 HEAD 状态**：已重构为运行时字符串拼接（`"AIza" + "..."`），当前主分支已无完整字面量。
+   - **处置操作**：点击 **Close as** -> 选择 **"Used in tests"**（若无此选项则选 **"False positive"**）。
+   - **处置备注模板**：
+     ```text
+     Synthetic test credential generated solely to validate secret detection.
+     Never issued by or used with a real cloud account.
+     Current HEAD no longer stores the complete credential literal.
+     ```
+
+3. **Alibaba Cloud AccessKey Secret**（历史/原基线 `tests/fixtures/privacy_benchmark_v2_100.jsonl` 中的 `case_089`）
+   - **性质**：原测试用例包含形如 `OSS_SECRET=SampleOnly...` 的合成样例，被扫描器判定为疑似阿里云访问凭据。
+   - **当前 HEAD 状态**：在 v0.6.7 中已彻底净化，替换为通用合成命名 `ACCESS_KEY=SYNTH_ACCESS_KEY_089_SAMPLE` 与 `SECRET=SYNTH_SECRET_KEY_089_SAMPLE001`，同时保持内置规则能精准识别为 `SECRET`。
+   - **处置操作**：点击 **Close as** -> 选择 **"Used in tests"**（若无此选项则选 **"False positive"**）。
+   - **处置备注模板**：
+     ```text
+     Synthetic test credential generated solely to validate secret detection.
+     Never issued by or used with a real cloud account.
+     Current HEAD no longer stores the complete credential literal.
+     ```
+
+### 为什么禁止重写 Git 历史
+
+本项目明确**禁止**采用 `git filter-repo` 或 `BFG Repo-Cleaner` 强行重写 Git 提交历史并 force push：
+1. 上述告警经审查已确认为纯合成测试代码，从未存在真实私钥或凭据泄露风险；
+2. 历史提交 SHA-1 是 Benchmark 基准、技术架构文档以及对外版本发行的可审计性锚点，强行重写历史将破坏所有存量报告的溯源链条；
+3. 在 GitHub 官方安全面板中正规标记为 `Used in tests` / `False positive` 是开源安全标准治理流程。
 
 ## 已知限制与使用建议
 
