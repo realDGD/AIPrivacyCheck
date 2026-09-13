@@ -58,20 +58,22 @@ class PrivacyService:
 
         started = time.perf_counter()
 
-        # Determine enabled slots: built_in and chinese_ie are on by default
+        # Determine enabled slots: built_in and chinese_ie are always included
         active_slots = [SLOT_BUILT_IN, SLOT_CHINESE_IE]
         if slots is not None:
-            active_slots = list(set(slots).union({SLOT_BUILT_IN}))
+            active_slots = list(set(slots).union({SLOT_BUILT_IN, SLOT_CHINESE_IE}))
         elif use_model:
-            # If use_model=True without specific slots, enable general_pii and semantic_privacy
-            active_slots.extend([SLOT_GENERAL_PII, SLOT_SEMANTIC_PRIVACY])
+            # Legacy use_model=True without explicit slots only enables general_pii (GLiNER).
+            # MemPrivacy requires explicit opt-in via slots.
+            active_slots.append(SLOT_GENERAL_PII)
 
         # All detectors run sequentially on the ORIGINAL raw text.
         # Rules run first, models read original text (never mask before model inference).
         entities, engines, warnings = self.registry.detect(text, enabled_slots=active_slots)
 
         # Check if optional models were requested but unready
-        if use_model and not any(e in engines for e in ("gliner_pii", "memprivacy")):
+        optional_requested = (SLOT_GENERAL_PII in active_slots) or (SLOT_SEMANTIC_PRIVACY in active_slots)
+        if optional_requested and not any(e in engines for e in ("gliner_pii", "memprivacy")):
             # Emit graceful status notice
             gliner_status = self.registry.get("gliner_pii").status() if self.registry.get("gliner_pii") else {}
             memprivacy_status = self.registry.get("memprivacy").status() if self.registry.get("memprivacy") else {}

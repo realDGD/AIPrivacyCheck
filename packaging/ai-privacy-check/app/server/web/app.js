@@ -39,9 +39,13 @@ const elements = {
   sourceCounter: $("sourceCounter"),
   detectButton: $("detectButton"),
   useModelToggle: $("useModelToggle"),
+  glinerToggle: $("glinerToggle"),
+  memprivacyToggle: $("memprivacyToggle"),
   policySelect: $("policySelect"),
   slotListContainer: $("slotListContainer"),
   modelInlineStatus: $("modelInlineStatus") || $("modelToggleLabel"),
+  glinerInlineStatus: $("glinerInlineStatus"),
+  memprivacyInlineStatus: $("memprivacyInlineStatus"),
   entityList: $("entityList") || $("entityTableBody"),
   entityEmpty: $("entityEmpty") || { hidden: false },
   entityCount: $("entityCount") || $("entityCountTag"),
@@ -1033,11 +1037,22 @@ async function detect() {
   showNotice([]);
   try {
     const policyLevel = elements.policySelect ? elements.policySelect.value : "PL2";
+    const enabledSlots = ["built_in", "chinese_ie"];
+    if (elements.glinerToggle && elements.glinerToggle.checked) {
+      enabledSlots.push("general_pii");
+    }
+    if (elements.memprivacyToggle && elements.memprivacyToggle.checked) {
+      enabledSlots.push("semantic_privacy");
+    }
+    const hasOptionalModel = enabledSlots.includes("general_pii") || enabledSlots.includes("semantic_privacy");
+    const legacyUseModel = elements.useModelToggle ? elements.useModelToggle.checked : hasOptionalModel;
+
     const result = await api("/api/detect", {
       method: "POST",
       body: JSON.stringify({
         text,
-        use_model: elements.useModelToggle ? elements.useModelToggle.checked : false,
+        slots: enabledSlots,
+        use_model: legacyUseModel,
         policy_level: policyLevel,
       }),
     });
@@ -1280,6 +1295,56 @@ function updateModelUI(data) {
   const glinerReady = Boolean(glinerSlot.detector && glinerSlot.detector.ready);
   const memReady = Boolean(memSlot.detector && memSlot.detector.ready);
   const anyModelReady = glinerReady || memReady;
+
+  if (elements.glinerToggle) {
+    elements.glinerToggle.disabled = !glinerReady;
+    if (!glinerReady) {
+      elements.glinerToggle.checked = false;
+    } else {
+      try {
+        const storedGliner = localStorage.getItem("aipc_gliner_enabled");
+        elements.glinerToggle.checked = storedGliner !== "false";
+      } catch (e) {
+        elements.glinerToggle.checked = true;
+      }
+    }
+  }
+  if (elements.glinerInlineStatus) {
+    if (data.installing) {
+      elements.glinerInlineStatus.textContent = "安装中…";
+    } else if (glinerReady) {
+      elements.glinerInlineStatus.textContent = "就绪";
+    } else if (glinerInstalled) {
+      elements.glinerInlineStatus.textContent = glinerSlot.detector && glinerSlot.detector.repairable ? "待修复" : "环境未就绪";
+    } else {
+      elements.glinerInlineStatus.textContent = "未安装";
+    }
+  }
+
+  if (elements.memprivacyToggle) {
+    elements.memprivacyToggle.disabled = !memReady;
+    if (!memReady) {
+      elements.memprivacyToggle.checked = false;
+    } else {
+      try {
+        const storedMem = localStorage.getItem("aipc_memprivacy_enabled");
+        elements.memprivacyToggle.checked = storedMem === "true";
+      } catch (e) {
+        elements.memprivacyToggle.checked = false;
+      }
+    }
+  }
+  if (elements.memprivacyInlineStatus) {
+    if (data.installing) {
+      elements.memprivacyInlineStatus.textContent = "安装中…";
+    } else if (memReady) {
+      elements.memprivacyInlineStatus.textContent = "就绪 (1.7B)";
+    } else if (memInstalled) {
+      elements.memprivacyInlineStatus.textContent = memSlot.detector && memSlot.detector.repairable ? "待修复" : "环境未就绪";
+    } else {
+      elements.memprivacyInlineStatus.textContent = "未安装";
+    }
+  }
 
   if (elements.useModelToggle) {
     elements.useModelToggle.disabled = !anyModelReady;
@@ -1876,6 +1941,41 @@ window.addEventListener("scroll", () => {
     hideSelectionPopover(true);
   }
 }, { passive: true });
+
+if (elements.glinerToggle) {
+  try {
+    const storedGliner = localStorage.getItem("aipc_gliner_enabled");
+    elements.glinerToggle.checked = storedGliner !== "false";
+  } catch (e) {
+    elements.glinerToggle.checked = true;
+  }
+  elements.glinerToggle.addEventListener("change", () => {
+    try {
+      localStorage.setItem("aipc_gliner_enabled", elements.glinerToggle.checked ? "true" : "false");
+    } catch (e) {}
+  });
+}
+
+if (elements.memprivacyToggle) {
+  try {
+    const storedMem = localStorage.getItem("aipc_memprivacy_enabled");
+    elements.memprivacyToggle.checked = storedMem === "true";
+  } catch (e) {
+    elements.memprivacyToggle.checked = false;
+  }
+  elements.memprivacyToggle.addEventListener("change", () => {
+    if (elements.memprivacyToggle.checked) {
+      const confirmed = window.confirm("启用 MemPrivacy 1.7B 深度语义隐私检测模型需要较多系统内存与算力资源。在资源受限设备上可能增加推理耗时。\n\n确定要启用吗？");
+      if (!confirmed) {
+        elements.memprivacyToggle.checked = false;
+        return;
+      }
+    }
+    try {
+      localStorage.setItem("aipc_memprivacy_enabled", elements.memprivacyToggle.checked ? "true" : "false");
+    } catch (e) {}
+  });
+}
 
 renderEntities();
 renderRedactedPreview();

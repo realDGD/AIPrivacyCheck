@@ -57,10 +57,15 @@
               <textarea id="sourceText" spellcheck="false" placeholder="例如：联系人张三，手机号 13800138000，邮箱 zhangsan@example.com……"></textarea>
               <div class="engine-row" style="display:flex; gap:16px; align-items:center; justify-content:space-between; flex-wrap:wrap;">
                 <div style="display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
-                  <label class="switch-label" for="useModelToggle">
-                    <input id="useModelToggle" type="checkbox" />
+                  <label class="switch-label" for="glinerToggle">
+                    <input id="glinerToggle" type="checkbox" />
                     <span class="switch" aria-hidden="true"></span>
-                    <span><strong>模型增强检测</strong><small id="modelInlineStatus">正在检查模型状态…</small></span>
+                    <span><strong>GLiNER 通用 PII</strong><small id="glinerInlineStatus">检查中…</small></span>
+                  </label>
+                  <label class="switch-label" for="memprivacyToggle">
+                    <input id="memprivacyToggle" type="checkbox" />
+                    <span class="switch" aria-hidden="true"></span>
+                    <span><strong>MemPrivacy 语义</strong><small id="memprivacyInlineStatus">检查中…</small></span>
                   </label>
                   <label style="display:flex; align-items:center; gap:6px; font-size:12px; font-weight:600; color:var(--text);">
                     脱敏策略:
