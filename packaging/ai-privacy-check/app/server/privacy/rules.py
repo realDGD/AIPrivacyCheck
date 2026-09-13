@@ -371,8 +371,8 @@ def _is_valid_password_value(val: str) -> bool:
         return False
     if any(p in val for p in ["${", "{{", "os.environ", "environ[", "env[", "process.env", "⟦", "⟧"]):
         return False
-    # Masked or hidden tokens
-    if "*" in val or "•" in val:
+    # Masked or hidden tokens: reject pure masks or strings dominated by masks
+    if re.fullmatch(r"[*•\s]+", val) or (val.count("*") + val.count("•")) >= len(val) * 0.7:
         return False
     if any(h in val for h in ["已隐藏", "未设置", "REDACTED", "placeholder", "example", "from prompt", "见保险箱", "dummy"]):
         return False
@@ -608,12 +608,12 @@ CONTEXT_RULES = (
         _compile(
             r"(?:出生日期|出生年月|生日)\s*(?:[：:=]|为|是)?\s*"
             r"((?:19|20)\d{2}(?:"
-            r"年(?:1[0-2]|0?[1-9])月(?:3[01]|[12]\d|0?[1-9])[日号]?"
-            r"|年(?:1[0-2]|0?[1-9])月?"
-            r"|-(?:1[0-2]|0?[1-9])-(?:3[01]|[12]\d|0?[1-9])"
-            r"|/(?:1[0-2]|0?[1-9])/(?:3[01]|[12]\d|0?[1-9])"
-            r"|\.(?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])"
-            r"|[-/.](?:1[0-2]|0?[1-9])"
+            r"年(?:1[0-2]|0?[1-9])月(?:3[01]|[12]\d|0?[1-9])[日号]?(?!\d)"
+            r"|年(?:1[0-2]|0?[1-9])月(?!\d|[日号])"
+            r"|-(?:1[0-2]|0?[1-9])-(?:3[01]|[12]\d|0?[1-9])(?!\d)"
+            r"|/(?:1[0-2]|0?[1-9])/(?:3[01]|[12]\d|0?[1-9])(?!\d)"
+            r"|\.(?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])(?!\d)"
+            r"|[-/.](?:1[0-2]|0?[1-9])(?![-/.\d])"
             r"))"
         ),
         0.95,
@@ -777,7 +777,7 @@ MULTILINGUAL_ADDRESS_PATTERNS = (
 MULTILINGUAL_DATE_PATTERNS = (
     _compile(
         r"(?:出生日期|出生年月|生日|生年月日|생년월일)\s*(?:[：:=]|为|是|は|는|은)?\s*"
-        r"((?:19|20)\d{2}\s*(?:年|년|[-/.])\s*\d{1,2}\s*(?:月|월|[-/.])\s*\d{1,2}\s*(?:日|일)?)"
+        r"((?:19|20)\d{2}\s*(?:年|년|[-/.])\s*(?:1[0-2]|0?[1-9])\s*(?:月|월|[-/.])\s*(?:3[01]|[12]\d|0?[1-9])\s*(?:日|일)?(?!\d))"
     ),
     _compile(r"(?:My\s+date\s+of\s+birth\s+is|date\s+of\s+birth\s+is)\s*([^\W\d_]{3,20}\s+\d{1,2},\s*(?:19|20)\d{2})", re.IGNORECASE),
     _compile(

@@ -63,5 +63,44 @@ class RulesFixTests(unittest.TestCase):
             self.assertEqual(pwd_entities, [], f"Negative false positive on: {neg}")
 
 
+    def test_password_with_asterisk_accepted_and_masks_rejected(self):
+        # Real passwords with * must be accepted
+        valid_with_asterisk = [
+            ("APP_PASSWORD=MyPass*2026", "MyPass*2026"),
+            ("APP_PASSWORD=A*b9X!234", "A*b9X!234"),
+            ('password="P@ss*w0rd_999"', "P@ss*w0rd_999"),
+        ]
+        for sample, expected in valid_with_asterisk:
+            entities = merge_entities(self.detector.detect(sample))
+            pwd_entities = [e for e in entities if e.entity_type == "PASSWORD"]
+            self.assertTrue(pwd_entities, f"Failed to detect password with asterisk: {sample}")
+            self.assertEqual(pwd_entities[0].text, expected)
+
+        # Pure mask tokens must be rejected
+        masks = [
+            "APP_PASSWORD=******",
+            "APP_PASSWORD=••••••",
+            "APP_PASSWORD=************",
+            "password: ******",
+        ]
+        for m in masks:
+            entities = merge_entities(self.detector.detect(m))
+            pwd_entities = [e for e in entities if e.entity_type == "PASSWORD"]
+            self.assertEqual(pwd_entities, [], f"Mask-only token false positive: {m}")
+
+    def test_invalid_dob_partial_fallback_rejected(self):
+        # Invalid full dates must be rejected entirely and must NOT degrade into partial year-month spans
+        invalid_dates = [
+            "出生日期：1992年11月99日",
+            "出生日期：1992-11-99",
+            "生年月日：1992年11月99日",
+            "생년월일: 1992년 11월 99일",
+        ]
+        for inv in invalid_dates:
+            entities = merge_entities(self.detector.detect(inv))
+            date_entities = [e for e in entities if e.entity_type in ("CN_BIRTH_DATE", "PRIVATE_DATE")]
+            self.assertEqual(date_entities, [], f"Invalid date must not partially match: {inv}")
+
+
 if __name__ == "__main__":
     unittest.main()
