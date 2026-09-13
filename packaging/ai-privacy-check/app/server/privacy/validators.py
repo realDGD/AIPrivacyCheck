@@ -27,8 +27,30 @@ def luhn_valid(value: str) -> bool:
     return total % 10 == 0
 
 
+# GB/T 2260 province codes (first two digits of a PRC ID number).
+_CN_PROVINCES = frozenset((
+    "11", "12", "13", "14", "15", "21", "22", "23", "31", "32", "33", "34",
+    "35", "36", "37", "41", "42", "43", "44", "45", "46", "50", "51", "52",
+    "53", "54", "61", "62", "63", "64", "65", "71", "81", "82",
+))
+
+
+def private_ipv4_valid(value: str) -> bool:
+    """Bare-rule validator: only 192.168/169.254/100.64-127 ranges."""
+    parts = value.strip().split(".")
+    if len(parts) != 4 or not all(part.isdigit() and 0 <= int(part) <= 255 for part in parts):
+        return False
+    if value.startswith(("192.168.", "169.254.")):
+        return True
+    if value.startswith("100."):
+        return 64 <= int(parts[1]) <= 127
+    return False
+
+
 def cn_id_card_valid(value: str) -> bool:
     normalized = value.strip().upper()
+    if normalized[:2] not in _CN_PROVINCES:
+        return False
     if re.fullmatch(r"\d{15}", normalized):
         try:
             datetime.strptime("19" + normalized[6:12], "%Y%m%d")
@@ -75,7 +97,13 @@ def ipv6_valid(value: str) -> bool:
 
 
 def mac_valid(value: str) -> bool:
-    return re.fullmatch(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", value.strip()) is not None
+    s = value.strip()
+    if re.fullmatch(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", s) is None:
+        return False
+    digits = s.replace(":", "").replace("-", "")
+    if digits == "000000000000" or digits.lower() == "ffffffffffff":
+        return False  # null / broadcast addresses are not device identifiers
+    return True
 
 
 def international_phone_valid(value: str) -> bool:
@@ -112,6 +140,14 @@ def jwt_header_valid(value: str) -> bool:
     if typ is not None and not isinstance(typ, str):
         return False
     return True
+
+
+def bank_card_valid(value: str) -> bool:
+    """Grouped or continuous bank card: 13-19 digits, real BIN (3-6), Luhn."""
+    digits = re.sub(r"[ -]", "", value)
+    if not 13 <= len(digits) <= 19 or digits[0] not in "3456":
+        return False
+    return luhn_valid(digits)
 
 
 def iban_valid(value: str) -> bool:

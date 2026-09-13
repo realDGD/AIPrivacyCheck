@@ -19,8 +19,10 @@ from .validators import (
     ipv4_valid,
     ipv6_valid,
     jwt_header_valid,
+    bank_card_valid,
     luhn_valid,
     mac_valid,
+    private_ipv4_valid,
 )
 
 
@@ -42,10 +44,91 @@ def _compile(pattern: str, flags: int = 0) -> Pattern[str]:
 
 
 EXACT_RULES = (
+    # PEM private keys: RSA/EC/DSA/OPENSSH/PGP heads (maskit parity: DSA and
+    # PGP variants were missing and leak the same way).
     RegexRule(
         "SECRET",
-        _compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        _compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"),
         1.0,
+        validated=True,
+    ),
+    # Google API key: AIza + 35-38 key characters (official documented shape).
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35,38}(?![A-Za-z0-9_-])"),
+        0.99,
+        validated=True,
+    ),
+    # Stripe live/test keys: [sr]k_(live|test)_ + 20+ alnum (official shape).
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])[sr]k_(?:live|test)_[0-9A-Za-z]{20,}(?![A-Za-z0-9])"),
+        0.99,
+        validated=True,
+    ),
+    # Feishu app credentials: cli_ + 16+ lowercase alnum.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])cli_[a-z0-9]{16,}(?![a-z0-9])"),
+        0.98,
+        validated=True,
+    ),
+    # OpenAI keys: T3BlbkFJ (base64 of 'OpenAI') is the real discriminator
+    # (Trivy production comment). Project/service-account/admin and legacy
+    # shapes both carry the watermark.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,100}T3BlbkFJ[A-Za-z0-9_-]{20,100}(?![A-Za-z0-9_-])"),
+        0.99,
+        validated=True,
+    ),
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}(?![A-Za-z0-9])"),
+        0.99,
+        validated=True,
+    ),
+    # Anthropic API keys: sk-ant-api03 + 93 chars + AA terminator (Gitleaks).
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])sk-ant-api03-[A-Za-z0-9_-]{93}AA(?![A-Za-z0-9_-])"),
+        0.99,
+        validated=True,
+    ),
+    # HuggingFace tokens: hf_ + 34-40 (Trivy modern mixed-case shape).
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])hf_[A-Za-z0-9]{34,40}(?![A-Za-z0-9_-])"),
+        0.99,
+        validated=True,
+    ),
+    # GitLab personal access tokens.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])glpat-[0-9A-Za-z_-]{20}(?![A-Za-z0-9_-])"),
+        0.98,
+        validated=True,
+    ),
+    # Databricks: dapi + 32 hex (optional -N suffix), bounded.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])dapi[a-f0-9]{32}(?:-\d)?(?![A-Za-z0-9_-])"),
+        0.98,
+        validated=True,
+    ),
+    # Linear: lin_api_ + 40 lowercase alnum.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_-])lin_api_[a-z0-9]{40}(?![a-z0-9])"),
+        0.98,
+        validated=True,
+    ),
+    # Azure Entra client secrets: fixed 8Q~ watermark + 34 tail (Trivy
+    # documents this literal prefix; far fewer FPs than Gitleaks' \dQ~).
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9_~.\-])[A-Za-z0-9_~.-]{3}8Q~[A-Za-z0-9_~.-]{34}(?![A-Za-z0-9_~.-])"),
+        0.99,
         validated=True,
     ),
     RegexRule(
@@ -106,16 +189,56 @@ EXACT_RULES = (
     # bot `xoxb-`, user `xoxp-`, app-level `xapp-`, workflow `xwfp-`, sections
     # separated by `-`. Legacy xoxa/xoxr/xoxs/xoxc prefixes are no longer in the
     # official docs and are deliberately NOT matched as hard rules.
+
+    # AWS access keys: the full official prefix family (Trivy set: AKIA
+    # long-lived, ASIA STS temporary, AGPA/AIDA/AROA/AIPA/ANPA/ANVA delegated
+    # roles, ABIA/ACCA, A3T legacy) + 16 upper.
     RegexRule(
         "SECRET",
-        _compile(r"(?<![A-Za-z0-9])(?:xox[bp]|xapp|xwfp)-[0-9A-Za-z-]{20,}(?![A-Za-z0-9])"),
-        0.98,
+        _compile(r"(?<![A-Z0-9])(?:A3T[A-Z0-9]|AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ABIA|ACCA)[A-Z0-9]{16}(?![A-Z0-9])"),
+        0.99,
         validated=True,
     ),
+    # GitHub stateless app tokens (2026-04 format): ghs_<APPID>.<JWT> - the
+    # JWT dots require a dedicated charset (the main gh[pousr]_ rule excludes
+    # dots to stay sentence-safe).
     RegexRule(
         "SECRET",
-        _compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{12,20})(?![A-Za-z0-9])"),
+        _compile(r"(?<![A-Za-z0-9_-])ghs_[A-Za-z0-9._-]{36,}(?![A-Za-z0-9_-])"),
         0.99,
+        validated=True,
+    ),
+    # OpenAI-style keys and GitHub classic/OAuth/app tokens (ghp_/gho_/ghu_/
+    # ghs_/ghr_); fine-grained PATs have their own rule above.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,})(?![A-Za-z0-9])"),
+        0.99,
+        validated=True,
+    ),
+    # AWS SecretAccessKey: the half that can actually sign requests. Bare
+    # 40-char base64 is refused (any digest would hit) - only the labeled
+    # key=value form is accepted (maskit production lesson).
+    RegexRule(
+        "SECRET",
+        _compile(r"(?i)aws[_-]?secret[_-]?access[_-]?key[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])"),
+        0.98,
+        group=1,
+        validated=True,
+    ),
+    # Bearer authorization tokens (context-validated; value 20+ token chars).
+    RegexRule(
+        "SECRET",
+        _compile(r"(?i)(?<![A-Za-z0-9])Bearer\s+([A-Za-z0-9._~+/=-]{20,})(?![A-Za-z0-9._~+/=-]*[A-Za-z])"),
+        0.95,
+        group=1,
+    ),
+    # Slack: xoxr (refresh) / xoxs (session) added - real SDK-issued prefixes
+    # (maskit production evidence) alongside the documented xoxb/xoxp.
+    RegexRule(
+        "SECRET",
+        _compile(r"(?<![A-Za-z0-9])(?:xox[brps]|xapp|xwfp)-[0-9A-Za-z-]{20,}(?![A-Za-z0-9])"),
+        0.98,
         validated=True,
     ),
     RegexRule(
@@ -167,16 +290,28 @@ EXACT_RULES = (
     ),
     RegexRule(
         "CN_PHONE_NUMBER",
-        _compile(r"(?<![\d+])(?:(?:\+?86|0086)[ -]?)?1[3-9]\d(?:[ -]?\d){8}(?!\d)"),
+        # maskit lesson: separators must be consistent (one split point,
+        # backreference) - mixed "138-1234 5678" runs are accidental concats,
+        # not phone numbers.
+        _compile(r"(?<![\d+A-Za-z])(?:(?:\+?86|0086)[ -]?)?1[3-9]\d(?:([ -])\d{4}\1\d{4}|\d{8})(?!\d)"),
         0.99,
         validator=lambda value: len(re.sub(r"\D", "", value).removeprefix("0086").removeprefix("86")) == 11,
         validated=True,
     ),
     RegexRule(
         "CN_BANK_CARD",
-        _compile(r"(?<!\d)(?:\d[ -]?){15,18}\d(?!\d)"),
+        # maskit 0.1.15 lesson: per-digit optional separators splice unrelated
+        # numbers across a space (file size + year runs that happen to pass
+        # Luhn). Two branches instead, no per-digit separators:
+        #   1) continuous 13-19 digits starting with a real BIN (3-6);
+        #   2) grouped digits with ONE consistent separator (backreference),
+        #      first group 3-6 digits, up to 4 groups of 1-6; the validator
+        #      enforces total length / BIN / Luhn.
+        _compile(
+            r"(?<!\d)(?:[3-6]\d{12,18}|[3-6]\d{2,5}(?:([ -])\d{1,6}){1,4})(?!\d)"
+        ),
         0.97,
-        validator=luhn_valid,
+        validator=bank_card_valid,
         validated=True,
     ),
     RegexRule(
@@ -187,15 +322,37 @@ EXACT_RULES = (
     ),
     RegexRule(
         "CN_LICENSE_PLATE",
-        _compile(r"(?<![A-Z0-9\u4e00-\u9fff])[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z][·•]?[A-HJ-NP-Z0-9]{5,6}(?![A-Z0-9])"),
+        # maskit 0.1.15 lesson: the CJK lookbehind cannot stop "新README.md"
+        # (新 is a province abbrev and README is a letter body). Real plates
+        # always carry at least one digit in the body - one lookahead splits
+        # the classes without a word list.
+        _compile(r"(?<![A-Z0-9\u4e00-\u9fff])[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼使领][A-Z][·•]?(?=[A-HJ-NP-Z0-9]{0,5}\d)[A-HJ-NP-Z0-9]{5,6}(?![A-Z0-9])"),
         0.95,
         validated=True,
     ),
     RegexRule(
         "MAC_ADDRESS",
-        _compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])"),
+        # maskit lesson: the separator must be one consistent character
+        # (backreference) - a free [: -] class splices MAC fragments across
+        # spaces and eats surrounding text.
+        _compile(r"(?<![0-9A-Fa-f:-])[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:-])"),
         0.98,
         validator=mac_valid,
+        validated=True,
+    ),
+    # Bare private/special-range IPv4 (maskit split-model): 192.168/169.254/
+    # 100.64-127 are never version strings, so an unlabeled rule is safe.
+    # 10.x / 172.16-31 stay label-gated (version 10.2.3.4 collision class);
+    # public ranges are never matched bare.
+    RegexRule(
+        "IP_ADDRESS",
+        _compile(
+            r"(?<![0-9.])(?:192\.168\.\d{1,3}\.\d{1,3}"
+            r"|169\.254\.\d{1,3}\.\d{1,3}"
+            r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})(?![0-9]|\.[0-9])"
+        ),
+        0.95,
+        validator=private_ipv4_valid,
         validated=True,
     ),
 )
@@ -205,14 +362,19 @@ CONTEXT_RULES = (
     RegexRule(
         "SECRET",
         _compile(
-            r"(?<![A-Za-z0-9_-])"
+            r"(?<![A-Za-z0-9_.])"
             r"(?:SSH\s*私钥标识|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GitHub\s+token|"
             r"OpenAI-style\s+test\s+token|API\s*Token|Temporary\s+password|"
-            r"OTP\s+backup\s+code|recovery\s+code|登录密码|密码|口令|passwd|password|secret|"
-            r"api[_ -]?key|access[_ -]?token|パスワード|비밀번호|mot\s+de\s+passe|"
+            r"OTP\s+backup\s+code|recovery\s+code|登录密码|密码|口令|passwd|password|secret|token|"
+            r"api[_ -]?key|access[_ -]?key|access[_ -]?token|private[_ -]?key|"
+            r"令牌|密钥|秘钥|密匙|凭据|凭证|私钥|授权码|访问密钥|接口密钥|"
+            r"パスワード|비밀번호|mot\s+de\s+passe|"
             r"Passwort|Contraseña|Пароль|كلمة\s+المرور|รหัสผ่าน)"
-            r"[ \t]*[=:：][ \t]*['\"]?"
-            r"([A-Za-z0-9][A-Za-z0-9_!@#$%^&*()+\-=/{}\[\]:?]{3,255})",
+            r"(?![A-Za-z0-9_.])"
+            r"[\"'“”「」]?[ \t]*[:=：＝][ \t]*[\"'“”「」]?"
+            r"(?!/)"
+            r"(?:(?=[A-Za-z0-9_!@#$%^&*_~+=-]*[0-9!@#$%^&*])|(?=[A-Za-z0-9_!@#$%^&*_~+=-]{16,}))"
+            r"([A-Za-z0-9][A-Za-z0-9_!@#$%^&*_~+=-]{5,255})",
             re.IGNORECASE,
         ),
         0.96,
@@ -224,6 +386,7 @@ CONTEXT_RULES = (
             r"(?:"
             r"(?:(?<![“\"'\w])(?:(?:My|The|my|the)\s+)?(?:temporary\s+)?(?:password|passwd|secret|passcode)\s+(?:is|was)\s+(?!not\b|a\b|the\b|an\b|only\b))"
             r"|(?:(?:登录密码|临时密码|用户密码|开机密码|支付密码|密码|口令)\s*(?:为|是)\s*)"
+            r"|(?:(?:令牌|密钥|秘钥|凭据|凭证|授权码|访问密钥|接口密钥|私钥)\s*(?:为|是)\s*)"
             r"|(?:(?<![A-Za-z0-9_])(?:Passwort|Kennwort)\s+(?:ist|lautet)\s+)"
             r"|(?:(?<![A-Za-z0-9_])(?:mot\s+de\s+passe)\s+(?:est)\s+)"
             r"|(?:(?<![A-Za-z0-9_])(?:contraseña)\s+(?:es)\s+)"
@@ -232,11 +395,20 @@ CONTEXT_RULES = (
             r"|(?:كلمة\s+المرور\s+(?:هو|هي)\s+)"
             r"|(?:รหัสผ่าน\s*(?:คือ)\s*)"
             r")"
-            r"['\"]?([A-Za-z0-9][A-Za-z0-9_!@#$%^&*()+\-=/{}\[\]:?]{3,255})",
+            r"(?!/)"
+            r"(?:(?=[A-Za-z0-9_!@#$%^&*_~+=-]*[0-9!@#$%^&*])|(?=[A-Za-z0-9_!@#$%^&*_~+=-]{16,}))"
+            r"([A-Za-z0-9][A-Za-z0-9_!@#$%^&*_~+=-]{5,255})",
             re.IGNORECASE,
         ),
         0.96,
         group=1,
+    ),
+    RegexRule(
+        "SECRET",
+        _compile(r"(?i)(?:discord[a-z0-9_ .,\-\"']{0,25})(?:=|>|:=|\|\||:|=>).{0,5}[\"']?([a-f0-9]{64})(?![a-f0-9])"),
+        0.98,
+        group=1,
+        validated=True,
     ),
     RegexRule(
         "CARD_SECURITY_CODE",
@@ -276,7 +448,7 @@ CONTEXT_RULES = (
     ),
     RegexRule(
         "IP_ADDRESS",
-        _compile(r"(?:IPv4|Internal\s+IP|IP(?:地址)?|服务器地址|主机地址)\s*[：:=]?\s*((?:\d{1,3}\.){3}\d{1,3})", re.IGNORECASE),
+        _compile(r"(?:IPv4|Internal\s+IP|IP(?:地址)?|服务器地址|主机地址)\s*[：:=]?\s*((?:\d{1,3}\.){3}\d{1,3}(?!\.?\d))", re.IGNORECASE),
         0.94,
         group=1,
         validator=ipv4_valid,
@@ -292,7 +464,7 @@ CONTEXT_RULES = (
     ),
     RegexRule(
         "MAC_ADDRESS",
-        _compile(r"(?:MAC(?:\s+address)?|物理地址)\s*[：:=]?\s*((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2})", re.IGNORECASE),
+        _compile(r"(?:MAC(?:\s+address)?|物理地址)\s*[：:=]?\s*([0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\2){4}[0-9A-Fa-f]{2})", re.IGNORECASE),
         0.98,
         group=1,
         validator=mac_valid,
@@ -306,7 +478,7 @@ CONTEXT_RULES = (
     ),
     RegexRule(
         "PRIVATE_URL",
-        _compile(r"(?:Database\s+Host|Host|数据库主机)\s*[：:=]\s*([A-Z0-9.-]+\.[A-Z]{2,63})", re.IGNORECASE),
+        _compile(r"(?<![A-Za-z0-9_-])(?:Database\s+Host|Host|数据库主机)(?![A-Za-z0-9_-])\s*[：:=]\s*([A-Z0-9.-]+\.[A-Z]{2,63})", re.IGNORECASE),
         0.9,
         group=1,
     ),
@@ -534,6 +706,17 @@ def _entity_from_match(text: str, rule: RegexRule, match: Match[str]) -> Optiona
     value = text[start:end]
     if not value or (rule.validator is not None and not rule.validator(value)):
         return None
+    # Placeholder / documentation allowlist (Gitleaks precedent: AWS
+    # .+EXAMPLE$): values ENDING in "example" are documentation artifacts,
+    # not credentials. Suffix-only, so real keys that merely embed the
+    # letters (AWS docs SK sample) stay covered.
+    if rule.entity_type == "SECRET" and re.search(r"example$", value, re.IGNORECASE):
+        return None
+    # USERNAME CJK values are single handles; sentence particles (的/了/是...)
+    # indicate prose ("用户名是登录身份的一部分" is a sentence, not a handle).
+    if rule.entity_type == "USERNAME" and any("\u4e00" <= c <= "\u9fff" for c in value):
+        if any(ch in value for ch in "的是了在和与或很不"):
+            return None
     if rule.entity_type == "CN_PHONE_NUMBER" and not value.lstrip().startswith(("+86", "0086")):
         prefix = text[max(0, start - 15) : start]
         if re.search(r"(?:\+\d{1,4}|00\d{1,4})[ ()-]*$", prefix):

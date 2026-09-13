@@ -96,7 +96,7 @@ class AliyunAccessKeyIdRuleTests(unittest.TestCase):
 class TencentSecretIdRuleTests(unittest.TestCase):
     # Built at runtime so no complete token literal lands in the file
     # (keeps GitHub push protection / secret scanning clean).
-    _SID_TAIL = "z8krbsJ5yKBZQpn74WFkmLPx5" + "ExAmPlE"
+    _SID_TAIL = "z8krbsJ5yKBZQpn74WFkmLPx5" + "a1B2c3D"  # 32 after AKID
     SECRET_ID = "AKID" + _SID_TAIL
     INTL_SECRET_ID = "IKID" + _SID_TAIL
 
@@ -127,9 +127,10 @@ class SlackTokenRuleTests(unittest.TestCase):
             self.assertIn(token, _secret_texts(f"token={token}"), token)
 
     def test_negative_undocumented_legacy_prefixes(self):
-        # xoxa-/xoxr- are no longer in current official docs: not hard rules.
+        # xoxa- is no longer in current official docs: not a hard rule.
+        # xoxr- was promoted in v0.6.5 (maskit production evidence: SDK-issued
+        # refresh tokens are real secrets despite the docs page).
         self.assertEqual(_secret_texts("xoxa-123456789-1234567890123-abcdefghijklmnopqrstuvwx"), [])
-        self.assertEqual(_secret_texts("xoxr-123456789-1234567890123-abcdefghijklmnopqrstuvwx"), [])
 
     def test_near_miss_too_short(self):
         self.assertEqual(_secret_texts("xoxb-short"), [])
@@ -153,10 +154,13 @@ class GithubFineGrainedPatRuleTests(unittest.TestCase):
         self.assertIn("ghs_1A2b3C4d5E6f7G8h9I0j1K2l3M4n5O6p7Q8r", _secret_texts("ghs_1A2b3C4d5E6f7G8h9I0j1K2l3M4n5O6p7Q8r"))
 
     def test_near_miss_wrong_lengths(self):
+        # The exact-structure rule (22_59) only matches official lengths; a
+        # wrong-length PAT after a credential label is still caught - by the
+        # generic SECRET context rule (privacy-preserving fallback, v0.6.5).
         pat_21 = "github_pat_" + "a" * 21 + "_" + "b" * 59
         pat_58 = "github_pat_" + "a" * 22 + "_" + "b" * 58
         for token in (pat_21, pat_58):
-            self.assertNotIn(token, _secret_texts(f"token: {token}"), token)
+            self.assertIn("SECRET", [t for t, _, _ in _detector_types(f"token: {token}")], token)
 
     def test_negative_placeholder(self):
         self.assertEqual(_secret_texts("use github_pat_XXXXXXXXXXXXXXXXXXXXXX_XXXX"), [])
