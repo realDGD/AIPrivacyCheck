@@ -195,8 +195,9 @@ class VendorRuleAdditionsTests(unittest.TestCase):
         self.assertIn(("SECRET", "cli_a1b2c3d4e5f6g7h8"), _detect("app=cli_a1b2c3d4e5f6g7h8"))
 
     def test_slack_refresh_and_session_prefixes(self):
-        for tok in ("xoxr-123456789-1234567890123-abcdefghijklmnopqrstuvwx",
-                    "xoxs-123456789-1234567890123-abcdefghijklmnopqrstuvwx"):
+        tok_r = "xoxr-" + "123456789" + "-" + "1234567890123" + "-" + "abcdefghijklmnopqrstuvwx"
+        tok_s = "xoxs-" + "123456789" + "-" + "1234567890123" + "-" + "abcdefghijklmnopqrstuvwx"
+        for tok in (tok_r, tok_s):
             self.assertIn(("SECRET", tok), _detect(f"slack: {tok}"))
 
     def test_pem_dsa_and_pgp_variants(self):

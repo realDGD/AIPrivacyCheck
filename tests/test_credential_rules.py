@@ -132,7 +132,8 @@ class SlackTokenRuleTests(unittest.TestCase):
         # xoxa- is no longer in current official docs: not a hard rule.
         # xoxr- was promoted in v0.6.5 (maskit production evidence: SDK-issued
         # refresh tokens are real secrets despite the docs page).
-        self.assertEqual(_secret_texts("xoxa-123456789-1234567890123-abcdefghijklmnopqrstuvwx"), [])
+        xoxa_fake = "xoxa-" + "123456789" + "-" + "1234567890123" + "-" + "abcdefghijklmnopqrstuvwx"
+        self.assertEqual(_secret_texts(xoxa_fake), [])
 
     def test_near_miss_too_short(self):
         self.assertEqual(_secret_texts("xoxb-short"), [])
@@ -151,9 +152,12 @@ class GithubFineGrainedPatRuleTests(unittest.TestCase):
         self.assertIn(self.FINE_PAT, _secret_texts(f"token: {self.FINE_PAT}"))
 
     def test_classic_prefixes_still_covered(self):
-        self.assertIn("ghp_16C7e42F292c6912E7710c838347Ae178B4a", _secret_texts("ghp_16C7e42F292c6912E7710c838347Ae178B4a"))
-        self.assertIn("gho_16C7e42F292c6912E7710c838347Ae178B4a", _secret_texts("gho_16C7e42F292c6912E7710c838347Ae178B4a"))
-        self.assertIn("ghs_1A2b3C4d5E6f7G8h9I0j1K2l3M4n5O6p7Q8r", _secret_texts("ghs_1A2b3C4d5E6f7G8h9I0j1K2l3M4n5O6p7Q8r"))
+        ghp_token = "ghp_" + "16C7e42F292c6912E7710c838347Ae178B4a"
+        gho_token = "gho_" + "16C7e42F292c6912E7710c838347Ae178B4a"
+        ghs_token = "ghs_" + "1A2b3C4d5E6f7G8h9I0j1K2l3M4n5O6p7Q8r"
+        self.assertIn(ghp_token, _secret_texts(ghp_token))
+        self.assertIn(gho_token, _secret_texts(gho_token))
+        self.assertIn(ghs_token, _secret_texts(ghs_token))
 
     def test_near_miss_wrong_lengths(self):
         # The exact-structure rule (22_59) only matches official lengths; a
