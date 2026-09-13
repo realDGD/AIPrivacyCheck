@@ -36,6 +36,8 @@ from model_installer import (
     repair_model_runtime,
     runtime_operation_lock,
     check_disk_space_for_rebuild,
+    run_install_pypi_with_fallback,
+    run_install_torch_with_fallback,
 )
 from privacy.chinese_ie import ChineseIEDetector
 from privacy.detectors import GLiNERDetector
@@ -47,7 +49,13 @@ from privacy.python_runtime import (
     PYTHON_CAPABILITY_CONTRACT,
     REQUIRED_PYTHON_CAPABILITIES,
     UV_VERSION,
+    UV_X86_64_SHA256,
+    UV_AARCH64_SHA256,
+    _VERIFIED_BUNDLED_UV_PATHS,
+    clear_verified_uv_cache,
     build_uv_env,
+    ensure_managed_python,
+    ensure_managed_python_info,
     find_uv,
     find_uv_info,
     get_python_installations_dir,
@@ -55,6 +63,22 @@ from privacy.python_runtime import (
     probe_base_runtime_contract,
     probe_python_capabilities,
     verify_bundled_uv,
+)
+from privacy.runtime_sources import (
+    UV_SYSTEM_CERTS,
+    CERNET_PYPI_INDEX,
+    OFFICIAL_PYPI_INDEX,
+    CERNET_TORCH_INDEX_CPU,
+    OFFICIAL_TORCH_INDEX_CPU,
+    CERNET_TORCH_INDEX_CUDA,
+    OFFICIAL_TORCH_INDEX_CUDA,
+    CERNET_PYTHON_INSTALL_MIRROR,
+    is_tls_error,
+    is_integrity_or_corruption_error,
+    is_retryable_network_error,
+    format_user_friendly_network_error,
+    get_pypi_index_url,
+    get_torch_index_url,
 )
 from privacy.runtime_manager import (
     RuntimeManager,
@@ -757,6 +781,297 @@ class ManagedPythonRuntimeTests(unittest.TestCase):
             self.assertTrue(st["python_runtime_ready"])
             self.assertFalse(st["runtime_rebuild_required"])
             self.assertTrue(st["base_packages_ready"])
+
+    def test_uv_env_enables_system_certs(self):
+        """UV_SYSTEM_CERTS=true is universally injected into all uv execution environments."""
+        env = build_uv_env(self.data_dir)
+        self.assertEqual(env.get("UV_SYSTEM_CERTS"), "true")
+        self.assertEqual(env.get("UV_SYSTEM_CERTS"), UV_SYSTEM_CERTS)
+        self.assertTrue(str(self.data_dir) in env.get("UV_PYTHON_INSTALL_DIR", ""))
+        self.assertTrue(str(self.data_dir) in env.get("UV_CACHE_DIR", ""))
+
+    def test_cernet_pypi_primary(self):
+        """Primary PyPI package installations query Cernet mirror endpoint."""
+        recorded_cmds = []
+        def fake_runner(cmd, **kwargs):
+            recorded_cmds.append(list(cmd))
+            return 0, "Successfully installed\n", ""
+
+        interp = self.data_dir / "python"
+        venv = self.data_dir / "venv"
+        env = build_uv_env(self.data_dir)
+        source = run_install_pypi_with_fallback(
+            runner=fake_runner,
+            uv_bin="/bin/uv",
+            interp=interp,
+            venv_dir=venv,
+            packages=["modelscope", "numpy"],
+            env=env,
+        )
+        self.assertEqual(source, "cernet-mirror")
+        self.assertEqual(len(recorded_cmds), 1)
+        self.assertIn("-i", recorded_cmds[0])
+        idx = recorded_cmds[0].index("-i")
+        self.assertEqual(recorded_cmds[0][idx + 1], CERNET_PYPI_INDEX)
+
+    def test_official_pypi_fallback(self):
+        """When Cernet mirror fails with retryable network error, system falls back to official PyPI."""
+        recorded_cmds = []
+        def fake_runner(cmd, **kwargs):
+            recorded_cmds.append(list(cmd))
+            if CERNET_PYPI_INDEX in cmd:
+                return 1, "", "error: invalid peer certificate: UnknownIssuer\n"
+            return 0, "Successfully installed from official\n", ""
+
+        interp = self.data_dir / "python"
+        venv = self.data_dir / "venv"
+        env = build_uv_env(self.data_dir)
+        source = run_install_pypi_with_fallback(
+            runner=fake_runner,
+            uv_bin="/bin/uv",
+            interp=interp,
+            venv_dir=venv,
+            packages=["gliner"],
+            env=env,
+        )
+        self.assertEqual(source, "official")
+        self.assertEqual(len(recorded_cmds), 2)
+        self.assertIn(CERNET_PYPI_INDEX, recorded_cmds[0])
+        self.assertIn(OFFICIAL_PYPI_INDEX, recorded_cmds[1])
+
+    def test_tls_unknown_issuer_is_retryable(self):
+        """TLS UnknownIssuer error is classified as retryable network error and formatted with actionable advice."""
+        raw_err = "failed to fetch wheel: invalid peer certificate: UnknownIssuer (curl 60)"
+        self.assertTrue(is_tls_error(raw_err))
+        self.assertTrue(is_retryable_network_error(raw_err))
+        self.assertFalse(is_integrity_or_corruption_error(raw_err))
+        msg = format_user_friendly_network_error(raw_err)
+        self.assertIn("UnknownIssuer", msg)
+        self.assertIn("CA 根证书", msg)
+
+    def test_sha_mismatch_is_not_retryable(self):
+        """Supply-chain SHA mismatch or corruption must FAIL CLOSED immediately without fallback."""
+        raw_err = "hash mismatch for package foo: expected 1234, got 5678"
+        self.assertTrue(is_integrity_or_corruption_error(raw_err))
+        self.assertFalse(is_retryable_network_error(raw_err))
+
+        recorded_cmds = []
+        def fake_runner(cmd, **kwargs):
+            recorded_cmds.append(list(cmd))
+            return 1, "", raw_err
+
+        interp = self.data_dir / "python"
+        venv = self.data_dir / "venv"
+        env = build_uv_env(self.data_dir)
+        with self.assertRaises(RuntimeError) as ctx:
+            run_install_pypi_with_fallback(
+                runner=fake_runner,
+                uv_bin="/bin/uv",
+                interp=interp,
+                venv_dir=venv,
+                packages=["corrupt-pkg"],
+                env=env,
+            )
+        self.assertIn("不可降级重试", str(ctx.exception))
+        self.assertEqual(len(recorded_cmds), 1)
+
+    def test_managed_python_existing_install_is_reused(self):
+        """When Managed Python 3.12.9 already exists and passes capability contract, reuse it (0 bytes downloaded)."""
+        install_dir = get_python_installations_dir(self.data_dir)
+        cpython_dir = install_dir / f"cpython-{MANAGED_PYTHON_VERSION}-x86_64"
+        py_bin = cpython_dir / "bin" / "python3"
+        py_bin.parent.mkdir(parents=True, exist_ok=True)
+        py_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        py_bin.chmod(0o755)
+
+        recorded_cmds = []
+        def fake_runner(cmd, **kwargs):
+            recorded_cmds.append(list(cmd))
+            if "find" in cmd:
+                return 0, f"{py_bin}\n", ""
+            if "-c" in cmd:
+                return 0, json.dumps({
+                    "ok": True,
+                    "version": MANAGED_PYTHON_VERSION,
+                    "base_prefix": str(cpython_dir),
+                    "missing": [],
+                    "capabilities": {}
+                }), ""
+            if "install" in cmd:
+                raise AssertionError("Should not execute python install when valid managed Python exists!")
+            return 0, "", ""
+
+        resolved, source = ensure_managed_python_info(
+            data_dir=self.data_dir,
+            uv_bin="/bin/uv",
+            runner=fake_runner,
+        )
+        self.assertEqual(resolved, py_bin.resolve())
+        self.assertEqual(source, "existing-local")
+        self.assertFalse(any("install" in cmd for cmd in recorded_cmds))
+
+    def test_python_mirror_fallback(self):
+        """Managed Python installation falls back to official source on Cernet network failure, fails closed on corruption."""
+        install_dir = get_python_installations_dir(self.data_dir)
+        target_bin = install_dir / f"cpython-{MANAGED_PYTHON_VERSION}" / "bin" / "python3"
+
+        # Scenario 1: Retryable network error -> official fallback succeeds
+        recorded_envs = []
+        def fallback_runner(cmd, env=None, **kwargs):
+            if env:
+                recorded_envs.append(dict(env))
+            if "find" in cmd:
+                if len(recorded_envs) >= 2:
+                    target_bin.parent.mkdir(parents=True, exist_ok=True)
+                    target_bin.write_text("#!/bin/sh\n")
+                    target_bin.chmod(0o755)
+                    return 0, f"{target_bin}\n", ""
+                return 1, "", "not found"
+            if "-c" in cmd:
+                return 0, json.dumps({
+                    "ok": True,
+                    "version": MANAGED_PYTHON_VERSION,
+                    "base_prefix": str(install_dir),
+                    "missing": [],
+                    "capabilities": {}
+                }), ""
+            if "install" in cmd:
+                if env and env.get("UV_PYTHON_INSTALL_MIRROR") == CERNET_PYTHON_INSTALL_MIRROR:
+                    return 1, "", "error: connection reset by peer (cernet)\n"
+                return 0, "Installed from official\n", ""
+            return 0, "", ""
+
+        resolved, src = ensure_managed_python_info(
+            data_dir=self.data_dir,
+            uv_bin="/bin/uv",
+            runner=fallback_runner,
+        )
+        self.assertEqual(src, "official")
+
+        # Scenario 2: Corruption/SHA mismatch -> Fail closed without fallback
+        def corrupt_runner(cmd, env=None, **kwargs):
+            if "find" in cmd:
+                return 1, "", "not found"
+            if "install" in cmd:
+                return 1, "", "archive corruption: checksum mismatch\n"
+            return 0, "", ""
+
+        shutil.rmtree(install_dir, ignore_errors=True)
+        with self.assertRaises(RuntimeError) as ctx:
+            ensure_managed_python_info(
+                data_dir=self.data_dir,
+                uv_bin="/bin/uv",
+                runner=corrupt_runner,
+            )
+        self.assertIn("完整性校验失败", str(ctx.exception))
+
+    def test_runtime_metadata_remains_consistent_after_failure(self):
+        """Metadata consistency transaction across swap failure, probe failure, and success."""
+        rt_mgr = get_runtime_manager(self.data_dir)
+        profile_dir = rt_mgr.profile_dir(PROFILE_TORCH_CPU)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        venv_dir = rt_mgr.venv_dir(PROFILE_TORCH_CPU)
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin" / "python").write_text("#!/bin/sh\n")
+        (venv_dir / "bin" / "python").chmod(0o755)
+
+        old_manifest_data = {
+            "schema_version": 3,
+            "profile": PROFILE_TORCH_CPU,
+            "state": "original_state_v1",
+        }
+        old_installed_data = {
+            "profile": PROFILE_TORCH_CPU,
+            "version": "original_installed_v1",
+        }
+        manifest_file = profile_dir / "runtime-manifest.json"
+        installed_file = profile_dir / "installed.json"
+        manifest_file.write_text(json.dumps(old_manifest_data), encoding="utf-8")
+        installed_file.write_text(json.dumps(old_installed_data), encoding="utf-8")
+
+        # Case B: Final probe failure triggers transaction rollback to old venv and old metadata
+        runner = self._create_rebuild_runner()
+        with patch.object(rt_mgr, "probe_profile", return_value={"verified": False, "error": "Simulated hardware smoke fail"}):
+            with patch("shutil.which", return_value="/bin/uv"):
+                ok, err = rebuild_runtime(self.data_dir, PROFILE_TORCH_CPU, command_runner=runner)
+
+        self.assertFalse(ok)
+        self.assertIn("Simulated hardware smoke fail", err)
+
+        # Metadata must be perfectly preserved as original, no leftover .tmp
+        self.assertTrue(manifest_file.is_file())
+        self.assertTrue(installed_file.is_file())
+        self.assertFalse((profile_dir / "runtime-manifest.json.tmp").exists())
+        self.assertFalse((profile_dir / "installed.json.tmp").exists())
+        cur_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(cur_manifest.get("state"), "original_state_v1")
+        cur_installed = json.loads(installed_file.read_text(encoding="utf-8"))
+        self.assertEqual(cur_installed.get("version"), "original_installed_v1")
+
+        # Case C: Clean success writes download_sources telemetry and schema v3
+        with patch.object(rt_mgr, "probe_profile", return_value={
+            "verified": True,
+            "python_runtime_ready": True,
+            "runtime_rebuild_required": False,
+            "packages": {"torch": "2.6.0", "transformers": "4.51.0"},
+            "cuda_available": False,
+        }):
+            with patch("shutil.which", return_value="/bin/uv"):
+                ok, msg = rebuild_runtime(self.data_dir, PROFILE_TORCH_CPU, command_runner=runner)
+
+        self.assertTrue(ok)
+        self.assertFalse((profile_dir / "runtime-manifest.json.tmp").exists())
+        final_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(final_manifest["schema_version"], 3)
+        self.assertIn("download_sources", final_manifest)
+        self.assertIn("python", final_manifest["download_sources"])
+        self.assertIn("pypi", final_manifest["download_sources"])
+        self.assertIn("torch", final_manifest["download_sources"])
+
+    def test_third_party_notice_is_packaged(self):
+        """THIRD_PARTY_NOTICES.md is packaged at both package root and app root with Astral uv notices."""
+        pkg_root_notice = PROJECT_DIR / "packaging" / "ai-privacy-check" / "THIRD_PARTY_NOTICES.md"
+        app_notice = PROJECT_DIR / "packaging" / "ai-privacy-check" / "app" / "THIRD_PARTY_NOTICES.md"
+        self.assertTrue(pkg_root_notice.is_file(), f"Missing {pkg_root_notice}")
+        self.assertTrue(app_notice.is_file(), f"Missing {app_notice}")
+
+        content1 = pkg_root_notice.read_text(encoding="utf-8")
+        content2 = app_notice.read_text(encoding="utf-8")
+        self.assertIn("Astral", content1)
+        self.assertIn("uv", content1)
+        self.assertIn("MIT License", content1)
+        self.assertIn("Apache License", content1)
+        self.assertEqual(content1, content2)
+
+    def test_bundled_uv_runtime_sha_verified(self):
+        """Bundled uv SHA-256 integrity is checked at runtime and cached in-process."""
+        clear_verified_uv_cache()
+        real_x86_uv = PROJECT_DIR / "packaging" / "ai-privacy-check" / "app" / "bin" / "linux-x86_64" / "uv"
+        real_aarch64_uv = PROJECT_DIR / "packaging" / "ai-privacy-check" / "app" / "bin" / "linux-aarch64" / "uv"
+
+        def mock_runner(cmd, timeout=10):
+            return 0, f"uv {UV_VERSION}\n", ""
+
+        # 1. Real x86_64 binary matches pinned SHA
+        self.assertNotIn(str(real_x86_uv.resolve()), _VERIFIED_BUNDLED_UV_PATHS)
+        ok, err = verify_bundled_uv(real_x86_uv, runner=mock_runner, verify_sha=True)
+        self.assertTrue(ok, err)
+        self.assertIn(str(real_x86_uv.resolve()), _VERIFIED_BUNDLED_UV_PATHS)
+
+        # 2. Subsequent call hits in-process cache
+        ok2, err2 = verify_bundled_uv(real_x86_uv, runner=mock_runner, verify_sha=True)
+        self.assertTrue(ok2, err2)
+
+        # 3. Corrupted binary fails closed with SHA-256 mismatch
+        corrupt_bin = self.data_dir / "fake_corrupt_bin" / "linux-x86_64" / "uv"
+        corrupt_bin.parent.mkdir(parents=True, exist_ok=True)
+        corrupt_bin.write_text("#!/bin/sh\necho corrupted\n", encoding="utf-8")
+        corrupt_bin.chmod(0o755)
+
+        ok_bad, err_bad = verify_bundled_uv(corrupt_bin, runner=mock_runner, verify_sha=True)
+        self.assertFalse(ok_bad)
+        self.assertIn("SHA-256 mismatch", err_bad)
 
 
 if __name__ == "__main__":
