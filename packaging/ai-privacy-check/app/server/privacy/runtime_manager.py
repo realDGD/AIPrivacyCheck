@@ -33,17 +33,17 @@ from .python_runtime import (
 from .runtime_sources import (
     CERNET_PYPI_INDEX,
     OFFICIAL_PYPI_INDEX,
-    CERNET_TORCH_INDEX_CPU,
+    SJTUG_TORCH_INDEX_CPU,
     OFFICIAL_TORCH_INDEX_CPU,
-    CERNET_TORCH_INDEX_CUDA,
+    SJTUG_TORCH_INDEX_CUDA,
     OFFICIAL_TORCH_INDEX_CUDA,
 )
 
 
 PYPI_MIRROR_URL = CERNET_PYPI_INDEX
 PYPI_OFFICIAL_URL = OFFICIAL_PYPI_INDEX
-PYTORCH_CPU_INDEX = CERNET_TORCH_INDEX_CPU
-PYTORCH_CUDA_INDEX = CERNET_TORCH_INDEX_CUDA
+PYTORCH_CPU_INDEX = SJTUG_TORCH_INDEX_CPU
+PYTORCH_CUDA_INDEX = SJTUG_TORCH_INDEX_CUDA
 
 PROFILE_TORCH_CPU = "torch-cpu"
 PROFILE_TORCH_CUDA = "torch-cuda"
@@ -196,7 +196,7 @@ class RuntimeManager:
                 "framework_version": packages.get("torch"),
                 "torch_version": packages.get("torch"),
                 "base_contract_verified": True,
-                "created_by": "AIPrivacyCheck/0.6.13",
+                "created_by": "AIPrivacyCheck/0.6.14",
                 "created_at": int(time.time()),
             }
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -340,6 +340,7 @@ class RuntimeManager:
                 "base_contract_violations": [],
                 "packages": {},
                 "download_sources": None,
+                "tls_modes": None,
                 "error": f"运行时验证失败: {err_msg}",
             }
         else:
@@ -364,10 +365,12 @@ class RuntimeManager:
 
                 manifest_path = self.manifest_file(profile)
                 download_sources = None
+                tls_modes = None
                 if manifest_path.is_file():
                     try:
                         manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
                         download_sources = manifest_data.get("download_sources")
+                        tls_modes = manifest_data.get("tls_modes")
                         rebuild_required = not py_ready or bool(manifest_data.get("schema_version", 1) < 3 and not py_ready)
                     except Exception:
                         rebuild_required = not py_ready
@@ -403,6 +406,7 @@ class RuntimeManager:
                         "base_contract_violations": base_contract_violations,
                         "packages": packages,
                         "download_sources": download_sources,
+                        "tls_modes": tls_modes,
                         "error": f"Python 原生能力缺失: {', '.join(missing_caps)}",
                     }
                 else:
@@ -447,6 +451,7 @@ class RuntimeManager:
                         "base_contract_violations": base_contract_violations,
                         "packages": packages,
                         "download_sources": download_sources,
+                        "tls_modes": tls_modes,
                         "error": err,
                     }
 
@@ -474,6 +479,8 @@ class RuntimeManager:
                                 }
                                 if cur_manifest.get("download_sources"):
                                     update_fields["download_sources"] = cur_manifest.get("download_sources")
+                                if cur_manifest.get("tls_modes"):
+                                    update_fields["tls_modes"] = cur_manifest.get("tls_modes")
                                 cur_manifest.update(update_fields)
                                 manifest_file.write_text(
                                     json.dumps(cur_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -505,6 +512,7 @@ class RuntimeManager:
                     "base_contract_violations": [],
                     "packages": {},
                     "download_sources": None,
+                    "tls_modes": None,
                     "error": f"解析探测输出异常: {parse_exc}",
                 }
 

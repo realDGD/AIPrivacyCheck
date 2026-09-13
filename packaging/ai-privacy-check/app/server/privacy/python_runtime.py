@@ -21,6 +21,13 @@ from .runtime_sources import (
     UV_SYSTEM_CERTS,
     CERNET_PYTHON_INSTALL_MIRROR,
     OFFICIAL_PYTHON_INSTALL_SOURCE,
+    TLS_MODE_UV_NATIVE,
+    TLS_MODE_SYSTEM_CERTS,
+    TLS_MODE_EXPLICIT_CA,
+    FAIL_TLS_TRUST,
+    find_explicit_ca_bundle,
+    classify_uv_failure,
+    build_attempt_env,
     is_integrity_or_corruption_error,
     is_retryable_network_error,
     format_user_friendly_network_error,
@@ -395,7 +402,7 @@ def build_uv_env(
 
     env["UV_PYTHON_INSTALL_DIR"] = str(install_dir)
     env["UV_CACHE_DIR"] = str(uv_cache)
-    env["UV_SYSTEM_CERTS"] = UV_SYSTEM_CERTS
+    env.pop("UV_SYSTEM_CERTS", None)
 
     return env
 
@@ -558,18 +565,46 @@ def ensure_managed_python_info(
         MANAGED_PYTHON_VERSION,
     ]
 
+    def _exec_install(target_env: Dict[str, str]) -> Tuple[int, str, str]:
+        if runner is not None:
+            return runner(install_cmd, env=target_env, timeout=600)
+        res = subprocess.run(install_cmd, env=target_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return res.returncode, res.stdout, res.stderr
+
+    def _run_with_tls_progression(base_target_env: Dict[str, str], is_mirror: bool) -> Tuple[int, str, str, str]:
+        # 1. TLS Mode A: uv-native
+        env_try = build_attempt_env(base_target_env, TLS_MODE_UV_NATIVE, is_mirror=is_mirror)
+        r, out, err = _exec_install(env_try)
+        if r == 0:
+            return 0, out, err, TLS_MODE_UV_NATIVE
+
+        cat = classify_uv_failure(err or out)
+        if cat == FAIL_TLS_TRUST:
+            log("uv 默认 CA 无法验证证书，正在使用 fnOS 系统 CA 重试...")
+            env_try = build_attempt_env(base_target_env, TLS_MODE_SYSTEM_CERTS, is_mirror=is_mirror)
+            r, out, err = _exec_install(env_try)
+            if r == 0:
+                return 0, out, err, TLS_MODE_SYSTEM_CERTS
+
+            cat2 = classify_uv_failure(err or out)
+            if cat2 == FAIL_TLS_TRUST:
+                ca_bundle = find_explicit_ca_bundle()
+                if ca_bundle:
+                    log(f"正在使用显式 CA 证书链 ({ca_bundle}) 重试...")
+                    env_try = build_attempt_env(base_target_env, TLS_MODE_EXPLICIT_CA, is_mirror=is_mirror, ca_bundle_path=ca_bundle)
+                    r, out, err = _exec_install(env_try)
+                    if r == 0:
+                        return 0, out, err, TLS_MODE_EXPLICIT_CA
+
+        return r, out, err, TLS_MODE_UV_NATIVE
+
     # Supply Chain A - Attempt 1: Primary Cernet Mirror
     log(f"正在通过 Cernet 镜像源安装 AIPrivacyCheck 受管理的 Python {MANAGED_PYTHON_VERSION} 至 {install_dir}...")
     env_primary = dict(env)
     env_primary["UV_PYTHON_INSTALL_MIRROR"] = CERNET_PYTHON_INSTALL_MIRROR
-    env_primary["UV_SYSTEM_CERTS"] = UV_SYSTEM_CERTS
 
     download_source = "cernet-mirror"
-    if runner is not None:
-        retcode, stdout, stderr = runner(install_cmd, env=env_primary, timeout=600)
-    else:
-        res = subprocess.run(install_cmd, env=env_primary, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        retcode, stdout, stderr = res.returncode, res.stdout, res.stderr
+    retcode, stdout, stderr, _ = _run_with_tls_progression(env_primary, is_mirror=True)
 
     if retcode != 0:
         err1 = stderr.strip() or stdout.strip() or f"exit code {retcode}"
@@ -581,15 +616,9 @@ def ensure_managed_python_info(
             log(f"Cernet 镜像下载 Python 失败 ({err1})，正在降级回退至官方源重试...")
             env_official = dict(env)
             env_official.pop("UV_PYTHON_INSTALL_MIRROR", None)
-            env_official["UV_SYSTEM_CERTS"] = UV_SYSTEM_CERTS
             download_source = "official"
 
-            if runner is not None:
-                retcode2, stdout2, stderr2 = runner(install_cmd, env=env_official, timeout=600)
-            else:
-                res2 = subprocess.run(install_cmd, env=env_official, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                retcode2, stdout2, stderr2 = res2.returncode, res2.stdout, res2.stderr
-
+            retcode2, stdout2, stderr2, _ = _run_with_tls_progression(env_official, is_mirror=False)
             if retcode2 != 0:
                 err2 = stderr2.strip() or stdout2.strip() or f"exit code {retcode2}"
                 if is_integrity_or_corruption_error(err2):

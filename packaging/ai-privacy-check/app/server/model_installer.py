@@ -58,8 +58,24 @@ from privacy.python_runtime import (
 from privacy.runtime_sources import (
     CERNET_PYPI_INDEX,
     OFFICIAL_PYPI_INDEX,
+    SJTUG_TORCH_INDEX_CPU,
+    SJTUG_TORCH_INDEX_CUDA,
+    OFFICIAL_TORCH_INDEX_CPU,
+    OFFICIAL_TORCH_INDEX_CUDA,
     get_torch_index_url,
+    get_pypi_index_url,
+    find_explicit_ca_bundle,
+    classify_uv_failure,
+    build_attempt_env,
+    InstallResult,
+    TLS_MODE_UV_NATIVE,
+    TLS_MODE_SYSTEM_CERTS,
+    TLS_MODE_EXPLICIT_CA,
+    FAIL_TLS_TRUST,
+    FAIL_INTEGRITY,
+    FAIL_LOCAL_IO,
     is_integrity_or_corruption_error,
+    is_local_io_error,
     is_retryable_network_error,
     format_user_friendly_network_error,
 )
@@ -586,36 +602,91 @@ def run_install_pypi_with_fallback(
     env: Dict[str, str],
     emit_fn: Optional[Callable[[str], None]] = None,
     timeout: int = 1800,
-) -> str:
-    """Installs PyPI packages using Cernet mirror with official fallback.
+) -> InstallResult:
+    """Installs PyPI packages using Cernet mirror with official fallback and layered TLS."""
+    log = emit_fn or emit
+    sources = [
+        ("cernet", CERNET_PYPI_INDEX, True),
+        ("official", OFFICIAL_PYPI_INDEX, False),
+    ]
 
-    Returns download_source ("cernet-mirror" or "official").
-    Fails closed immediately on SHA mismatch or archive corruption.
-    """
-    primary_index = CERNET_PYPI_INDEX
-    cmd_primary = _pip_install_command(uv_bin, interp, venv_dir, [*packages, "-i", primary_index])
-    retcode, stdout, stderr = runner(cmd_primary, env=env, timeout=timeout)
-    if retcode == 0:
-        return "cernet-mirror"
+    attempts: List[Dict[str, Any]] = []
+    last_err = ""
 
-    err1 = stderr.strip() or stdout.strip() or f"exit code {retcode}"
-    if is_integrity_or_corruption_error(err1):
-        raise RuntimeError(f"PyPI 镜像包校验失败 (不可降级重试): {err1}")
+    for source_name, index_url, is_mirror in sources:
+        cmd = _pip_install_command(uv_bin, interp, venv_dir, [*packages, "-i", index_url])
 
-    if is_retryable_network_error(err1):
-        if emit_fn:
-            emit_fn(f"Cernet PyPI 镜像安装失败 ({err1})，正在降级回退至官方源重试...")
-        official_index = OFFICIAL_PYPI_INDEX
-        cmd_official = _pip_install_command(uv_bin, interp, venv_dir, [*packages, "-i", official_index])
-        retcode2, stdout2, stderr2 = runner(cmd_official, env=env, timeout=timeout)
-        if retcode2 == 0:
-            return "official"
-        err2 = stderr2.strip() or stdout2.strip() or f"exit code {retcode2}"
-        if is_integrity_or_corruption_error(err2):
-            raise RuntimeError(f"PyPI 官方源包校验失败: {err2}")
-        raise RuntimeError(format_user_friendly_network_error(err2 or err1))
-    else:
-        raise RuntimeError(f"安装依赖失败 ({' '.join(packages[:3])}): {err1}")
+        tls_modes_to_try = [TLS_MODE_UV_NATIVE]
+        idx = 0
+        while idx < len(tls_modes_to_try):
+            tls_mode = tls_modes_to_try[idx]
+            idx += 1
+
+            ca_bundle = find_explicit_ca_bundle() if tls_mode == TLS_MODE_EXPLICIT_CA else None
+            attempt_env = build_attempt_env(env, tls_mode, is_mirror=is_mirror, ca_bundle_path=ca_bundle)
+            attempt_cmd = list(cmd)
+            if tls_mode == TLS_MODE_EXPLICIT_CA and ca_bundle and uv_bin:
+                attempt_cmd.extend(["--cert", ca_bundle])
+
+            start_t = time.time()
+            retcode, stdout, stderr = runner(attempt_cmd, env=attempt_env, timeout=timeout)
+            elapsed_ms = int((time.time() - start_t) * 1000)
+
+            if retcode == 0:
+                attempts.append({
+                    "source": source_name,
+                    "tls_mode": tls_mode,
+                    "result": "success",
+                    "retryable": False,
+                    "elapsed_ms": elapsed_ms,
+                })
+                return InstallResult(source_name, tls_mode, attempts)
+
+            output = stderr.strip() or stdout.strip() or f"exit code {retcode}"
+            last_err = output
+            category = classify_uv_failure(output)
+            attempts.append({
+                "source": source_name,
+                "tls_mode": tls_mode,
+                "result": category.lower(),
+                "retryable": is_retryable_network_error(output),
+                "elapsed_ms": elapsed_ms,
+            })
+
+            # Fail closed immediately on integrity violation or corruption
+            if is_integrity_or_corruption_error(output):
+                raise RuntimeError(f"PyPI 镜像包校验失败 (不可降级重试): {output}")
+
+            # Fail closed immediately on local disk / permission error
+            if is_local_io_error(output):
+                raise RuntimeError(f"本地存储或权限受阻 (不可换源重试): {output}")
+
+            # Check if TLS retry is warranted
+            if category == FAIL_TLS_TRUST:
+                if tls_mode == TLS_MODE_UV_NATIVE and TLS_MODE_SYSTEM_CERTS not in tls_modes_to_try:
+                    log("uv 默认 CA 无法验证证书，正在使用 fnOS 系统 CA 重试...")
+                    tls_modes_to_try.append(TLS_MODE_SYSTEM_CERTS)
+                    continue
+                elif tls_mode == TLS_MODE_SYSTEM_CERTS and TLS_MODE_EXPLICIT_CA not in tls_modes_to_try:
+                    explicit_ca = find_explicit_ca_bundle()
+                    if explicit_ca:
+                        log(f"正在使用显式 CA 证书链 ({explicit_ca}) 重试...")
+                        tls_modes_to_try.append(TLS_MODE_EXPLICIT_CA)
+                        continue
+
+            # Non-TLS failure or TLS modes exhausted for this source
+            break
+
+        # If primary mirror failed with retryable error, proceed to official fallback
+        if is_mirror and is_retryable_network_error(last_err):
+            log(f"Cernet PyPI 镜像安装失败 ({last_err})，正在降级回退至官方源重试...")
+            continue
+        elif not is_mirror:
+            break
+        else:
+            raise RuntimeError(f"安装依赖失败 ({' '.join(packages[:3])}): {last_err}")
+
+    raise RuntimeError(format_user_friendly_network_error(last_err))
 
 
 def run_install_torch_with_fallback(
@@ -627,36 +698,106 @@ def run_install_torch_with_fallback(
     env: Dict[str, str],
     emit_fn: Optional[Callable[[str], None]] = None,
     timeout: int = 1800,
-) -> str:
-    """Installs PyTorch using Cernet PyTorch wheel mirror with official fallback.
+) -> InstallResult:
+    """Installs PyTorch using SJTUG wheel mirror with official fallback, layered TLS, and index separation."""
+    log = emit_fn or emit
+    sources = [
+        ("sjtug", get_torch_index_url(profile, use_mirror=True), get_pypi_index_url(use_mirror=True), True),
+        ("official", get_torch_index_url(profile, use_mirror=False), get_pypi_index_url(use_mirror=False), False),
+    ]
 
-    Returns download_source ("cernet-mirror" or "official").
-    Fails closed immediately on SHA mismatch or archive corruption.
-    """
-    primary_index = get_torch_index_url(profile, use_mirror=True)
-    cmd_primary = _pip_install_command(uv_bin, interp, venv_dir, [PINNED_TORCH_REQUIREMENT, "--index-url", primary_index])
-    retcode, stdout, stderr = runner(cmd_primary, env=env, timeout=timeout)
-    if retcode == 0:
-        return "cernet-mirror"
+    attempts: List[Dict[str, Any]] = []
+    last_err = ""
 
-    err1 = stderr.strip() or stdout.strip() or f"exit code {retcode}"
-    if is_integrity_or_corruption_error(err1):
-        raise RuntimeError(f"PyTorch 镜像包校验失败 (不可降级重试): {err1}")
+    for source_name, torch_index, pypi_index, is_mirror in sources:
+        # Build command ensuring index separation:
+        # torch from dedicated wheel index, general dependencies from PyPI
+        if uv_bin:
+            cmd_args = [
+                PINNED_TORCH_REQUIREMENT,
+                "--index", torch_index,
+                "--default-index", pypi_index,
+                "--index-strategy", "first-index",
+            ]
+        else:
+            cmd_args = [
+                PINNED_TORCH_REQUIREMENT,
+                "--index-url", torch_index,
+                "--extra-index-url", pypi_index,
+            ]
+        cmd = _pip_install_command(uv_bin, interp, venv_dir, cmd_args)
 
-    if is_retryable_network_error(err1):
-        if emit_fn:
-            emit_fn(f"Cernet PyTorch 镜像安装失败 ({err1})，正在降级回退至官方源重试...")
-        official_index = get_torch_index_url(profile, use_mirror=False)
-        cmd_official = _pip_install_command(uv_bin, interp, venv_dir, [PINNED_TORCH_REQUIREMENT, "--index-url", official_index])
-        retcode2, stdout2, stderr2 = runner(cmd_official, env=env, timeout=timeout)
-        if retcode2 == 0:
-            return "official"
-        err2 = stderr2.strip() or stdout2.strip() or f"exit code {retcode2}"
-        if is_integrity_or_corruption_error(err2):
-            raise RuntimeError(f"PyTorch 官方源包校验失败: {err2}")
-        raise RuntimeError(format_user_friendly_network_error(err2 or err1))
-    else:
-        raise RuntimeError(f"安装 PyTorch 失败: {err1}")
+        tls_modes_to_try = [TLS_MODE_UV_NATIVE]
+        idx = 0
+        while idx < len(tls_modes_to_try):
+            tls_mode = tls_modes_to_try[idx]
+            idx += 1
+
+            ca_bundle = find_explicit_ca_bundle() if tls_mode == TLS_MODE_EXPLICIT_CA else None
+            attempt_env = build_attempt_env(env, tls_mode, is_mirror=is_mirror, ca_bundle_path=ca_bundle)
+            attempt_cmd = list(cmd)
+            if tls_mode == TLS_MODE_EXPLICIT_CA and ca_bundle and uv_bin:
+                attempt_cmd.extend(["--cert", ca_bundle])
+
+            start_t = time.time()
+            retcode, stdout, stderr = runner(attempt_cmd, env=attempt_env, timeout=timeout)
+            elapsed_ms = int((time.time() - start_t) * 1000)
+
+            if retcode == 0:
+                attempts.append({
+                    "source": source_name,
+                    "tls_mode": tls_mode,
+                    "result": "success",
+                    "retryable": False,
+                    "elapsed_ms": elapsed_ms,
+                })
+                return InstallResult(source_name, tls_mode, attempts)
+
+            output = stderr.strip() or stdout.strip() or f"exit code {retcode}"
+            last_err = output
+            category = classify_uv_failure(output)
+            attempts.append({
+                "source": source_name,
+                "tls_mode": tls_mode,
+                "result": category.lower(),
+                "retryable": is_retryable_network_error(output),
+                "elapsed_ms": elapsed_ms,
+            })
+
+            # Fail closed immediately on integrity violation or corruption
+            if is_integrity_or_corruption_error(output):
+                raise RuntimeError(f"PyTorch 镜像包校验失败 (不可降级重试): {output}")
+
+            # Fail closed immediately on local disk / permission error
+            if is_local_io_error(output):
+                raise RuntimeError(f"本地存储或权限受阻 (不可换源重试): {output}")
+
+            # Check if TLS retry is warranted
+            if category == FAIL_TLS_TRUST:
+                if tls_mode == TLS_MODE_UV_NATIVE and TLS_MODE_SYSTEM_CERTS not in tls_modes_to_try:
+                    log("uv 默认 CA 无法验证证书，正在使用 fnOS 系统 CA 重试...")
+                    tls_modes_to_try.append(TLS_MODE_SYSTEM_CERTS)
+                    continue
+                elif tls_mode == TLS_MODE_SYSTEM_CERTS and TLS_MODE_EXPLICIT_CA not in tls_modes_to_try:
+                    explicit_ca = find_explicit_ca_bundle()
+                    if explicit_ca:
+                        log(f"正在使用显式 CA 证书链 ({explicit_ca}) 重试...")
+                        tls_modes_to_try.append(TLS_MODE_EXPLICIT_CA)
+                        continue
+
+            # Non-TLS failure or TLS modes exhausted for this source
+            break
+
+        # If primary mirror failed with retryable error, proceed to official fallback
+        if is_mirror and is_retryable_network_error(last_err):
+            log(f"SJTUG PyTorch 镜像安装失败 ({last_err})，正在降级回退至官方源重试...")
+            continue
+        elif not is_mirror:
+            break
+        else:
+            raise RuntimeError(f"安装 PyTorch 失败: {last_err}")
+
+    raise RuntimeError(format_user_friendly_network_error(last_err))
 
 
 # Base runtime compatibility contract: checked EVEN when the profile probe
@@ -1032,7 +1173,9 @@ def rebuild_runtime(
                 raise RuntimeError(f"创建临时虚拟环境失败: {stderr.strip() or stdout.strip()}")
 
             pypi_sources: set[str] = set()
+            pypi_tls_modes: set[str] = set()
             torch_source: str = "unknown"
+            torch_tls_mode: str = "uv-native"
 
             log_emit(f"正在临时环境中安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
             s1 = run_install_pypi_with_fallback(
@@ -1044,11 +1187,13 @@ def rebuild_runtime(
                 env=uv_env,
                 emit_fn=log_emit,
             )
-            pypi_sources.add(s1)
+            pypi_sources.add(s1.source if hasattr(s1, "source") else str(s1))
+            if hasattr(s1, "tls_mode"):
+                pypi_tls_modes.add(s1.tls_mode)
 
             if profile == PROFILE_TORCH_CPU:
                 log_emit(f"正在安装 PyTorch CPU ({PINNED_TORCH_REQUIREMENT})...")
-                torch_source = run_install_torch_with_fallback(
+                s_torch = run_install_torch_with_fallback(
                     runner=runner,
                     uv_bin=uv_bin,
                     interp=staging_interp,
@@ -1057,6 +1202,9 @@ def rebuild_runtime(
                     env=uv_env,
                     emit_fn=log_emit,
                 )
+                torch_source = s_torch.source if hasattr(s_torch, "source") else str(s_torch)
+                if hasattr(s_torch, "tls_mode"):
+                    torch_tls_mode = s_torch.tls_mode
                 log_emit("正在恢复 Base Runtime Contract (transformers, accelerate, gliner)...")
                 s2 = run_install_pypi_with_fallback(
                     runner=runner,
@@ -1067,10 +1215,12 @@ def rebuild_runtime(
                     env=uv_env,
                     emit_fn=log_emit,
                 )
-                pypi_sources.add(s2)
+                pypi_sources.add(s2.source if hasattr(s2, "source") else str(s2))
+                if hasattr(s2, "tls_mode"):
+                    pypi_tls_modes.add(s2.tls_mode)
             elif profile == PROFILE_TORCH_CUDA:
                 log_emit(f"正在安装 PyTorch CUDA ({PINNED_TORCH_REQUIREMENT})...")
-                torch_source = run_install_torch_with_fallback(
+                s_torch = run_install_torch_with_fallback(
                     runner=runner,
                     uv_bin=uv_bin,
                     interp=staging_interp,
@@ -1079,6 +1229,9 @@ def rebuild_runtime(
                     env=uv_env,
                     emit_fn=log_emit,
                 )
+                torch_source = s_torch.source if hasattr(s_torch, "source") else str(s_torch)
+                if hasattr(s_torch, "tls_mode"):
+                    torch_tls_mode = s_torch.tls_mode
                 log_emit("正在恢复 Base Runtime Contract (transformers, accelerate, gliner)...")
                 s2 = run_install_pypi_with_fallback(
                     runner=runner,
@@ -1089,7 +1242,9 @@ def rebuild_runtime(
                     env=uv_env,
                     emit_fn=log_emit,
                 )
-                pypi_sources.add(s2)
+                pypi_sources.add(s2.source if hasattr(s2, "source") else str(s2))
+                if hasattr(s2, "tls_mode"):
+                    pypi_tls_modes.add(s2.tls_mode)
 
             if aggregated_deps:
                 deps_list = sorted(aggregated_deps)
@@ -1103,13 +1258,21 @@ def rebuild_runtime(
                     env=uv_env,
                     emit_fn=log_emit,
                 )
-                pypi_sources.add(s3)
+                pypi_sources.add(s3.source if hasattr(s3, "source") else str(s3))
+                if hasattr(s3, "tls_mode"):
+                    pypi_tls_modes.add(s3.tls_mode)
 
-            pypi_source_final = "official" if "official" in pypi_sources else "cernet-mirror"
+            pypi_source_final = "official" if "official" in pypi_sources and len(pypi_sources) == 1 else ("cernet" if any("cernet" in s for s in pypi_sources) else ("official" if "official" in pypi_sources else "cernet"))
+            pypi_tls_final = "system-certs" if "system-certs" in pypi_tls_modes else ("explicit-ca" if "explicit-ca" in pypi_tls_modes else "uv-native")
             download_sources_telemetry = {
+                "managed_python": py_download_source,
                 "python": py_download_source,
                 "pypi": pypi_source_final,
                 "torch": torch_source,
+            }
+            tls_modes_telemetry = {
+                "pypi": pypi_tls_final,
+                "torch": torch_tls_mode,
             }
 
             # Validate staging interpreter native capabilities
@@ -1156,6 +1319,7 @@ def rebuild_runtime(
                 "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
                 "profile": profile,
                 "created_at": int(time.time()),
+                "created_by": "AIPrivacyCheck/0.6.14",
                 "uv": {
                     "version": UV_VERSION,
                     "source": uv_source,
@@ -1175,6 +1339,7 @@ def rebuild_runtime(
                 "torch_version": actual_torch_version,
                 "cuda_available": profile == PROFILE_TORCH_CUDA,
                 "download_sources": download_sources_telemetry,
+                "tls_modes": tls_modes_telemetry,
             }
             (staging_venv / "runtime-manifest.json").write_text(
                 json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1205,6 +1370,7 @@ def rebuild_runtime(
                 "transformers_requirement": TRANSFORMERS_REQUIREMENT,
                 "packages": staged_packages,
                 "download_sources": download_sources_telemetry,
+                "tls_modes": tls_modes_telemetry,
             }
 
             try:
@@ -1490,6 +1656,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
     env_pip = build_uv_env(data_dir) if uv_bin else build_runtime_env(data_dir)
 
     pypi_sources: set[str] = set()
+    pypi_tls_modes: set[str] = set()
     emit(f"正在安装 [{profile}] 基础依赖 (modelscope, numpy, packaging, tqdm)...")
     s1 = run_install_pypi_with_fallback(
         runner=_default_dependency_runner,
@@ -1500,12 +1667,15 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         env=env_pip,
         emit_fn=emit,
     )
-    pypi_sources.add(s1)
+    pypi_sources.add(s1.source if hasattr(s1, "source") else str(s1))
+    if hasattr(s1, "tls_mode"):
+        pypi_tls_modes.add(s1.tls_mode)
 
     torch_source: str = "unknown"
+    torch_tls_mode: str = "uv-native"
     if profile == PROFILE_TORCH_CPU:
         emit(f"正在安装 [{profile}] PyTorch CPU ({PINNED_TORCH_REQUIREMENT})...")
-        torch_source = run_install_torch_with_fallback(
+        s_torch = run_install_torch_with_fallback(
             runner=_default_dependency_runner,
             uv_bin=uv_bin,
             interp=interp,
@@ -1514,6 +1684,9 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
             env=env_pip,
             emit_fn=emit,
         )
+        torch_source = s_torch.source if hasattr(s_torch, "source") else str(s_torch)
+        if hasattr(s_torch, "tls_mode"):
+            torch_tls_mode = s_torch.tls_mode
         s2 = run_install_pypi_with_fallback(
             runner=_default_dependency_runner,
             uv_bin=uv_bin,
@@ -1523,10 +1696,12 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
             env=env_pip,
             emit_fn=emit,
         )
-        pypi_sources.add(s2)
+        pypi_sources.add(s2.source if hasattr(s2, "source") else str(s2))
+        if hasattr(s2, "tls_mode"):
+            pypi_tls_modes.add(s2.tls_mode)
     elif profile == PROFILE_TORCH_CUDA:
         emit(f"正在安装 [{profile}] PyTorch CUDA (cu124) ({PINNED_TORCH_REQUIREMENT})...")
-        torch_source = run_install_torch_with_fallback(
+        s_torch = run_install_torch_with_fallback(
             runner=_default_dependency_runner,
             uv_bin=uv_bin,
             interp=interp,
@@ -1535,6 +1710,9 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
             env=env_pip,
             emit_fn=emit,
         )
+        torch_source = s_torch.source if hasattr(s_torch, "source") else str(s_torch)
+        if hasattr(s_torch, "tls_mode"):
+            torch_tls_mode = s_torch.tls_mode
         s2 = run_install_pypi_with_fallback(
             runner=_default_dependency_runner,
             uv_bin=uv_bin,
@@ -1544,12 +1722,21 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
             env=env_pip,
             emit_fn=emit,
         )
-        pypi_sources.add(s2)
+        pypi_sources.add(s2.source if hasattr(s2, "source") else str(s2))
+        if hasattr(s2, "tls_mode"):
+            pypi_tls_modes.add(s2.tls_mode)
 
+    pypi_source_final = "official" if "official" in pypi_sources and len(pypi_sources) == 1 else ("cernet" if any("cernet" in s for s in pypi_sources) else ("official" if "official" in pypi_sources else "cernet"))
+    pypi_tls_final = "system-certs" if "system-certs" in pypi_tls_modes else ("explicit-ca" if "explicit-ca" in pypi_tls_modes else "uv-native")
     download_sources_telemetry = {
+        "managed_python": "existing-local" if managed_python else "system",
         "python": "managed" if managed_python else "system",
-        "pypi": "official" if "official" in pypi_sources else "cernet-mirror",
+        "pypi": pypi_source_final,
         "torch": torch_source,
+    }
+    tls_modes_telemetry = {
+        "pypi": pypi_tls_final,
+        "torch": torch_tls_mode,
     }
 
     # Run genuine probe verification via isolated interpreter
@@ -1565,6 +1752,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "schema_version": RUNTIME_MANIFEST_SCHEMA_VERSION,
         "profile": profile,
         "created_at": int(time.time()),
+        "created_by": "AIPrivacyCheck/0.6.14",
         "python_runtime_source": "managed" if managed_python else "system",
         "python_runtime_version": MANAGED_PYTHON_VERSION if managed_python else sys.version.split()[0],
         "python_interpreter": str(interp),
@@ -1576,6 +1764,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "torch_version": probed_torch,
         "cuda_available": probe_result.get("cuda_available", False),
         "download_sources": download_sources_telemetry,
+        "tls_modes": tls_modes_telemetry,
     }
     (profile_dir / "runtime-manifest.json").write_text(
         json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1589,6 +1778,7 @@ def install_isolated_runtime(data_dir: Path, profile: str) -> Path:
         "packages": probe_result.get("packages", {}),
         "transformers_requirement": TRANSFORMERS_REQUIREMENT,
         "download_sources": download_sources_telemetry,
+        "tls_modes": tls_modes_telemetry,
     }
     installed_file.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     emit(f"运行时 [{profile}] 环境部署完成。")
