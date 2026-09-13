@@ -358,7 +358,77 @@ EXACT_RULES = (
 )
 
 
+def _is_valid_password_value(val: str) -> bool:
+    if not val:
+        return False
+    val = val.strip()
+    if len(val) < 6 or len(val) > 256:
+        return False
+    # Placeholders, templates, env vars
+    if val.startswith(("${", "{{", "<", "[", "(", '"', "'")):
+        return False
+    if val.endswith(("}", ">", "]", ")", '"', "'")):
+        return False
+    if any(p in val for p in ["${", "{{", "os.environ", "environ[", "env[", "process.env"]):
+        return False
+    # Masked or hidden tokens
+    if "*" in val or "•" in val:
+        return False
+    if any(h in val for h in ["已隐藏", "未设置", "REDACTED", "placeholder", "example", "from prompt", "见保险箱", "dummy"]):
+        return False
+    # Literals
+    if val.lower() in {"null", "none", "nil", "undefined", "true", "false", "password", "passwd", "secret"}:
+        return False
+    # CJK sentence words or prose
+    if any(ch in val for ch in "的是了在和与或很不策略要求规范"):
+        return False
+    # Must have at least some alphanumeric characters
+    if not re.search(r"[A-Za-z0-9]", val):
+        return False
+    return True
+
+
+PASSWORD_KEY_PATTERN = (
+    r"(?<![A-Za-z0-9_])"
+    r"(?:APP_PASSWORD|DB_PASSWORD|PASSWORD|PASSWD|Temporary\s+Password|temp\s+password|"
+    r"initial\s+password|admin\s+password|root\s+password|login\s+password|master\s+password|"
+    r"临时密码|初始密码|登录密码|用户密码|开机密码|支付密码|管理密码|账户密码|密码|口令|"
+    r"Passwort|Kennwort|temporäres\s+Passwort|mot\s+de\s+passe|mot\s+de\s+passe\s+temporaire|"
+    r"contraseña|contraseña\s+temporal|パスワード|初期パスワード|仮パスワード|비밀번호|임시\s*비밀번호|"
+    r"كلمة\s+المرور\s+التجريبية|كلمة\s+المرور|รหัสผ่าน|รหัสผ่านชั่วคราว)"
+    r"(?![A-Za-z0-9_])"
+)
+
+PASSWORD_DELIM_PATTERN = (
+    r"(?:[ \t]*[=＝][ \t]*|[ \t]*[:：][ \t]*(?:\r?\n[ \t]*)?|[ \t]+(?:is|was|ist|lautet|est|es|为|是|هو|هي|คือ)[ \t]*)"
+)
+
+
 CONTEXT_RULES = (
+    # Structured Quoted Password
+    RegexRule(
+        "PASSWORD",
+        _compile(
+            PASSWORD_KEY_PATTERN + PASSWORD_DELIM_PATTERN + r"[\"']([^\r\n\"']{6,256})[\"']",
+            re.IGNORECASE,
+        ),
+        0.98,
+        group=1,
+        validator=_is_valid_password_value,
+        validated=True,
+    ),
+    # Structured Unquoted Password
+    RegexRule(
+        "PASSWORD",
+        _compile(
+            PASSWORD_KEY_PATTERN + PASSWORD_DELIM_PATTERN + r"([^\s\"'`]{6,256})",
+            re.IGNORECASE,
+        ),
+        0.97,
+        group=1,
+        validator=_is_valid_password_value,
+        validated=True,
+    ),
     RegexRule(
         "SECRET",
         _compile(
@@ -523,9 +593,20 @@ CONTEXT_RULES = (
     ),
     RegexRule(
         "CN_BIRTH_DATE",
-        _compile(r"(?:出生日期|出生年月|生日)\s*[：:=]?\s*((?:19|20)\d{2}(?:[-/.年](?:0?[1-9]|1[0-2])(?:[-/.月](?:0?[1-9]|[12]\d|3[01])日?)?))"),
-        0.93,
+        _compile(
+            r"(?:出生日期|出生年月|生日)\s*(?:[：:=]|为|是)?\s*"
+            r"((?:19|20)\d{2}(?:"
+            r"年(?:1[0-2]|0?[1-9])月(?:3[01]|[12]\d|0?[1-9])[日号]?"
+            r"|年(?:1[0-2]|0?[1-9])月?"
+            r"|-(?:1[0-2]|0?[1-9])-(?:3[01]|[12]\d|0?[1-9])"
+            r"|/(?:1[0-2]|0?[1-9])/(?:3[01]|[12]\d|0?[1-9])"
+            r"|\.(?:1[0-2]|0?[1-9])\.(?:3[01]|[12]\d|0?[1-9])"
+            r"|[-/.](?:1[0-2]|0?[1-9])"
+            r"))"
+        ),
+        0.95,
         group=1,
+        validated=True,
     ),
     RegexRule(
         "CN_SOCIAL_ACCOUNT",
@@ -704,6 +785,11 @@ def _entity_from_match(text: str, rule: RegexRule, match: Match[str]) -> Optiona
     start += left_trim
     end -= right_trim
     value = text[start:end]
+    if rule.entity_type == "PASSWORD":
+        punc_trimmed = value.rstrip("。，,;；")
+        if punc_trimmed:
+            end -= (len(value) - len(punc_trimmed))
+            value = punc_trimmed
     if not value or (rule.validator is not None and not rule.validator(value)):
         return None
     # Placeholder / documentation allowlist (Gitleaks precedent: AWS
